@@ -1,0 +1,6 @@
+
+wxPython>=4.1.0
+requests>=2.28.0
+pillow>=9.0.0
+pywin32>=300; platform_system == 'Windows'
+pyinstaller>=5.0.0
