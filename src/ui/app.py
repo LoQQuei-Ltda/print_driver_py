@@ -34,6 +34,7 @@ class PrintManagementApp(wx.App):
         self.api_client = None
         self.auth_manager = None
         self.theme_manager = None
+        self.scheduler = None
         
         # Flag para controlar se estamos em segundo plano
         self.running_in_background = False
@@ -85,6 +86,19 @@ class PrintManagementApp(wx.App):
             
             # Configura o gerenciador de temas
             self.theme_manager = ThemeManager(self.config)
+            
+            # Configura o agendador de tarefas
+            from src.utils import TaskScheduler
+            from src.tasks import update_printers_task
+            
+            self.scheduler = TaskScheduler()
+            self.scheduler.add_task(
+                "update_printers",
+                update_printers_task,
+                3600,  # Atualiza a cada hora
+                args=(self.api_client, self.config)
+            )
+            self.scheduler.start()
             
             # Cria a tela de login
             self.login_screen = LoginScreen(

@@ -9,5 +9,14 @@ from .auth import AuthManager, AuthError
 from .theme import ThemeManager
 from .pdf import PDFUtils
 from .printer_utils import PrinterUtils
+from .scheduler import TaskScheduler, Task
 
-__all__ = ['AuthManager', 'AuthError', 'ThemeManager', 'PDFUtils', 'PrinterUtils']
+__all__ = [
+    'AuthManager', 
+    'AuthError', 
+    'ThemeManager', 
+    'PDFUtils', 
+    'PrinterUtils',
+    'TaskScheduler',
+    'Task'
+]

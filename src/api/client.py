@@ -86,9 +86,34 @@ class APIClient:
             
             response.raise_for_status()
             
-            return response.json() if response.content else {}
+            # Verifica se a resposta contém dados
+            if response.content:
+                try:
+                    # Tenta obter o JSON da resposta
+                    response_data = response.json()
+                    
+                    # Se a resposta contém um campo "data", retorna apenas esse campo
+                    if "data" in response_data:
+                        return response_data["data"]
+                    
+                    # Caso contrário, retorna o objeto completo
+                    return response_data
+                except ValueError:
+                    # Se não for um JSON válido, retorna o conteúdo em texto
+                    return {"message": response.text}
+            else:
+                # Resposta vazia
+                return {}
             
-        except RequestException as e:
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Erro de conexão na requisição API {method} {url}: {str(e)}")
+            raise APIError("Não foi possível conectar ao servidor. Verifique sua conexão com a internet.", 0)
+            
+        except requests.exceptions.Timeout as e:
+            logger.error(f"Tempo limite excedido na requisição API {method} {url}: {str(e)}")
+            raise APIError("Tempo limite de conexão excedido. O servidor está demorando para responder.", 408)
+            
+        except requests.exceptions.RequestException as e:
             logger.error(f"Erro na requisição API {method} {url}: {str(e)}")
             
             if hasattr(e, 'response') and e.response is not None:
@@ -98,6 +123,16 @@ class APIClient:
                     error_message = error_data.get('message', str(e))
                 except ValueError:
                     error_message = e.response.text or str(e)
+                
+                # Mensagens de erro mais amigáveis para códigos de status comuns
+                if status_code == 401:
+                    error_message = "Não autorizado. Verifique suas credenciais ou faça login novamente."
+                elif status_code == 403:
+                    error_message = "Acesso negado. Você não tem permissão para acessar este recurso."
+                elif status_code == 404:
+                    error_message = f"Recurso não encontrado: {endpoint}"
+                elif status_code == 500:
+                    error_message = "Erro interno do servidor. Tente novamente mais tarde."
             else:
                 status_code = 0
                 error_message = str(e)
@@ -122,9 +157,11 @@ class APIClient:
         
         try:
             response = self._make_request("POST", "/login/desktop", data)
+            
             if "token" in response:
-                self.set_token(response["data"]["token"])
-            return response["data"]
+                self.set_token(response["token"])
+
+            return response
         except APIError as e:
             if e.status_code == 401:
                 raise APIError("Email ou senha inválidos", 401)
@@ -137,7 +174,22 @@ class APIClient:
         Returns:
             list: Lista de impressoras com nome e mac_address
         """
-        return self._make_request("GET", "/printers")
+        try:
+            result = self._make_request("GET", "/desktop/printers")
+            
+            # Verifica se o resultado é uma lista
+            if isinstance(result, list):
+                print(result)
+                return result
+            # Se não for uma lista, retorna uma lista vazia
+            return []
+        except APIError as e:
+            # Se recebermos um erro 404, retornamos uma lista vazia
+            if e.status_code == 404:
+                logger.warning("Endpoint de impressoras não encontrado. Retornando lista vazia.")
+                return []
+            # Propaga outros erros
+            raise
     
     def get_user_documents(self):
         """
@@ -146,7 +198,21 @@ class APIClient:
         Returns:
             list: Lista de documentos com nome, path, tamanho e data
         """
-        return self._make_request("GET", "/documents")
+        try:
+            result = self._make_request("GET", "/documents")
+            
+            # Verifica se o resultado é uma lista
+            if isinstance(result, list):
+                return result
+            # Se não for uma lista, retorna uma lista vazia
+            return []
+        except APIError as e:
+            # Se recebermos um erro 404, retornamos uma lista vazia
+            if e.status_code == 404:
+                logger.warning("Endpoint de documentos não encontrado. Retornando lista vazia.")
+                return []
+            # Propaga outros erros
+            raise
     
     def delete_document(self, document_id):
         """

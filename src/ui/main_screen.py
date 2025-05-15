@@ -4,12 +4,13 @@
 """
 Tela principal da aplicação
 """
-
 import os
 import wx
 import logging
+import requests
 import threading
 import time
+from io import BytesIO
 from wx.adv import TaskBarIcon
 from src.models.document import Document
 from src.models.printer import Printer
@@ -219,27 +220,77 @@ class MainScreen(wx.Frame):
         user_info = self.auth_manager.get_current_user()
         user_name = user_info.get("name", user_info.get("email", "Usuário"))
         user_initial = user_name[0].upper() if user_name else "U"
+
+        user_picture = user_info.get("picture", "")
         
         avatar_size = 40
-        # Correção: size= ao invés de size()
         avatar_panel = wx.Panel(user_panel, size=(avatar_size, avatar_size))
         avatar_panel.SetBackgroundColour(colors["accent_color"])
         
         def on_avatar_paint(event):
             dc = wx.PaintDC(avatar_panel)
+            
+            # Draw the circular background first
             dc.SetBrush(wx.Brush(colors["accent_color"]))
             dc.SetPen(wx.Pen(colors["accent_color"]))
-            # Convertendo valores float para int
             dc.DrawCircle(int(avatar_size/2), int(avatar_size/2), int(avatar_size/2))
             
-            dc.SetTextForeground(wx.WHITE)
-            font = wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
-            dc.SetFont(font)
-            
-            text_width, text_height = dc.GetTextExtent(user_initial)
-            # Convertendo valores float para int
-            dc.DrawText(user_initial, int((avatar_size - text_width) / 2), int((avatar_size - text_height) / 2))
-        
+            user_picture_ok = False
+            if user_picture:
+                try:
+                    response = requests.get(user_picture)
+                    response.raise_for_status()
+                    
+                    # Create an image from the response content
+                    image_stream = BytesIO(response.content)
+                    
+                    # Use wx.ImageFromStream instead of direct construction
+                    img = wx.Image(image_stream)
+                    
+                    if img.IsOk():
+                        # Resize the image to fit the avatar circle
+                        img = img.Scale(avatar_size, avatar_size)
+                        avatar_bitmap = wx.Bitmap(img)
+                        
+                        # Create a memory DC for compositing
+                        memDC = wx.MemoryDC()
+                        memDC.SelectObject(wx.Bitmap(avatar_size, avatar_size))
+                        
+                        # Fill with transparent background
+                        memDC.SetBackground(wx.Brush(wx.Colour(0, 0, 0, 0)))
+                        memDC.Clear()
+                        
+                        # Draw the circle first
+                        memDC.SetBrush(wx.Brush(colors["accent_color"]))
+                        memDC.SetPen(wx.Pen(colors["accent_color"]))
+                        memDC.DrawCircle(int(avatar_size/2), int(avatar_size/2), int(avatar_size/2))
+                        
+                        # Then draw the image
+                        memDC.SetClippingRegion(0, 0, avatar_size, avatar_size)
+                        memDC.DrawBitmap(avatar_bitmap, 0, 0)
+                        
+                        # Now draw the result to our actual DC
+                        result_bitmap = memDC.GetAsBitmap()
+                        memDC.SelectObject(wx.NullBitmap)
+                        
+                        dc.DrawBitmap(result_bitmap, 0, 0)
+                        user_picture_ok = True
+                    else:
+                        print("Erro ao carregar a imagem.")
+                except requests.exceptions.RequestException as e:
+                    print(f"Erro ao baixar a imagem: {e}")
+                except Exception as e:
+                    print(f"Erro ao processar a imagem: {e}")
+                    
+            # If no picture or failed to load, draw the initial
+            if not user_picture_ok:
+                dc.SetTextForeground(wx.WHITE)
+                font = wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+                dc.SetFont(font)
+                text_width, text_height = dc.GetTextExtent(user_initial)
+                dc.DrawText(user_initial, int((avatar_size - text_width) / 2), int((avatar_size - text_height) / 2))
+
+
         avatar_panel.Bind(wx.EVT_PAINT, on_avatar_paint)
         
         # Nome do usuário
@@ -257,7 +308,7 @@ class MainScreen(wx.Frame):
         # Menu itens
         menu_items = [
             {"label": "Documentos", "icon": "document.png", "handler": self.on_show_documents},
-            {"label": "Sistema", "icon": "system.png", "handler": self.on_show_system},
+            {"label": "Impressoras", "icon": "system.png", "handler": self.on_show_printers},
         ]
         
         # Criar os botões do menu
@@ -483,32 +534,85 @@ class MainScreen(wx.Frame):
         """Mostra a tela de documentos"""
         self.content_title.SetLabel("Arquivos para Impressão")
         
+        # Atualiza o texto do botão de refresh
+        if hasattr(self, 'refresh_button'):
+            self.refresh_button.SetLabel("Atualizar")
+        
+        # Esconde o painel de impressoras se existir
+        if hasattr(self, 'printer_list_panel'):
+            self.printer_list_panel.Hide()
+            
         # Recarrega os documentos
         self.load_documents()
     
-    def on_show_system(self, event=None):
-        """Mostra a tela de sistema"""
-        self.content_title.SetLabel("Sistema")
+    def on_show_printers(self, event=None):
+        """Mostra a tela de impressoras"""
+        self.content_title.SetLabel("Impressoras")
+        
+        # Atualiza o texto do botão de refresh
+        if hasattr(self, 'refresh_button'):
+            self.refresh_button.SetLabel("Atualizar Impressoras")
         
         # Esconde a lista de documentos e a mensagem de nenhum arquivo
         self.files_list.Hide()
         self.no_files_panel.Hide()
         
-        # TODO: Implementar conteúdo da tela de sistema
+        # Mostra o painel de impressoras
+        if not hasattr(self, 'printer_list_panel'):
+            from src.ui.printer_list import PrinterListPanel
+            self.printer_list_panel = PrinterListPanel(
+                self.content_panel,
+                self.theme_manager,
+                self.config,
+                self.api_client,
+                self.on_printers_updated
+            )
+            self.content_panel.GetSizer().Add(self.printer_list_panel, 1, wx.EXPAND)
+        
+        self.printer_list_panel.Show()
+        self.printer_list_panel.load_printers()
         
         # Atualiza o layout
         self.content_panel.Layout()
     
+    def on_printers_updated(self, printers):
+        """
+        Callback chamado quando as impressoras são atualizadas
+        
+        Args:
+            printers (list): Lista de impressoras
+        """
+        # Atualiza a lista local de impressoras
+        self.printers = printers
+    
     def on_update_printers(self, event=None):
-        """Atualiza impressoras com o servidor principal"""
+        """Atualiza as impressoras com o servidor principal"""
         try:
+            # Mostra um indicador de progresso
+            busy = wx.BusyInfo("Atualizando impressoras do servidor. Aguarde...", parent=self)
+            wx.GetApp().Yield()
+            
             # Obtém as impressoras da API
             printers_data = self.api_client.get_printers()
             
-            # Converte para objetos Printer
-            self.printers = [Printer(printer_data) for printer_data in printers_data]
+            # Converte para objetos Printer e depois para dicionários
+            printers = [Printer(printer_data).to_dict() for printer_data in printers_data]
             
-            wx.MessageBox(f"{len(self.printers)} impressoras atualizadas com sucesso!", 
+            # Salva as impressoras no config
+            self.config.set_printers(printers)
+            
+            # Recarrega a lista
+            self.load_printers()
+            
+            # Chama o callback se existir
+            if self.on_update:
+                self.on_update(printers)
+            
+            # Remove o indicador de progresso
+            del busy
+            
+            # Mostra mensagem de sucesso
+            wx.MessageBox(f"{len(printers)} impressoras atualizadas com sucesso!", 
                          "Informação", wx.OK | wx.ICON_INFORMATION)
         except Exception as e:
             logger.error(f"Erro ao atualizar impressoras: {str(e)}")
@@ -529,8 +633,20 @@ class MainScreen(wx.Frame):
         self.content_panel.Layout()
     
     def on_refresh(self, event=None):
-        """Atualiza a lista de documentos"""
-        self.load_documents()
+        """Atualiza o conteúdo da tela atual"""
+        current_title = self.content_title.GetLabel()
+        
+        if current_title == "Arquivos para Impressão":
+            # Estamos na tela de documentos
+            self.load_documents()
+        elif current_title == "Impressoras":
+            # Estamos na tela de impressoras
+            if hasattr(self, 'printer_list_panel'):
+                self.printer_list_panel.on_update_printers()
+        else:
+            # Outra tela
+            wx.MessageBox("Funcionalidade não implementada para esta tela.", 
+                         "Informação", wx.OK | wx.ICON_INFORMATION)
     
     def load_documents(self):
         """Carrega a lista de documentos"""
@@ -538,31 +654,52 @@ class MainScreen(wx.Frame):
         self.files_list.DeleteAllItems()
         
         try:
-            # Obtém documentos da API
-            documents_data = self.api_client.get_user_documents()
+            # Adiciona item de carregamento
+            self.files_list.InsertItem(0, "Carregando...")
+            wx.GetApp().Yield()
             
-            # Converte para objetos Document
-            self.documents = [Document(doc_data) for doc_data in documents_data]
-            
-            if self.documents:
-                # Esconde a mensagem de nenhum arquivo
-                self.no_files_panel.Hide()
-                self.files_list.Show()
+            try:
+                # Obtém documentos da API
+                documents_data = self.api_client.get_user_documents()
                 
-                # Adiciona documentos à lista
-                for i, doc in enumerate(self.documents):
-                    self.files_list.InsertItem(i, doc.name)
-                    self.files_list.SetItem(i, 1, doc.formatted_date)
-                    self.files_list.SetItem(i, 2, doc.formatted_size)
+                # Converte para objetos Document
+                self.documents = [Document(doc_data) for doc_data in documents_data]
+                
+                # Limpa o item de carregamento
+                self.files_list.DeleteAllItems()
+                
+                if self.documents:
+                    # Esconde a mensagem de nenhum arquivo
+                    self.no_files_panel.Hide()
+                    self.files_list.Show()
                     
-                    # Se tivermos informação de páginas, adicionamos
-                    pages = "?" # Por padrão, não sabemos o número de páginas
-                    self.files_list.SetItem(i, 3, pages)
+                    # Adiciona documentos à lista
+                    for i, doc in enumerate(self.documents):
+                        self.files_list.InsertItem(i, doc.name)
+                        self.files_list.SetItem(i, 1, doc.formatted_date)
+                        self.files_list.SetItem(i, 2, doc.formatted_size)
+                        
+                        # Se tivermos informação de páginas, adicionamos
+                        pages = "?" # Por padrão, não sabemos o número de páginas
+                        self.files_list.SetItem(i, 3, pages)
                     
-            else:
-                # Mostra a mensagem de nenhum arquivo
-                self.no_files_panel.Show()
-                self.files_list.Hide()
+                else:
+                    # Mostra a mensagem de nenhum arquivo
+                    self.no_files_panel.Show()
+                    self.files_list.Hide()
+            
+            except Exception as e:
+                # Captura específica para erros de API
+                logger.error(f"Erro ao carregar documentos da API: {str(e)}")
+                self.files_list.DeleteAllItems()
+                self.files_list.Show()
+                self.no_files_panel.Hide()
+                
+                # Adiciona mensagem de erro à lista
+                self.files_list.InsertItem(0, f"Erro ao carregar documentos: {str(e)}")
+                self.files_list.SetItem(0, 1, "")
+                self.files_list.SetItem(0, 2, "")
+                self.files_list.SetItem(0, 3, "")
             
             # Atualiza o layout
             self.content_panel.Layout()
@@ -745,6 +882,10 @@ class MainScreen(wx.Frame):
         
         # Para o monitoramento de pastas se estiver ativo
         self._stop_folder_monitoring()
+        
+        # Para o agendador de tarefas
+        if self.scheduler:
+            self.scheduler.stop()
         
         # Remove o ícone da bandeja
         if self.taskbar_icon:

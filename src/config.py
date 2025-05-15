@@ -200,3 +200,22 @@ class AppConfig:
         if theme in ["dark", "light"]:
             self.config["theme"] = theme
             self._save_config(self.config)
+            
+    def get_printers(self):
+        """
+        Obtém a lista de impressoras salvas
+        
+        Returns:
+            list: Lista de impressoras
+        """
+        return self.config.get("printers", [])
+
+    def set_printers(self, printers):
+        """
+        Define a lista de impressoras
+        
+        Args:
+            printers (list): Lista de impressoras
+        """
+        self.config["printers"] = printers
+        self._save_config(self.config)
