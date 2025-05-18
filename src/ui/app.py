@@ -100,6 +100,13 @@ class PrintManagementApp(wx.App):
             )
             self.scheduler.start()
             
+            # Auto login
+            if self.auth_manager.auto_login():
+                logger.info("Auto-login bem-sucedido")
+                self.login_screen = None
+                self.on_login_success()
+                return True
+
             # Cria a tela de login
             self.login_screen = LoginScreen(
                 None,
