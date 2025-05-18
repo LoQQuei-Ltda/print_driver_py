@@ -41,6 +41,7 @@ basic_requires = [
     "appdirs>=1.4.4",
     "pyyaml>=6.0.1",
     "pillow>=10.0.1",
+    "watchdog>=2.3.0",  # Adicionado para monitoramento de diretórios
 ]
 
 # Configuração principal
@@ -102,6 +103,7 @@ if 'bdist_pyinstaller' in sys.argv:
             '--hidden-import=PyPDF2',
             '--hidden-import=appdirs',
             '--hidden-import=yaml',
+            '--hidden-import=watchdog',  # Adicionado watchdog como dependência oculta
             '--clean',
             'main.py',
         ]

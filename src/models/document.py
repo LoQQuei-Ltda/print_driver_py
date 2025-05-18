@@ -28,6 +28,7 @@ class Document:
         self.path = document_data.get("path", "")
         self.size = document_data.get("size", 0)
         self.created_at = document_data.get("created_at", "")
+        self.pages = document_data.get("pages", 0)  # Adicionado campo de páginas
     
     def to_dict(self):
         """
@@ -41,7 +42,8 @@ class Document:
             "name": self.name,
             "path": self.path,
             "size": self.size,
-            "created_at": self.created_at
+            "created_at": self.created_at,
+            "pages": self.pages  # Adicionado campo de páginas
         }
     
     @classmethod
@@ -76,11 +78,16 @@ class Document:
         size = os.path.getsize(file_path)
         created_at = datetime.datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
         
+        # Usa o caminho do arquivo como ID para garantir unicidade
+        doc_id = file_path
+        
         return cls({
+            "id": doc_id,
             "name": name,
             "path": file_path,
             "size": size,
-            "created_at": created_at
+            "created_at": created_at,
+            "pages": 0  # Inicialmente 0, será atualizado ao processar o PDF
         })
     
     @property
@@ -141,4 +148,4 @@ class Document:
         Returns:
             str: Representação do documento
         """
-        return f"Document(id={self.id}, name={self.name}, size={self.formatted_size})"
+        return f"Document(id={self.id}, name={self.name}, size={self.formatted_size}, pages={self.pages})"

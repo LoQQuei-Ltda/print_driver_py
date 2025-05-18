@@ -10,6 +10,7 @@ from .theme import ThemeManager
 from .pdf import PDFUtils
 from .printer_utils import PrinterUtils
 from .scheduler import TaskScheduler, Task
+from .file_monitor import FileMonitor
 
 __all__ = [
     'AuthManager', 
@@ -18,5 +19,6 @@ __all__ = [
     'PDFUtils', 
     'PrinterUtils',
     'TaskScheduler',
-    'Task'
+    'Task',
+    'FileMonitor'
 ]

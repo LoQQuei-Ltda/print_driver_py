@@ -649,7 +649,7 @@ class MainScreen(wx.Frame):
                          "Informação", wx.OK | wx.ICON_INFORMATION)
     
     def load_documents(self):
-        """Carrega a lista de documentos"""
+        """Carrega a lista de documentos localmente do sistema de arquivos"""
         # Limpa a lista atual
         self.files_list.DeleteAllItems()
         
@@ -658,59 +658,67 @@ class MainScreen(wx.Frame):
             self.files_list.InsertItem(0, "Carregando...")
             wx.GetApp().Yield()
             
-            try:
-                # Obtém documentos da API
-                documents_data = self.api_client.get_user_documents()
+            # Verifica se o monitor de arquivos está inicializado e ativo
+            if not hasattr(self, 'file_monitor') or not self.file_monitor.observer or not self.file_monitor.observer.is_alive():
+                from src.utils.file_monitor import FileMonitor
+                self.file_monitor = FileMonitor(self.config, self.on_documents_changed)
+                self.file_monitor.start()
                 
-                # Converte para objetos Document
-                self.documents = [Document(doc_data) for doc_data in documents_data]
-                
-                # Limpa o item de carregamento
-                self.files_list.DeleteAllItems()
-                
-                if self.documents:
-                    # Esconde a mensagem de nenhum arquivo
-                    self.no_files_panel.Hide()
-                    self.files_list.Show()
-                    
-                    # Adiciona documentos à lista
-                    for i, doc in enumerate(self.documents):
-                        self.files_list.InsertItem(i, doc.name)
-                        self.files_list.SetItem(i, 1, doc.formatted_date)
-                        self.files_list.SetItem(i, 2, doc.formatted_size)
-                        
-                        # Se tivermos informação de páginas, adicionamos
-                        pages = "?" # Por padrão, não sabemos o número de páginas
-                        self.files_list.SetItem(i, 3, pages)
-                    
-                else:
-                    # Mostra a mensagem de nenhum arquivo
-                    self.no_files_panel.Show()
-                    self.files_list.Hide()
+            # Obtém documentos do monitor de arquivos
+            self.documents = self.file_monitor.get_documents()
             
-            except Exception as e:
-                # Captura específica para erros de API
-                logger.error(f"Erro ao carregar documentos da API: {str(e)}")
-                self.files_list.DeleteAllItems()
-                self.files_list.Show()
+            # Limpa o item de carregamento
+            self.files_list.DeleteAllItems()
+            
+            if self.documents:
+                # Esconde a mensagem de nenhum arquivo
                 self.no_files_panel.Hide()
+                self.files_list.Show()
                 
-                # Adiciona mensagem de erro à lista
-                self.files_list.InsertItem(0, f"Erro ao carregar documentos: {str(e)}")
-                self.files_list.SetItem(0, 1, "")
-                self.files_list.SetItem(0, 2, "")
-                self.files_list.SetItem(0, 3, "")
-            
-            # Atualiza o layout
-            self.content_panel.Layout()
-            
+                # Adiciona documentos à lista
+                for i, doc in enumerate(self.documents):
+                    self.files_list.InsertItem(i, doc.name)
+                    self.files_list.SetItem(i, 1, doc.formatted_date)
+                    self.files_list.SetItem(i, 2, doc.formatted_size)
+                    
+                    # Adiciona contagem de páginas
+                    pages = str(doc.pages) if hasattr(doc, "pages") and doc.pages > 0 else "?"
+                    self.files_list.SetItem(i, 3, pages)
+            else:
+                # Mostra a mensagem de nenhum arquivo
+                self.no_files_panel.Show()
+                self.files_list.Hide()
+        
         except Exception as e:
+            # Captura específica para erros
             logger.error(f"Erro ao carregar documentos: {str(e)}")
+            self.files_list.DeleteAllItems()
+            self.files_list.Show()
+            self.no_files_panel.Hide()
             
-            # Mostra mensagem de erro
-            wx.MessageBox(f"Erro ao carregar documentos: {str(e)}", 
-                         "Erro", wx.OK | wx.ICON_ERROR)
+            # Adiciona mensagem de erro à lista
+            self.files_list.InsertItem(0, f"Erro ao carregar documentos: {str(e)}")
+            self.files_list.SetItem(0, 1, "")
+            self.files_list.SetItem(0, 2, "")
+            self.files_list.SetItem(0, 3, "")
+        
+        # Atualiza o layout
+        self.content_panel.Layout()
     
+    def on_documents_changed(self, documents):
+        """
+        Callback chamado quando a lista de documentos é alterada
+        
+        Args:
+            documents (list): Lista de documentos
+        """
+        self.documents = documents
+        
+        # Atualiza a UI se estivermos na tela de documentos
+        if self.content_title.GetLabel() == "Arquivos para Impressão" and self.IsShown():
+            # Usa CallAfter para garantir que a atualização da UI aconteça na thread principal
+            wx.CallAfter(self.load_documents)
+
     def on_file_right_click(self, event):
         """Manipula o clique com o botão direito na lista de arquivos"""
         # Obtém o item clicado
@@ -739,7 +747,7 @@ class MainScreen(wx.Frame):
     
     def on_print_document(self, document):
         """
-        Imprime o documento selecionado
+        Imprime o documento selecionado diretamente do sistema de arquivos
         
         Args:
             document (Document): Documento a ser impresso
@@ -747,19 +755,32 @@ class MainScreen(wx.Frame):
         # Verifica se temos impressoras carregadas
         if not self.printers:
             try:
-                # Tenta carregar as impressoras
-                printers_data = self.api_client.get_printers()
-                self.printers = [Printer(printer_data) for printer_data in printers_data]
+                # Tenta carregar as impressoras do sistema
+                from src.utils.printer_utils import PrinterUtils
+                system_printers = PrinterUtils.get_system_printers()
+                
+                if not system_printers:
+                    # Se não houver impressoras do sistema, tenta carregar do config
+                    self.printers = [Printer(printer_data) for printer_data in self.config.get_printers()]
+                else:
+                    # Converte impressoras do sistema para nosso modelo
+                    self.printers = [Printer({
+                        "id": p.get("id"),
+                        "name": p.get("name"),
+                        "system_name": p.get("system_name", p.get("name")),
+                        "mac_address": p.get("mac_address", "")
+                    }) for p in system_printers]
+                    
             except Exception as e:
                 logger.error(f"Erro ao carregar impressoras: {str(e)}")
                 wx.MessageBox("Não foi possível carregar a lista de impressoras. " + 
-                             "Por favor, atualize as impressoras primeiro.",
-                             "Erro", wx.OK | wx.ICON_ERROR)
+                            "Por favor, atualize as impressoras primeiro.",
+                            "Erro", wx.OK | wx.ICON_ERROR)
                 return
         
         if not self.printers:
             wx.MessageBox("Nenhuma impressora disponível.",
-                         "Informação", wx.OK | wx.ICON_INFORMATION)
+                        "Informação", wx.OK | wx.ICON_INFORMATION)
             return
         
         # Cria a caixa de diálogo para escolher impressora
@@ -777,20 +798,21 @@ class MainScreen(wx.Frame):
             printer = self.printers[selected_index]
             
             try:
-                # Envia para impressão
-                self.api_client.print_document(document.id, printer.id)
+                # Imprime diretamente usando PrinterUtils
+                from src.utils.printer_utils import PrinterUtils
+                PrinterUtils.print_file(document.path, getattr(printer, 'system_name', printer.name))
                 wx.MessageBox(f"Documento '{document.name}' enviado para '{printer.name}'.",
-                             "Impressão", wx.OK | wx.ICON_INFORMATION)
+                            "Impressão", wx.OK | wx.ICON_INFORMATION)
             except Exception as e:
                 logger.error(f"Erro ao imprimir documento: {str(e)}")
                 wx.MessageBox(f"Erro ao imprimir documento: {str(e)}",
-                             "Erro", wx.OK | wx.ICON_ERROR)
+                            "Erro", wx.OK | wx.ICON_ERROR)
         
         dialog.Destroy()
     
     def on_delete_document(self, document):
         """
-        Exclui o documento selecionado
+        Exclui o documento selecionado do sistema de arquivos
         
         Args:
             document (Document): Documento a ser excluído
@@ -805,21 +827,24 @@ class MainScreen(wx.Frame):
         
         if dlg.ShowModal() == wx.ID_YES:
             try:
-                # Envia solicitação de exclusão
-                self.api_client.delete_document(document.id)
+                # Exclui o arquivo
+                os.remove(document.path)
                 
-                # Recarrega a lista de documentos
-                self.load_documents()
-                
+                # O monitor de arquivos tratará de remover da lista
                 wx.MessageBox(f"Documento '{document.name}' excluído com sucesso.",
-                             "Exclusão", wx.OK | wx.ICON_INFORMATION)
+                            "Exclusão", wx.OK | wx.ICON_INFORMATION)
             except Exception as e:
                 logger.error(f"Erro ao excluir documento: {str(e)}")
                 wx.MessageBox(f"Erro ao excluir documento: {str(e)}",
-                             "Erro", wx.OK | wx.ICON_ERROR)
+                            "Erro", wx.OK | wx.ICON_ERROR)
         
         dlg.Destroy()
     
+    def stop_file_monitor(self):
+        """Para o monitor de arquivos"""
+        if hasattr(self, 'file_monitor'):
+            self.file_monitor.stop()
+            
     def on_logout(self, event=None):
         """Processa o logout do usuário e volta para a tela de login"""
         if self.auth_manager.logout():
