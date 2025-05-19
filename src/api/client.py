@@ -191,53 +191,92 @@ class APIClient:
             # Propaga outros erros
             raise
     
-    def get_user_documents(self):
+    def get_printers_with_discovery(self):
         """
-        Obtém lista de documentos do usuário
+        Obtém lista de impressoras e enriquece com descoberta automática
         
         Returns:
-            list: Lista de documentos com nome, path, tamanho e data
+            list: Lista de impressoras com informações completas
         """
         try:
-            result = self._make_request("GET", "/documents")
+            # Primeiro obtém impressoras do servidor
+            printers = []
+            result = self._make_request("GET", "/desktop/printers")
             
             # Verifica se o resultado é uma lista
             if isinstance(result, list):
-                return result
-            # Se não for uma lista, retorna uma lista vazia
-            return []
+                printers = result
+            
+            # Se não conseguir impressoras do servidor, retorna lista vazia
+            if not printers:
+                logger.warning("Nenhuma impressora retornada pelo servidor")
+                return []
+                
+            # Cria um dicionário com as impressoras pelo MAC address
+            printers_by_mac = {}
+            for printer in printers:
+                mac = printer.get("macAddress", "")
+                if mac:
+                    mac = mac.lower()
+                    printers_by_mac[mac] = printer
+            
+            # Executa a descoberta automática
+            try:
+                from src.utils.printer_discovery import PrinterDiscovery
+                
+                discovery = PrinterDiscovery()
+                discovered_printers = discovery.discover_printers()
+                
+                # Para cada impressora descoberta
+                for discovered in discovered_printers:
+                    mac = discovered.get("macAddress", "")
+                    
+                    # Se não tem MAC ou é desconhecido, pula
+                    if not mac or mac == "desconhecido":
+                        continue
+
+                    mac = mac.lower()
+                    
+                    # Verifica se existe uma impressora com este MAC
+                    if mac in printers_by_mac:
+                        # Atualiza a impressora existente com os dados descobertos
+                        printers_by_mac[mac].update({
+                            "ip": discovered.get("ip", ""),
+                            "uri": discovered.get("uri", ""),
+                            "is_online": True
+                        })
+                        
+                        # Obtém detalhes adicionais (estado, modelo, etc.)
+                        ip = discovered.get("ip")
+                        if ip:
+                            try:
+                                details = discovery.get_printer_details(ip)
+                                if details:
+                                    printers_by_mac[mac].update({
+                                        "model": details.get("printer-make-and-model", ""),
+                                        "location": details.get("printer-location", ""),
+                                        "state": details.get("printer-state", ""),
+                                        "is_ready": "Idle" in details.get("printer-state", ""),
+                                        "attributes": details
+                                    })
+                            except Exception as e:
+                                logger.warning(f"Erro ao obter detalhes da impressora {ip}: {str(e)}")
+                
+                logger.info(f"Enriquecidas {len(printers_by_mac)} impressoras com dados de descoberta")
+                
+            except Exception as e:
+                logger.warning(f"Erro na descoberta automática: {str(e)}")
+            
+            return printers
+            
         except APIError as e:
             # Se recebermos um erro 404, retornamos uma lista vazia
             if e.status_code == 404:
-                logger.warning("Endpoint de documentos não encontrado. Retornando lista vazia.")
+                logger.warning("Endpoint de impressoras não encontrado. Retornando lista vazia.")
                 return []
             # Propaga outros erros
             raise
     
-    def delete_document(self, document_id):
-        """
-        Exclui um documento
-        
-        Args:
-            document_id (str): ID do documento
-        """
-        return self._make_request("DELETE", f"/documents/{document_id}")
-    
-    def print_document(self, document_id, printer_id):
-        """
-        Envia um documento para impressão
-        
-        Args:
-            document_id (str): ID do documento
-            printer_id (str): ID da impressora
-        """
-        data = {
-            "printer_id": printer_id
-        }
-        
-        return self._make_request("POST", f"/documents/{document_id}/print", data)
-
-
 class APIError(Exception):
     """Exceção para erros na API"""
     

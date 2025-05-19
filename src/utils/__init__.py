@@ -11,6 +11,8 @@ from .pdf import PDFUtils
 from .printer_utils import PrinterUtils
 from .scheduler import TaskScheduler, Task
 from .file_monitor import FileMonitor
+from .printer_discovery import PrinterDiscovery
+from .printer_diagnostic import PrinterDiagnostic
 
 __all__ = [
     'AuthManager', 
@@ -20,5 +22,7 @@ __all__ = [
     'PrinterUtils',
     'TaskScheduler',
     'Task',
-    'FileMonitor'
+    'FileMonitor',
+    'PrinterDiscovery',
+    'PrinterDiagnostic'
 ]

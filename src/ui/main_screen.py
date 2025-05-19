@@ -48,74 +48,196 @@ class CardPanel(wx.Panel):
         self._init_ui()
     
     def _init_ui(self):
-        """Inicializa a interface do usuário do card"""
+        """Inicializa a interface do usuário"""
+        # Painel principal
+        self.main_panel = wx.Panel(self)
+        self.main_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
+        
+        # Layout principal (horizontal: menu lateral + conteúdo)
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        # Ícone do documento (esquerda)
-        doc_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "document.png"
-        )
+        # Painel de menu lateral
+        self.sidebar_panel = wx.Panel(self.main_panel)
+        self.sidebar_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+        sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        if os.path.exists(doc_icon_path):
-            doc_icon = wx.StaticBitmap(
-                self,
-                bitmap=wx.Bitmap(doc_icon_path),
-                size=(32, 32)
-            )
-            main_sizer.Add(doc_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        # Informações do usuário no topo do menu lateral
+        user_panel = wx.Panel(self.sidebar_panel)
+        user_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+        user_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        # Painel de informações (centro)
-        info_panel = wx.Panel(self)
-        info_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-        info_sizer = wx.BoxSizer(wx.VERTICAL)
+        # Avatar do usuário (círculo com inicial)
+        user_info = self.auth_manager.get_current_user()
+        user_name = user_info.get("name", user_info.get("email", "Usuário"))
+        user_initial = user_name[0].upper() if user_name else "U"
+
+        user_picture = user_info.get("picture", "")
         
-        # Nome do documento
-        doc_name = wx.StaticText(info_panel, label=self.document.name)
-        doc_name.SetForegroundColour(wx.WHITE)
-        doc_name.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        info_sizer.Add(doc_name, 0, wx.BOTTOM, 5)
+        avatar_size = 40
+        avatar_panel = wx.Panel(user_panel, size=(avatar_size, avatar_size))
+        avatar_panel.SetBackgroundColour(wx.Colour(255, 90, 36))  # Laranja
         
-        # Detalhes do documento
-        details_text = f"{self.document.formatted_date} · {self.document.formatted_size}"
-        if hasattr(self.document, "pages") and self.document.pages > 0:
-            details_text += f" · {self.document.pages} páginas"
+        def on_avatar_paint(event):
+            dc = wx.PaintDC(avatar_panel)
             
-        details = wx.StaticText(info_panel, label=details_text)
-        details.SetForegroundColour(wx.Colour(180, 180, 180))
-        details.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        info_sizer.Add(details, 0)
+            # Draw the circular background first
+            dc.SetBrush(wx.Brush(wx.Colour(255, 90, 36)))
+            dc.SetPen(wx.Pen(wx.Colour(255, 90, 36)))
+            dc.DrawCircle(int(avatar_size/2), int(avatar_size/2), int(avatar_size/2))
+            
+            # Draw the initial
+            dc.SetTextForeground(wx.WHITE)
+            font = wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+            dc.SetFont(font)
+            text_width, text_height = dc.GetTextExtent(user_initial)
+            dc.DrawText(user_initial, int((avatar_size - text_width) / 2), int((avatar_size - text_height) / 2))
+
+        avatar_panel.Bind(wx.EVT_PAINT, on_avatar_paint)
         
-        info_panel.SetSizer(info_sizer)
-        main_sizer.Add(info_panel, 1, wx.EXPAND | wx.ALL, 10)
+        # Nome do usuário
+        user_name_text = wx.StaticText(user_panel, label=user_name)
+        user_name_text.SetForegroundColour(wx.WHITE)
+        user_name_text.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         
-        # Painel de ações (direita)
-        actions_panel = wx.Panel(self)
-        actions_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-        actions_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        user_sizer.Add(avatar_panel, 0, wx.ALL, 10)
+        user_sizer.Add(user_name_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
+        user_panel.SetSizer(user_sizer)
         
-        # Botão de impressão
-        self.print_button = self._create_action_button(
-            actions_panel, 
-            "Imprimir", 
-            wx.Colour(255, 90, 36), 
-            self._on_print_click
-        )
-        actions_sizer.Add(self.print_button, 0, wx.RIGHT, 10)
+        sidebar_sizer.Add(user_panel, 0, wx.EXPAND | wx.ALL, 10)
+        sidebar_sizer.Add(wx.StaticLine(self.sidebar_panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         
-        # Botão de exclusão
-        self.delete_button = self._create_action_button(
-            actions_panel, 
-            "Excluir", 
-            wx.Colour(60, 60, 60), 
-            self._on_delete_click
-        )
-        actions_sizer.Add(self.delete_button, 0)
+        # Menu itens
+        menu_items = [
+            {"label": "Documentos", "icon": "document.png", "handler": self.on_show_documents},
+            {"label": "Impressoras", "icon": "printer.png", "handler": self.on_show_printers},
+        ]
         
-        actions_panel.SetSizer(actions_sizer)
-        main_sizer.Add(actions_panel, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
+        # Criar os botões do menu
+        self.menu_buttons = []
+        for i, item in enumerate(menu_items):
+            # Criar o painel do botão
+            item_panel = wx.Panel(self.sidebar_panel)
+            item_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+            item_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            
+            # Carregar ícone se existir
+            icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                                    "src", "ui", "resources", item.get("icon", ""))
+            
+            if os.path.exists(icon_path):
+                icon = wx.Bitmap(icon_path)
+                icon_bitmap = wx.StaticBitmap(item_panel, wx.ID_ANY, icon)
+                item_sizer.Add(icon_bitmap, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+            
+            # Texto do item
+            item_text = wx.StaticText(item_panel, wx.ID_ANY, item["label"])
+            item_text.SetForegroundColour(wx.WHITE)
+            item_sizer.Add(item_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
+            
+            item_panel.SetSizer(item_sizer)
+            
+            # Eventos do item
+            item_panel.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            
+            # Marcar como selecionado o primeiro item (Documentos)
+            if i == 0:
+                item_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+                self.selected_menu = item_panel
+            
+            # Eventos de hover
+            def on_enter(evt, panel=item_panel):
+                if panel != self.selected_menu:
+                    panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+                    panel.Refresh()
+            
+            def on_leave(evt, panel=item_panel):
+                if panel != self.selected_menu:
+                    panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+                    panel.Refresh()
+            
+            item_panel.Bind(wx.EVT_ENTER_WINDOW, on_enter)
+            item_panel.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
+            
+            sidebar_sizer.Add(item_panel, 0, wx.EXPAND | wx.TOP, 5)
+            self.menu_buttons.append(item_panel)
         
-        self.SetSizer(main_sizer)
+        # Espaçador para empurrar o botão de logout para o fim
+        sidebar_sizer.Add((0, 0), 1, wx.EXPAND)
+        
+        # Botão de logout
+        logout_panel = wx.Panel(self.sidebar_panel)
+        logout_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+        logout_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Ícone de logout
+        logout_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+                                    "src", "ui", "resources", "logout.png")
+        
+        if os.path.exists(logout_icon_path):
+            logout_icon = wx.Bitmap(logout_icon_path)
+            logout_bitmap = wx.StaticBitmap(logout_panel, wx.ID_ANY, logout_icon)
+            logout_sizer.Add(logout_bitmap, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        
+        # Texto do logout
+        logout_text = wx.StaticText(logout_panel, wx.ID_ANY, "Sair")
+        logout_text.SetForegroundColour(wx.WHITE)
+        logout_sizer.Add(logout_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
+        
+        logout_panel.SetSizer(logout_sizer)
+        
+        # Eventos de hover
+        def on_logout_enter(evt):
+            logout_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+            logout_panel.Refresh()
+        
+        def on_logout_leave(evt):
+            logout_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+            logout_panel.Refresh()
+        
+        logout_panel.Bind(wx.EVT_ENTER_WINDOW, on_logout_enter)
+        logout_panel.Bind(wx.EVT_LEAVE_WINDOW, on_logout_leave)
+        logout_panel.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
+        
+        sidebar_sizer.Add(logout_panel, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 20)
+        
+        self.sidebar_panel.SetSizer(sidebar_sizer)
+        
+        # Painel de conteúdo
+        self.content_panel = wx.Panel(self.main_panel)
+        self.content_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
+        self.content_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Cria o painel de documentos
+        self.documents_panel = DocumentsPanel(self.content_panel, self.theme_manager)
+        self.documents_panel.refresh_button.Bind(wx.EVT_BUTTON, self.on_refresh_documents)
+        
+        # Cria o painel de impressoras
+        from src.ui.printer_list import PrinterListPanel
+        self.printers_panel = wx.Panel(self.content_panel)
+        self.printers_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
+        
+        # Adiciona o painel de lista de impressoras ao painel de impressoras
+        self.printer_list = PrinterListPanel(self.printers_panel, self.theme_manager, 
+                                            self.config, self.api_client)
+        
+        printer_sizer = wx.BoxSizer(wx.VERTICAL)
+        printer_sizer.Add(self.printer_list, 1, wx.EXPAND)
+        self.printers_panel.SetSizer(printer_sizer)
+        self.printers_panel.Hide()
+        
+        self.content_sizer.Add(self.documents_panel, 1, wx.EXPAND)
+        self.content_sizer.Add(self.printers_panel, 1, wx.EXPAND)
+        
+        self.content_panel.SetSizer(self.content_sizer)
+        
+        # Adiciona os painéis ao layout principal
+        main_sizer.Add(self.sidebar_panel, 0, wx.EXPAND)
+        main_sizer.Add(self.content_panel, 1, wx.EXPAND)
+        
+        self.main_panel.SetSizer(main_sizer)
+        
+        # Carrega lista de documentos
+        self.load_documents()
     
     def _create_action_button(self, parent, label, color, handler):
         """
@@ -461,7 +583,7 @@ class MainScreen(wx.Frame):
         # Menu itens
         menu_items = [
             {"label": "Documentos", "icon": "document.png", "handler": self.on_show_documents},
-            {"label": "Impressoras", "icon": "printer.png", "handler": self.on_show_printers},
+            {"label": "Impressoras", "icon": "system.png", "handler": self.on_show_printers},
         ]
         
         # Criar os botões do menu
@@ -564,18 +686,20 @@ class MainScreen(wx.Frame):
         self.documents_panel.refresh_button.Bind(wx.EVT_BUTTON, self.on_refresh_documents)
         
         # Cria o painel de impressoras (inicialmente oculto)
+        from src.ui.printer_list import PrinterListPanel
         self.printers_panel = wx.Panel(self.content_panel)
         self.printers_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
+
+        # Adiciona o componente de lista de impressoras ao painel
+        self.printer_list = PrinterListPanel(self.printers_panel, self.theme_manager, self.config, self.api_client)
+        printer_sizer = wx.BoxSizer(wx.VERTICAL)
+        printer_sizer.Add(self.printer_list, 1, wx.EXPAND)
+        self.printers_panel.SetSizer(printer_sizer)
+
         self.printers_panel.Hide()
-        
-        # Cria o painel de configurações (inicialmente oculto)
-        self.settings_panel = wx.Panel(self.content_panel)
-        self.settings_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
-        self.settings_panel.Hide()
-        
+       
         self.content_sizer.Add(self.documents_panel, 1, wx.EXPAND)
         self.content_sizer.Add(self.printers_panel, 1, wx.EXPAND)
-        self.content_sizer.Add(self.settings_panel, 1, wx.EXPAND)
         
         self.content_panel.SetSizer(self.content_sizer)
         
@@ -637,7 +761,6 @@ class MainScreen(wx.Frame):
         # Mostra o painel correto
         self.documents_panel.Show()
         self.printers_panel.Hide()
-        self.settings_panel.Hide()
         
         # Carrega os documentos
         self.load_documents()
@@ -657,24 +780,10 @@ class MainScreen(wx.Frame):
         # Mostra o painel correto
         self.documents_panel.Hide()
         self.printers_panel.Show()
-        self.settings_panel.Hide()
         
-        # Atualiza o layout
-        self.content_panel.Layout()
-    
-    def on_show_settings(self, event=None):
-        """Mostra o painel de configurações"""
-        # Destaca o botão selecionado
-        for button in self.menu_buttons:
-            button.SetBackgroundColour(wx.Colour(25, 25, 25))
-        
-        self.menu_buttons[2].SetBackgroundColour(wx.Colour(35, 35, 35))
-        self.selected_menu = self.menu_buttons[2]
-        
-        # Mostra o painel correto
-        self.documents_panel.Hide()
-        self.printers_panel.Hide()
-        self.settings_panel.Show()
+        # Atualiza a lista de impressoras
+        if hasattr(self, 'printer_list'):
+            self.printer_list.load_printers()
         
         # Atualiza o layout
         self.content_panel.Layout()

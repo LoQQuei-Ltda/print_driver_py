@@ -37,11 +37,12 @@ elif LINUX:
 basic_requires = [
     "wxPython>=4.2.0",
     "requests>=2.31.0",
-    "PyPDF2>=3.0.1",
+    "pypdf>=5.5.0",
     "appdirs>=1.4.4",
     "pyyaml>=6.0.1",
     "pillow>=10.0.1",
-    "watchdog>=2.3.0",  # Adicionado para monitoramento de diretórios
+    "watchdog>=2.3.0",
+    "pyipp>=0.11.0"
 ]
 
 # Configuração principal
@@ -100,10 +101,11 @@ if 'bdist_pyinstaller' in sys.argv:
             f'--icon={icon_path}' if os.path.exists(icon_path) else '',
             '--hidden-import=wx',
             '--hidden-import=requests',
-            '--hidden-import=PyPDF2',
+            '--hidden-import=pypdf',
             '--hidden-import=appdirs',
             '--hidden-import=yaml',
-            '--hidden-import=watchdog',  # Adicionado watchdog como dependência oculta
+            '--hidden-import=watchdog',
+            '--hidden-import=pyipp',
             '--clean',
             'main.py',
         ]

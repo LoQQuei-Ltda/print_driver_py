@@ -1,384 +1,327 @@
 #!/usr/bin/env python3
 """
-Script para enviar um arquivo PDF para impressão usando endereço MAC da impressora e IPP
+Script simplificado para enviar um arquivo PDF para impressão usando IPP (Internet Printing Protocol)
+Baseado no get_attributes.py, focando apenas na funcionalidade de impressão via IP
 """
 
 import argparse
 import os
 import sys
-import subprocess
-import socket
-import time
-from urllib.parse import urlparse
+import asyncio
 import requests
-import netifaces
-import ipaddress
+from urllib.parse import urlparse
+import socket
+import struct
 
-def mac_to_ip(mac_address):
-    """
-    Tenta encontrar o endereço IP associado ao endereço MAC fornecido.
-    Utiliza uma combinação de ARP e descoberta de rede.
-    """
-    # Normaliza o formato do endereço MAC (remove ":" ou "-" e converte para minúsculas)
-    mac_address = mac_address.lower().replace(":", "").replace("-", "")
-    normalized_mac = ":".join([mac_address[i:i+2] for i in range(0, len(mac_address), 2)])
+# Configurações globais
+TIMEOUT_REQUEST = 5  # Timeout para requisições HTTP/IPP (aumentado)
+IPP_PORTS = [631, 9100, 80, 443]  # Portas comuns para IPP
+
+def install_dependencies():
+    """Instala dependências necessárias"""
+    import subprocess
+    required_packages = ["requests"]
+    missing = []
     
-    print(f"Procurando impressora com MAC: {normalized_mac}")
-    
-    # Método 1: Consulta da tabela ARP
-    try:
-        # Em sistemas Unix/Linux
-        if sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
-            output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-        # Em sistemas Windows
-        elif sys.platform.startswith('win'):
-            output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-        else:
-            print("Sistema operacional não suportado para consulta ARP")
-            output = ""
-            
-        for line in output.splitlines():
-            if normalized_mac in line.lower():
-                # Extrai o endereço IP da linha
-                ip = line.split()[1].strip('()')
-                if '(' in ip:
-                    ip = ip.split('(')[1].split(')')[0]
-                print(f"Encontrado IP {ip} para MAC {normalized_mac} via tabela ARP")
-                return ip
-    except Exception as e:
-        print(f"Erro ao consultar tabela ARP: {e}")
-    
-    # Método 2: Verificação de rede local
-    try:
-        # Obtém interfaces de rede
-        interfaces = netifaces.interfaces()
-        
-        for interface in interfaces:
-            if netifaces.AF_INET in netifaces.ifaddresses(interface):
-                addr_info = netifaces.ifaddresses(interface)[netifaces.AF_INET][0]
-                if 'addr' in addr_info and 'netmask' in addr_info:
-                    ip = addr_info['addr']
-                    netmask = addr_info['netmask']
-                    
-                    # Calcula endereço de rede
-                    net_addr = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
-                    
-                    print(f"Verificando rede: {net_addr}")
-                    
-                    # Ping na rede para popular tabela ARP
-                    for host in net_addr.hosts():
-                        # Limita a 254 hosts para evitar varredura excessiva
-                        if int(str(host).split('.')[-1]) > 254:
-                            continue
-                        
-                        try:
-                            # Ping com timeout curto
-                            subprocess.call(
-                                ['ping', '-c', '1', '-W', '1', str(host)],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL
-                            )
-                        except:
-                            pass
-                    
-                    # Verifica tabela ARP novamente
-                    try:
-                        if sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
-                            output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-                        elif sys.platform.startswith('win'):
-                            output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-                            
-                        for line in output.splitlines():
-                            if normalized_mac in line.lower():
-                                ip = line.split()[1].strip('()')
-                                if '(' in ip:
-                                    ip = ip.split('(')[1].split(')')[0]
-                                print(f"Encontrado IP {ip} para MAC {normalized_mac} via varredura de rede")
-                                return ip
-                    except Exception as e:
-                        print(f"Erro ao consultar tabela ARP após varredura: {e}")
-    except Exception as e:
-        print(f"Erro ao verificar rede local: {e}")
-    
-    # Se não encontrou, tenta usar ferramentas externas
-    try:
-        # Nmap (se disponível)
+    for package in required_packages:
         try:
-            output = subprocess.check_output(['nmap', '-sP', '192.168.1.0/24'], universal_newlines=True)
-            # Consulta ARP novamente após nmap
-            if sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
-                output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-            elif sys.platform.startswith('win'):
-                output = subprocess.check_output(['arp', '-a'], universal_newlines=True)
-                
-            for line in output.splitlines():
-                if normalized_mac in line.lower():
-                    ip = line.split()[1].strip('()')
-                    if '(' in ip:
-                        ip = ip.split('(')[1].split(')')[0]
-                    print(f"Encontrado IP {ip} para MAC {normalized_mac} via nmap")
-                    return ip
-        except:
-            pass
-    except:
-        pass
+            __import__(package)
+        except ImportError:
+            missing.append(package)
     
-    return None
+    if missing:
+        print(f"Instalando dependências: {', '.join(missing)}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+        print("Dependências instaladas com sucesso")
 
-def discover_ipp_url(ip_address):
-    """
-    Descobre a URL IPP de uma impressora a partir de seu endereço IP.
-    """
-    # Tenta várias portas e caminhos comuns do IPP
-    common_ports = [631, 80, 443, 9100]
-    common_paths = [
-        "/ipp/print",
-        "/ipp",
-        "/printer",
-        "/printers/default",
-        "/printers/ipp"
-    ]
+def is_port_open(ip, port, timeout=1):
+    """Verifica se uma porta está aberta"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+        return result == 0
+    except:
+        return False
+
+def detect_printer_url(ip):
+    """Detecta a URL IPP da impressora"""
+    # Verifica se as portas comuns para IPP estão abertas
+    open_ports = []
+    for port in IPP_PORTS:
+        if is_port_open(ip, port):
+            open_ports.append(port)
+            print(f"Porta {port} aberta em {ip}")
     
-    for port in common_ports:
-        for path in common_paths:
-            url = f"http://{ip_address}:{port}{path}"
+    if not open_ports:
+        print(f"Nenhuma porta IPP comum aberta em {ip}")
+        # Tenta usar a porta padrão IPP
+        return f"https://{ip}:631/ipp/print"
+    
+    # Prioriza porta 631 (IPP padrão)
+    if 631 in open_ports:
+        # Tenta diferentes caminhos de URL IPP
+        paths = ["/ipp/print", "/ipp/printer", "/ipp", ""]
+        for path in paths:
+            url = f"https://{ip}:631{path}"
             try:
-                response = requests.get(url, timeout=2)
-                if response.status_code == 200:
-                    print(f"Encontrado possível endpoint IPP: {url}")
+                response = requests.head(url, timeout=TIMEOUT_REQUEST)
+                if response.status_code < 400:
+                    print(f"URL IPP válida encontrada: {url}")
                     return url
-            except:
+            except Exception as e:
+                pass
+        
+        # Se nenhum caminho funcionou, usa o padrão
+        print(f"Usando URL IPP padrão na porta 631: https://{ip}:631/ipp/print")
+        return f"https://{ip}:631/ipp/print"
+    
+    # Se 631 não estiver disponível, verifica outras portas
+    for port in open_ports:
+        paths = ["/ipp/print", "/ipp/printer", "/ipp", ""]
+        for path in paths:
+            url = f"https://{ip}:{port}{path}"
+            try:
+                response = requests.head(url, timeout=TIMEOUT_REQUEST)
+                if response.status_code < 400:
+                    print(f"URL IPP válida encontrada: {url}")
+                    return url
+            except Exception as e:
                 pass
     
-    # Se não encontrou um endpoint específico, retorna a URL padrão IPP
-    print(f"Usando URL IPP padrão para {ip_address}")
-    return f"http://{ip_address}:631/ipp/print"
+    # Se nenhuma URL IPP válida for encontrada, retorna a URL padrão para IPP
+    default_url = f"https://{ip}:631/ipp/print"
+    print(f"Usando URL IPP padrão: {default_url}")
+    return default_url
 
-def send_pdf_to_printer(mac_address, pdf_path):
+def print_with_http(url, pdf_path):
     """
-    Envia um arquivo PDF para uma impressora usando seu endereço MAC.
+    Imprime um PDF usando requisições HTTP POST simples
+    Algumas impressoras aceitam envio direto via HTTP
     """
-    if not os.path.exists(pdf_path):
-        print(f"Erro: O arquivo {pdf_path} não existe.")
-        return False
-    
-    if not pdf_path.lower().endswith('.pdf'):
-        print(f"Aviso: O arquivo {pdf_path} não parece ser um PDF.")
-    
-    # Encontra IP a partir do MAC
-    ip_address = mac_to_ip(mac_address)
-    if not ip_address:
-        print(f"Erro: Não foi possível encontrar um endereço IP para o MAC {mac_address}")
-        return False
-    
-    print(f"Impressora encontrada no IP: {ip_address}")
-    
-    # Descobre URL IPP
-    ipp_url = discover_ipp_url(ip_address)
-    
-    # Tenta vários métodos para imprimir
-    methods = [
-        # Método 1: CUPS/lpr (Linux/Mac)
-        lambda: print_with_cups(ip_address, pdf_path),
-        # Método 2: IPP direto
-        lambda: print_with_ipp(ipp_url, pdf_path),
-        # Método 3: Windows (para sistemas Windows)
-        lambda: print_with_windows(ip_address, pdf_path)
-    ]
-    
-    for method in methods:
-        try:
-            if method():
-                return True
-        except Exception as e:
-            print(f"Método de impressão falhou: {e}")
-    
-    print("Todos os métodos de impressão falharam.")
-    return False
-
-def print_with_cups(ip_address, pdf_path):
-    """
-    Tenta imprimir usando CUPS (Linux/Mac)
-    """
-    if not (sys.platform.startswith('linux') or sys.platform.startswith('darwin')):
-        return False
-    
-    print("Tentando imprimir usando CUPS...")
-    
-    # Adiciona impressora temporária
-    printer_name = f"temp_printer_{int(time.time())}"
+    print(f"Tentando imprimir via HTTP POST: {url}")
     
     try:
-        # Adiciona a impressora
-        subprocess.check_call([
-            'lpadmin', 
-            '-p', printer_name, 
-            '-v', f"ipp://{ip_address}/ipp/print", 
-            '-E'
-        ])
-        
-        # Imprime o arquivo
-        result = subprocess.check_call([
-            'lpr', 
-            '-P', printer_name, 
-            pdf_path
-        ])
-        
-        print(f"Arquivo enviado para impressão via CUPS: {pdf_path}")
-        
-        # Remove a impressora temporária
-        subprocess.check_call(['lpadmin', '-x', printer_name])
-        
-        return True
-    except Exception as e:
-        print(f"Erro ao imprimir com CUPS: {e}")
-        
-        # Tenta remover a impressora temporária mesmo em caso de erro
-        try:
-            subprocess.check_call(['lpadmin', '-x', printer_name])
-        except:
-            pass
-            
-        return False
-
-def print_with_ipp(ipp_url, pdf_path):
-    """
-    Tenta imprimir usando requisições IPP diretas
-    """
-    print(f"Tentando imprimir usando IPP direto para {ipp_url}...")
-    
-    try:
-        # Carrega o arquivo PDF
+        # Lê o arquivo PDF
         with open(pdf_path, 'rb') as f:
             pdf_data = f.read()
         
-        # Cabeçalhos para IPP
+        # Informações do arquivo
+        filename = os.path.basename(pdf_path)
+        
+        # Configura headers para envio do PDF
         headers = {
             'Content-Type': 'application/pdf',
-            'X-Print-Job': 'true'
+            'Content-Disposition': f'attachment; filename="{filename}"'
         }
         
-        # Envia o arquivo para o endpoint IPP
+        # Envia a requisição HTTP
         response = requests.post(
-            ipp_url,
+            url,
             data=pdf_data,
             headers=headers,
-            timeout=10
+            timeout=TIMEOUT_REQUEST
         )
         
-        if response.status_code >= 200 and response.status_code < 300:
-            print(f"Arquivo enviado para impressão via IPP: {pdf_path}")
+        if response.status_code < 300:
+            print(f"✓ Impressão enviada via HTTP (status: {response.status_code})")
             return True
         else:
-            print(f"Erro ao imprimir via IPP. Código: {response.status_code}")
+            print(f"✗ Erro na resposta HTTP: {response.status_code}")
             return False
-            
     except Exception as e:
-        print(f"Erro ao imprimir com IPP: {e}")
+        print(f"✗ Erro ao imprimir com HTTP: {e}")
         return False
 
-def print_with_windows(ip_address, pdf_path):
+def print_with_ipp(url, pdf_path):
     """
-    Tenta imprimir usando o sistema do Windows
+    Imprime um PDF usando requisições IPP diretas
+    Implementa o protocolo IPP conforme RFC 8010
     """
-    if not sys.platform.startswith('win'):
-        return False
-    
-    print("Tentando imprimir usando o Windows...")
+    print(f"Enviando documento para impressão via IPP: {url}")
     
     try:
-        # Adiciona impressora temporária
-        printer_name = f"TempPrinter{int(time.time())}"
-        port_name = f"IP_{ip_address}"
+        # Lê o arquivo PDF
+        with open(pdf_path, 'rb') as f:
+            pdf_data = f.read()
         
-        # Cria porta TCP/IP (se necessário)
-        try:
-            subprocess.check_call([
-                'cscript', 
-                '//nologo', 
-                os.path.join(os.environ['WINDIR'], 'System32', 'Printing_Admin_Scripts', 'en-US', 'prnport.vbs'),
-                '-a', 
-                '-r', port_name,
-                '-h', ip_address,
-                '-o', 'raw',
-                '-n', '9100'
-            ])
-        except:
-            # Pode ser que a porta já exista
-            pass
-            
-        # Adiciona a impressora
-        subprocess.check_call([
-            'cscript',
-            '//nologo',
-            os.path.join(os.environ['WINDIR'], 'System32', 'Printing_Admin_Scripts', 'en-US', 'prnmngr.vbs'),
-            '-a',
-            '-p', printer_name,
-            '-m', 'Generic / Text Only',
-            '-r', port_name
-        ])
+        # Parse URL
+        parsed_url = urlparse(url)
+        host = parsed_url.netloc
+        path = parsed_url.path
+        if not path:
+            path = "/ipp/print"
         
-        # Imprime o PDF
-        subprocess.check_call([
-            'rundll32',
-            'mshtml.dll,PrintHTML',
-            pdf_path,
-            printer_name
-        ])
+        # Cria requisição IPP
+        operation_id = 0x0002  # Print-Job operation
+        request_id = 1
         
-        print(f"Arquivo enviado para impressão via Windows: {pdf_path}")
+        # Atributos do trabalho
+        attributes = {
+            "attributes-charset": "utf-8",
+            "attributes-natural-language": "en-us",
+            "printer-uri": f"ipp://{host}{path}",
+            "requesting-user-name": "anonymous",
+            "job-name": os.path.basename(pdf_path),
+            "document-format": "application/pdf"
+        }
         
-        # Remove a impressora temporária
-        try:
-            subprocess.check_call([
-                'cscript',
-                '//nologo',
-                os.path.join(os.environ['WINDIR'], 'System32', 'Printing_Admin_Scripts', 'en-US', 'prnmngr.vbs'),
-                '-d',
-                '-p', printer_name
-            ])
-        except:
-            pass
-            
-        return True
+        # Constrói pacote IPP
+        version = struct.pack('>bb', 1, 1)  # IPP version 1.1
+        operation = struct.pack('>h', operation_id)
+        req_id = struct.pack('>i', request_id)
         
+        # Início do pacote
+        packet = version + operation + req_id
+        
+        # Adiciona grupo de atributos de operação (grupo 1)
+        packet += struct.pack('>b', 1)  # Operation attributes tag
+        
+        # Adiciona atributos
+        for name, value in attributes.items():
+            if isinstance(value, str):
+                packet += struct.pack('>b', 0x45)  # value-tag for text
+                packet += struct.pack('>h', len(name)) + name.encode('utf-8')
+                packet += struct.pack('>h', len(value)) + value.encode('utf-8')
+        
+        # Fim dos atributos
+        packet += struct.pack('>b', 3)  # End-of-attributes tag
+        
+        # Adiciona dados do documento
+        packet += pdf_data
+        
+        # Envia a requisição
+        headers = {
+            'Content-Type': 'application/ipp',
+        }
+        
+        response = requests.post(
+            url,
+            data=packet,
+            headers=headers,
+            timeout=TIMEOUT_REQUEST
+        )
+        
+        if response.status_code < 300:
+            print(f"✓ Impressão enviada via IPP (status: {response.status_code})")
+            return True
+        else:
+            print(f"✗ Erro na resposta IPP: {response.status_code}")
+            # Debug da resposta em caso de erro
+            print(f"Conteúdo da resposta: {response}...")
+            return False
     except Exception as e:
-        print(f"Erro ao imprimir com Windows: {e}")
+        print(f"✗ Erro ao imprimir com IPP: {e}")
         return False
 
-def main():
-    parser = argparse.ArgumentParser(description='Envia um arquivo PDF para uma impressora usando seu endereço MAC.')
-    parser.add_argument('mac_address', help='Endereço MAC da impressora (formato: AA:BB:CC:DD:EE:FF)')
-    parser.add_argument('pdf_path', help='Caminho para o arquivo PDF a ser impresso')
+def print_with_socket(ip, port, pdf_path):
+    """Imprime usando socket direto (para impressoras RAW)"""
+    print(f"Enviando documento para impressão via socket: {ip}:{port}")
+    
+    try:
+        # Lê o arquivo PDF
+        with open(pdf_path, 'rb') as f:
+            pdf_data = f.read()
+        
+        # Conecta ao socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(10)
+        sock.connect((ip, port))
+        
+        # Envia o documento
+        sock.sendall(pdf_data)
+        
+        # Envia sequência de fechamento para algumas impressoras
+        try:
+            sock.sendall(b'\x1D\x12\x07\x00')  # Sequência de finalização comum
+        except:
+            pass
+            
+        # Fecha a conexão corretamente
+        sock.close()
+        
+        print(f"✓ Documento enviado com sucesso via socket para {ip}:{port}")
+        return True
+    except Exception as e:
+        print(f"✗ Erro ao imprimir com socket: {e}")
+        return False
+
+async def print_document(ip, pdf_path):
+    """Função principal para imprimir um documento"""
+    # Verifica se o arquivo existe
+    if not os.path.exists(pdf_path):
+        print(f"✗ Erro: Arquivo não encontrado: {pdf_path}")
+        return False
+    
+    print(f"Documento para impressão: {os.path.basename(pdf_path)}")
+    print(f"Detectando impressora em: {ip}")
+    
+    # Detecta URL IPP da impressora
+    url = detect_printer_url(ip)
+    parsed_url = urlparse(url)
+    host = parsed_url.netloc.split(':')[0]  # Extrai o IP sem a porta
+    port = int(parsed_url.netloc.split(':')[1]) if ":" in parsed_url.netloc else 631
+    
+    # Tenta primeiro imprimir usando IPP (método mais padronizado)
+    if print_with_ipp(url, pdf_path):
+        return True
+    
+    # Se falhar IPP, tenta imprimir usando HTTP simples
+    if print_with_http(url, pdf_path):
+        return True
+    
+    # Se ambos os métodos HTTP falharem, tenta imprimir usando socket
+    # Primeiro na porta 9100 (porta RAW padrão)
+    if is_port_open(ip, 9100):
+        if print_with_socket(ip, 9100, pdf_path):
+            return True
+    
+    # Se a porta especificada não for 631 ou 9100, tenta com socket também
+    if port not in [631, 9100] and is_port_open(ip, port):
+        if print_with_socket(ip, port, pdf_path):
+            return True
+    
+    # Tenta na porta 515 (LPR/LPD) como último recurso
+    if is_port_open(ip, 515):
+        if print_with_socket(ip, 515, pdf_path):
+            return True
+    
+    print("✗ Todas as tentativas de impressão falharam")
+    return False
+
+async def main():
+    parser = argparse.ArgumentParser(description='Ferramenta simplificada para impressão IPP.')
+    parser.add_argument('--ip', required=True, help='Endereço IP da impressora')
+    parser.add_argument('--pdf', required=True, help='Caminho para o arquivo PDF a ser impresso')
+    parser.add_argument('--port', type=int, help='Porta específica para conexão (opcional)')
     
     args = parser.parse_args()
     
-    # Verificações iniciais
-    if not os.path.exists(args.pdf_path):
-        print(f"Erro: Arquivo '{args.pdf_path}' não encontrado.")
-        sys.exit(1)
+    # Instala dependências
+    install_dependencies()
     
-    print(f"Iniciando impressão do arquivo: {args.pdf_path}")
-    print(f"Impressora MAC: {args.mac_address}")
+    # Se uma porta específica foi fornecida, tenta diretamente com socket
+    if args.port:
+        if is_port_open(args.ip, args.port):
+            if print_with_socket(args.ip, args.port, args.pdf):
+                print("\n✓ Documento enviado para impressão com sucesso!")
+                sys.exit(0)
     
-    # Instala dependências se necessário
-    try:
-        import netifaces
-    except ImportError:
-        print("Instalando dependências necessárias...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "netifaces", "requests"])
-        
-        # Recarrega após instalação
-        import netifaces
-    
-    success = send_pdf_to_printer(args.mac_address, args.pdf_path)
+    # Processo normal de detecção e impressão
+    success = await print_document(args.ip, args.pdf)
     
     if success:
-        print("Arquivo enviado para impressão com sucesso!")
+        print("\n✓ Documento enviado para impressão com sucesso!")
         sys.exit(0)
     else:
-        print("Falha ao enviar arquivo para impressão.")
+        print("\n✗ Falha ao enviar documento para impressão")
         sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nOperação cancelada pelo usuário.")
+    except Exception as e:
+        print(f"Erro inesperado: {str(e)}")

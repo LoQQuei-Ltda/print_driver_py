@@ -12,7 +12,7 @@ logger = logging.getLogger("PrintManagementSystem.Tasks")
 
 def update_printers_task(api_client, config):
     """
-    Tarefa para atualizar impressoras com o servidor principal
+    Tarefa para atualizar impressoras com o servidor e descobrir detalhes adicionais
     
     Args:
         api_client: Cliente da API
@@ -21,10 +21,59 @@ def update_printers_task(api_client, config):
     try:
         logger.info("Executando tarefa de atualização de impressoras")
         
-        # Obtém as impressoras da API
-        printers_data = api_client.get_printers()
+        # Obtém as impressoras do API com descoberta integrada
+        printers_data = []
         
-        # Converte para objetos Printer, sanitiza os dados e converte para dicionários
+        try:
+            # Primeiro tenta o método com descoberta
+            if hasattr(api_client, 'get_printers_with_discovery'):
+                printers_data = api_client.get_printers_with_discovery()
+            else:
+                # Fallback para o método padrão
+                printers_data = api_client.get_printers()
+                
+                # Tenta obter informações adicionais se não houver método de descoberta integrado
+                from src.utils.printer_discovery import PrinterDiscovery
+                discovery = PrinterDiscovery()
+                
+                # Cria dicionário de impressoras pelo MAC
+                printers_by_mac = {}
+                for printer in printers_data:
+                    mac = printer.get("mac_address", "").lower()
+                    if mac:
+                        printers_by_mac[mac] = printer
+                
+                # Descobre impressoras
+                discovered = discovery.discover_printers()
+                
+                # Atualiza impressoras com dados descobertos
+                for disc in discovered:
+                    mac = disc.get("mac_address", "").lower()
+                    if mac and mac in printers_by_mac:
+                        printers_by_mac[mac].update({
+                            "ip": disc.get("ip", ""),
+                            "uri": disc.get("uri", ""),
+                            "is_online": True
+                        })
+                        
+                        # Obtém detalhes
+                        ip = disc.get("ip")
+                        if ip:
+                            details = discovery.get_printer_details(ip)
+                            if details:
+                                printers_by_mac[mac].update({
+                                    "model": details.get("printer-make-and-model", ""),
+                                    "location": details.get("printer-location", ""),
+                                    "state": details.get("printer-state", ""),
+                                    "is_ready": "Idle" in details.get("printer-state", ""),
+                                    "attributes": details
+                                })
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter impressoras: {str(e)}")
+            return
+        
+        # Converte para objetos Printer e sanitiza os dados
         printers = []
         for printer_data in printers_data:
             printer = Printer(printer_data)
@@ -35,6 +84,10 @@ def update_printers_task(api_client, config):
                 printer.name = "Sem nome"
             if printer.mac_address is None:
                 printer.mac_address = ""
+            if printer.ip is None:
+                printer.ip = ""
+            if printer.uri is None:
+                printer.uri = ""
                 
             # Outros campos que podem ser None em to_dict
             printer_dict = printer.to_dict()

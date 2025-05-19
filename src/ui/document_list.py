@@ -221,14 +221,13 @@ class DocumentListPanel(wx.ScrolledWindow):
 
         self.documents = []
         self.colors = {"bg_color": wx.Colour(18, 18, 18), 
-                       "panel_bg": wx.Colour(25, 25, 25),
-                       "accent_color": wx.Colour(255, 90, 36),
-                       "text_color": wx.WHITE,
-                       "text_secondary": wx.Colour(180, 180, 180)}
+                    "panel_bg": wx.Colour(25, 25, 25),
+                    "accent_color": wx.Colour(255, 90, 36),
+                    "text_color": wx.WHITE,
+                    "text_secondary": wx.Colour(180, 180, 180)}
 
         self._init_ui()
         
-        # Configura scrolling
         self.SetScrollRate(0, 10)
 
     def _init_ui(self):
@@ -360,6 +359,8 @@ class DocumentListPanel(wx.ScrolledWindow):
             # Ajusta o layout
             self.content_panel.Layout()
             self.Layout()
+            
+            self.FitInside()
             self.Refresh()
 
         except Exception as e:

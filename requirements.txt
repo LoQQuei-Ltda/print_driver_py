@@ -1,6 +1,6 @@
 wxPython==4.2.1
 requests==2.31.0
-PyPDF2==3.0.1
+pypdf==5.5.0
 pycups==2.0.1; platform_system != "Windows"
 pywin32==307; platform_system == "Windows"
 appdirs==1.4.4
@@ -8,3 +8,4 @@ pyyaml==6.0.1
 python-cups==2.0.1; platform_system != "Windows"
 pyinstaller==6.1.0
 pillow==10.0.1
+pyipp>=0.11.0

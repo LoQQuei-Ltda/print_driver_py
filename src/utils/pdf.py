@@ -6,7 +6,7 @@ import os
 import shutil
 import logging
 import tempfile
-from PyPDF2 import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PDF")
 
