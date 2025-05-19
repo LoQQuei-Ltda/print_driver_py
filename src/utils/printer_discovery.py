@@ -42,6 +42,23 @@ class PrinterDiscovery:
         """Inicializa o descobridor de impressoras"""
         self.printers = []
     
+    def normalize_mac(self, mac):
+        """Normaliza o formato do MAC para comparação"""
+        if not mac:
+            return None
+            
+        # Remove todos os separadores e converte para minúsculas
+        clean_mac = re.sub(r'[^a-fA-F0-9]', '', mac.lower())
+        
+        # Verifica se o MAC está completo (12 caracteres hexadecimais)
+        if len(clean_mac) != 12:
+            logger.warning(f"Aviso: MAC incompleto: {mac} ({len(clean_mac)} caracteres em vez de 12)")
+            # Se estiver incompleto, completa com zeros
+            clean_mac = clean_mac.ljust(12, '0')
+        
+        # Retorna no formato XX:XX:XX:XX:XX:XX
+        return ':'.join([clean_mac[i:i+2] for i in range(0, 12, 2)])
+    
     def discover_printers(self, subnet=None):
         """
         Descobre impressoras na rede de forma síncrona
@@ -52,14 +69,25 @@ class PrinterDiscovery:
         Returns:
             list: Lista de impressoras encontradas
         """
-        # Executa a varredura de forma síncrona
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        _, printers = loop.run_until_complete(self._scan_network(subnet))
-        loop.close()
-        
-        self.printers = printers
-        return printers
+        try:
+            # Executa a varredura de forma síncrona
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            _, printers = loop.run_until_complete(self._scan_network(subnet))
+            loop.close()
+            
+            # Verifica se todas as impressoras têm IP definido
+            for printer in printers:
+                if "ip" not in printer or not printer["ip"]:
+                    logger.warning(f"Impressora sem IP: {printer}")
+                else:
+                    logger.info(f"Impressora descoberta com IP: {printer['ip']}")
+            
+            self.printers = printers
+            return printers
+        except Exception as e:
+            logger.error(f"Erro na descoberta de impressoras: {str(e)}")
+            return []
     
     def get_printer_details(self, ip):
         """
@@ -170,42 +198,48 @@ class PrinterDiscovery:
         """
         open_ports = []
         
-        # Verifica cada uma das portas comuns
-        for port in COMMON_PRINTER_PORTS:
-            if self._is_port_open(ip, port):
-                open_ports.append(port)
-        
-        # Se tiver alguma porta aberta que seja comum para impressoras
-        if open_ports:
-            mac = self._get_mac_for_ip(ip)
+        try:
+            # Verifica cada uma das portas comuns
+            for port in COMMON_PRINTER_PORTS:
+                if self._is_port_open(ip, port):
+                    open_ports.append(port)
             
-            # Determina o melhor URI para a impressora
-            uri = None
-            for port in open_ports:
-                if port == 631:
-                    uri = f"ipp://{ip}/ipp/print"
-                    break
-                elif port == 9100:
-                    uri = f"socket://{ip}:9100"
-                    break
-                elif port == 80:
-                    uri = f"http://{ip}"
-                    break
-                elif port == 443:
-                    uri = f"https://{ip}"
-                    break
+            # Se tiver alguma porta aberta que seja comum para impressoras
+            if open_ports:
+                mac = self._get_mac_for_ip(ip)
+                
+                # Determina o melhor URI para a impressora
+                uri = None
+                for port in open_ports:
+                    if port == 631:
+                        uri = f"ipp://{ip}/ipp/print"
+                        break
+                    elif port == 9100:
+                        uri = f"socket://{ip}:9100"
+                        break
+                    elif port == 80:
+                        uri = f"http://{ip}"
+                        break
+                    elif port == 443:
+                        uri = f"https://{ip}"
+                        break
+                
+                # Presume que é uma impressora se alguma porta comum estiver aberta
+                printer_info = {
+                    "ip": ip,
+                    "mac_address": mac,
+                    "ports": open_ports,
+                    "uri": uri,
+                    "name": f"Impressora {ip}"  # Adiciona um nome padrão baseado no IP
+                }
+                
+                logger.info(f"Encontrada impressora com IP: {ip}, MAC: {mac}, Portas: {open_ports}")
+                return printer_info
             
-            # Presume que é uma impressora se alguma porta comum estiver aberta
-            printer_info = {
-                "ip": ip,
-                "mac_address": mac,
-                "ports": open_ports,
-                "uri": uri
-            }
-            
-            return printer_info
-        
-        return None
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao verificar portas para IP {ip}: {str(e)}")
+            return None
     
     async def _get_printer_attributes(self, ip, port=631):
         """
@@ -253,13 +287,20 @@ class PrinterDiscovery:
                         
                         # Se for um objeto Printer, extrai informações estruturadas
                         if hasattr(printer_attrs, 'info') and hasattr(printer_attrs, 'state'):
-                            return self._process_printer_object(printer_attrs, ip)
+                            result = self._process_printer_object(printer_attrs, ip)
                         # Se for um dicionário, processa normalmente
                         elif isinstance(printer_attrs, dict):
-                            return self._process_printer_dict(printer_attrs, ip)
+                            result = self._process_printer_dict(printer_attrs, ip)
                         else:
                             logger.info(f"Tipo de dados inesperado: {type(printer_attrs)}")
-                            return {"ip": ip, "raw_data": str(printer_attrs)}
+                            result = {"ip": ip, "raw_data": str(printer_attrs)}
+                        
+                        # Garante que o IP e nome estão definidos
+                        result['ip'] = ip
+                        if 'name' not in result or not result['name']:
+                            result['name'] = f"Impressora {ip}"
+                            
+                        return result
                 except Exception as e:
                     logger.warning(f"Tentativa com {protocol_name} e endpoint {endpoint} falhou: {str(e)}")
                     continue
@@ -292,13 +333,21 @@ class PrinterDiscovery:
         # Extrai informações básicas
         if hasattr(printer_obj, 'info'):
             info = printer_obj.info
-            result['name'] = info.name
-            result['printer-make-and-model'] = info.model
-            result['printer-location'] = info.location
-            result['printer-info'] = info.printer_info
-            result['manufacturer'] = info.manufacturer
-            result['printer-more-info'] = info.more_info
-            result['printer-uri-supported'] = info.printer_uri_supported
+            result['name'] = info.name if hasattr(info, 'name') else f"Impressora {ip}"
+            
+            # Garante que todos os campos estão presentes
+            if hasattr(info, 'model'):
+                result['printer-make-and-model'] = info.model
+            if hasattr(info, 'location'):
+                result['printer-location'] = info.location
+            if hasattr(info, 'printer_info'):
+                result['printer-info'] = info.printer_info
+            if hasattr(info, 'manufacturer'):
+                result['manufacturer'] = info.manufacturer
+            if hasattr(info, 'more_info'):
+                result['printer-more-info'] = info.more_info
+            if hasattr(info, 'printer_uri_supported'):
+                result['printer-uri-supported'] = info.printer_uri_supported
             
             # Informações adicionais
             if hasattr(info, 'command_set'):
@@ -318,39 +367,56 @@ class PrinterDiscovery:
                 'processing': "Processing (Ocupada)",
                 'stopped': "Stopped (Parada)"
             }
-            result['printer-state'] = state_map.get(state.printer_state, state.printer_state)
             
-            if state.message:
+            if hasattr(state, 'printer_state'):
+                result['printer-state'] = state_map.get(state.printer_state, state.printer_state)
+            
+            if hasattr(state, 'message') and state.message:
                 result['printer-state-message'] = state.message
-            if state.reasons:
+            if hasattr(state, 'reasons') and state.reasons:
                 result['printer-state-reasons'] = state.reasons
         
         # Extrai informações de suprimentos
         if hasattr(printer_obj, 'markers') and printer_obj.markers:
             supplies = []
             for marker in printer_obj.markers:
-                supply_info = {
-                    'id': marker.marker_id,
-                    'name': marker.name,
-                    'type': marker.marker_type,
-                    'color': marker.color,
-                    'level': marker.level,
-                    'low_level': marker.low_level,
-                    'high_level': marker.high_level
-                }
+                supply_info = {}
+                
+                # Garante que todos os campos estão presentes
+                if hasattr(marker, 'marker_id'):
+                    supply_info['id'] = marker.marker_id
+                if hasattr(marker, 'name'):
+                    supply_info['name'] = marker.name
+                if hasattr(marker, 'marker_type'):
+                    supply_info['type'] = marker.marker_type
+                if hasattr(marker, 'color'):
+                    supply_info['color'] = marker.color
+                if hasattr(marker, 'level'):
+                    supply_info['level'] = marker.level
+                if hasattr(marker, 'low_level'):
+                    supply_info['low_level'] = marker.low_level
+                if hasattr(marker, 'high_level'):
+                    supply_info['high_level'] = marker.high_level
+                
                 supplies.append(supply_info)
+            
             result['supplies'] = supplies
         
         # Extrai URIs suportadas
         if hasattr(printer_obj, 'uris') and printer_obj.uris:
             uris = []
             for uri in printer_obj.uris:
-                uri_info = {
-                    'uri': uri.uri,
-                    'authentication': uri.authentication,
-                    'security': uri.security
-                }
+                uri_info = {}
+                
+                if hasattr(uri, 'uri'):
+                    uri_info['uri'] = uri.uri
+                if hasattr(uri, 'authentication'):
+                    uri_info['authentication'] = uri.authentication
+                if hasattr(uri, 'security'):
+                    uri_info['security'] = uri.security
+                    
                 uris.append(uri_info)
+            
             result['uris'] = uris
         
         return result
@@ -565,6 +631,187 @@ class PrinterDiscovery:
         
         return "desconhecido"
     
+    def _ping_host(self, ip, timeout=1):
+        """
+        Faz ping em um host
+        
+        Args:
+            ip: Endereço IP
+            timeout: Tempo limite em segundos
+        
+        Returns:
+            bool: True se o ping foi bem-sucedido
+        """
+        try:
+            # Comando de ping depende do sistema operacional
+            if sys.platform.startswith("win"):
+                # Windows
+                cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+            else:
+                # Linux/macOS
+                cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
+            
+            # Executa o comando
+            result = subprocess.run(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.PIPE,
+                timeout=timeout + 1
+            )
+            
+            # Retorna True se o comando foi bem-sucedido
+            return result.returncode == 0
+            
+        except Exception as e:
+            return False
+        
+    def _create_printer_info(self, ip, mac):
+        """
+        Cria informações básicas da impressora com IP e MAC
+        
+        Args:
+            ip: Endereço IP
+            mac: MAC address
+            
+        Returns:
+            dict: Informações básicas da impressora
+        """
+        # Verifica quais portas estão abertas
+        open_ports = []
+        for port in COMMON_PRINTER_PORTS:
+            if self._is_port_open(ip, port):
+                open_ports.append(port)
+        
+        # Determina o URI
+        uri = None
+        if 631 in open_ports:
+            uri = f"ipp://{ip}/ipp/print"
+        elif 9100 in open_ports:
+            uri = f"socket://{ip}:9100"
+        elif 80 in open_ports:
+            uri = f"http://{ip}"
+        elif 443 in open_ports:
+            uri = f"https://{ip}"
+        
+        # Cria as informações da impressora
+        printer_info = {
+            "ip": ip,
+            "mac_address": mac,
+            "ports": open_ports,
+            "uri": uri,
+            "is_online": True,
+            "name": f"Impressora {ip}"
+        }
+        
+        return printer_info
+
+    def _quick_mac_lookup_arp(self, normalized_mac):
+        """
+        Procura rapidamente um MAC na tabela ARP
+        
+        Args:
+            normalized_mac: MAC normalizado 
+            
+        Returns:
+            str: IP se encontrado, None caso contrário
+        """
+        try:
+            if sys.platform.startswith(('linux', 'darwin')):
+                cmd = ['arp', '-n']
+            else:  # Windows
+                cmd = ['arp', '-a']
+                
+            output = subprocess.check_output(cmd, universal_newlines=True, timeout=1)
+            
+            # Cria variações do MAC para procurar
+            mac_variations = [
+                normalized_mac,
+                normalized_mac.replace(':', '-'),
+                normalized_mac.replace(':', '').upper(),
+                normalized_mac.replace(':', '').lower()
+            ]
+            
+            # Procura o MAC em cada linha da saída
+            for line in output.splitlines():
+                line_lower = line.lower()
+                
+                for mac_var in mac_variations:
+                    if mac_var in line_lower:
+                        ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                        if ip_match:
+                            return ip_match.group(1)
+        except Exception as e:
+            logger.warning(f"Erro na consulta ARP: {str(e)}")
+        
+        return None
+
+    def discover_printer_by_mac(self, target_mac):
+        """
+        Tenta descobrir o IP correspondente a um MAC específico
+        
+        Args:
+            target_mac: MAC address da impressora (formato: XX:XX:XX:XX:XX:XX)
+            
+        Returns:
+            dict: Informações da impressora encontrada ou None
+        """
+        # Normaliza o MAC
+        normalized_target_mac = self.normalize_mac(target_mac)
+        if not normalized_target_mac:
+            logger.warning(f"MAC inválido: {target_mac}")
+            return None
+            
+        logger.info(f"Procurando impressora com MAC: {normalized_target_mac}")
+        
+        # Métodos rápidos
+        
+        # Método 1: Verificar tabela ARP atual
+        try:
+            logger.info("Verificando tabela ARP atual...")
+            ip = self._quick_mac_lookup_arp(normalized_target_mac)
+            if ip:
+                logger.info(f"Encontrado IP na tabela ARP: {ip}")
+                return self._create_printer_info(ip, normalized_target_mac)
+        except Exception as e:
+            logger.warning(f"Erro ao verificar tabela ARP: {str(e)}")
+        
+        # Método 2: Tentar com nmap
+        try:
+            logger.info("Tentando com nmap...")
+            networks = self._get_network_from_ip(self._get_local_ip())
+            for network in networks:
+                printers = self._run_nmap_scan(network)
+                for printer in printers:
+                    if self.normalize_mac(printer.get('mac_address', '')) == normalized_target_mac:
+                        logger.info(f"Encontrado via nmap: {printer}")
+                        return printer
+        except Exception as e:
+            logger.warning(f"Erro ao tentar nmap: {str(e)}")
+        
+        # Método 3: Procurar em IPs comuns
+        try:
+            logger.info("Verificando IPs comuns...")
+            networks = self._get_network_from_ip(self._get_local_ip())
+            for network in networks:
+                common_ips = self._get_common_ips(network)
+                logger.info(f"Fazendo ping em {len(common_ips)} IPs comuns...")
+                
+                # Faz ping em paralelo
+                with concurrent.futures.ThreadPoolExecutor(max_workers=25) as executor:
+                    executor.map(self._ping_host, common_ips)
+                
+                # Verifica tabela ARP novamente
+                ip = self._quick_mac_lookup_arp(normalized_target_mac)
+                if ip:
+                    logger.info(f"Encontrado IP após pings: {ip}")
+                    return self._create_printer_info(ip, normalized_target_mac)
+        except Exception as e:
+            logger.warning(f"Erro ao verificar IPs comuns: {str(e)}")
+        
+        # Não encontrou
+        logger.warning(f"Não foi possível encontrar o IP para o MAC: {normalized_target_mac}")
+        return None
+
     def _run_nmap_scan(self, subnet):
         """
         Executa nmap para descobrir impressoras na rede (se disponível)
@@ -605,34 +852,69 @@ class PrinterDiscovery:
             
             # Para cada IP encontrado, obtém o MAC e adiciona à lista
             for ip in unique_ips:
-                mac = self._get_mac_for_ip(ip)
-                
-                # Determina a melhor porta e URI para a impressora
-                uri = None
-                ports = []
-                
-                # Verifica cada porta comum
-                for port in COMMON_PRINTER_PORTS:
-                    if self._is_port_open(ip, port):
-                        ports.append(port)
-                
-                # Determina o URI
-                if 631 in ports:
-                    uri = f"ipp://{ip}/ipp/print"
-                elif 9100 in ports:
-                    uri = f"socket://{ip}:9100"
-                elif 80 in ports:
-                    uri = f"http://{ip}"
-                elif 443 in ports:
-                    uri = f"https://{ip}"
-                
-                printers.append({
-                    "ip": ip, 
-                    "mac_address": mac,
-                    "ports": ports,
-                    "uri": uri
-                })
-                logger.info(f"Encontrada impressora: {ip} (MAC: {mac})")
+                try:
+                    mac = self._get_mac_for_ip(ip)
+                    
+                    # Determina a melhor porta e URI para a impressora
+                    uri = None
+                    ports = []
+                    
+                    # Verifica cada porta comum
+                    for port in COMMON_PRINTER_PORTS:
+                        if self._is_port_open(ip, port):
+                            ports.append(port)
+                    
+                    # Se nenhuma porta estiver aberta, pula
+                    if not ports:
+                        logger.warning(f"IP {ip} sem portas abertas, pulando")
+                        continue
+                    
+                    # Determina o URI
+                    if 631 in ports:
+                        uri = f"ipp://{ip}/ipp/print"
+                    elif 9100 in ports:
+                        uri = f"socket://{ip}:9100"
+                    elif 80 in ports:
+                        uri = f"http://{ip}"
+                    elif 443 in ports:
+                        uri = f"https://{ip}"
+                    
+                    # Cria um objeto de impressora com os dados coletados
+                    printer_info = {
+                        "ip": ip, 
+                        "mac_address": mac,
+                        "name": f"Impressora {ip}",
+                        "ports": ports,
+                        "uri": uri,
+                        "is_online": True,
+                        "is_ready": True  # Assumimos que está pronta inicialmente
+                    }
+                    
+                    # Tenta obter detalhes adicionais da impressora
+                    try:
+                        if 631 in ports:
+                            logger.info(f"Tentando obter detalhes da impressora {ip}")
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            details = loop.run_until_complete(self._get_printer_attributes(ip))
+                            loop.close()
+                            
+                            if details:
+                                # Atualiza as informações com os detalhes obtidos
+                                for key, value in details.items():
+                                    if key not in printer_info or not printer_info[key]:
+                                        printer_info[key] = value
+                                
+                                # Garante que o IP está definido
+                                printer_info["ip"] = ip
+                                logger.info(f"Detalhes obtidos para {ip}: {details.get('printer-make-and-model', 'Desconhecido')}")
+                    except Exception as e:
+                        logger.error(f"Erro ao obter detalhes da impressora {ip}: {str(e)}")
+                    
+                    logger.info(f"Impressora encontrada via nmap: {ip} (MAC: {mac}, Portas: {ports})")
+                    printers.append(printer_info)
+                except Exception as e:
+                    logger.error(f"Erro ao processar impressora {ip}: {str(e)}")
             
             return printers
         except Exception as e:
