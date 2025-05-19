@@ -209,9 +209,17 @@ class PrinterDetailsDialog(wx.Dialog):
         # Cores para temas
         self.colors = {"bg_color": wx.Colour(18, 18, 18), 
                       "panel_bg": wx.Colour(25, 25, 25),
+                      "card_bg": wx.Colour(35, 35, 35),
                       "accent_color": wx.Colour(255, 90, 36),
                       "text_color": wx.WHITE,
-                      "text_secondary": wx.Colour(180, 180, 180)}
+                      "text_secondary": wx.Colour(180, 180, 180),
+                      "border_color": wx.Colour(45, 45, 45),
+                      "success_color": wx.Colour(40, 167, 69),
+                      "error_color": wx.Colour(220, 53, 69),
+                      "warning_color": wx.Colour(255, 193, 7)}
+        
+        # Aplica o tema ao diálogo
+        self.SetBackgroundColour(self.colors["bg_color"])
         
         self._init_ui()
         
@@ -231,7 +239,7 @@ class PrinterDetailsDialog(wx.Dialog):
         
         # Cabeçalho
         header_panel = wx.Panel(self.panel)
-        header_panel.SetBackgroundColour(self.colors["panel_bg"])
+        header_panel.SetBackgroundColour(self.colors["card_bg"])
         header_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Ícone da impressora
@@ -246,7 +254,7 @@ class PrinterDetailsDialog(wx.Dialog):
                 bitmap=wx.Bitmap(printer_icon_path),
                 size=(48, 48)
             )
-            header_sizer.Add(printer_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+            header_sizer.Add(printer_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 15)
         
         # Informações básicas
         info_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -254,38 +262,153 @@ class PrinterDetailsDialog(wx.Dialog):
         # Nome da impressora
         printer_name = wx.StaticText(header_panel, label=self.printer.name)
         printer_name.SetForegroundColour(self.colors["text_color"])
-        printer_name.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        info_sizer.Add(printer_name, 0, wx.BOTTOM, 5)
+        printer_name.SetFont(wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        info_sizer.Add(printer_name, 0, wx.BOTTOM, 8)
         
         # Modelo
         if self.printer.model:
             model_text = wx.StaticText(header_panel, label=f"Modelo: {self.printer.model}")
             model_text.SetForegroundColour(self.colors["text_secondary"])
-            info_sizer.Add(model_text, 0, wx.BOTTOM, 3)
+            model_text.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+            info_sizer.Add(model_text, 0, wx.BOTTOM, 5)
         
         # Estado
         if self.printer.state:
             state_text = wx.StaticText(header_panel, label=f"Estado: {self.printer.state}")
             state_text.SetForegroundColour(self.colors["text_secondary"])
+            state_text.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
             info_sizer.Add(state_text, 0)
         
-        header_sizer.Add(info_sizer, 1, wx.EXPAND | wx.ALL, 10)
+        header_sizer.Add(info_sizer, 1, wx.EXPAND | wx.ALL, 15)
+        
+        # Indicador de status (direita)
+        # Determina a cor baseada no status, verificando os atributos de forma segura
+        is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
+        is_ready = hasattr(self.printer, 'is_ready') and self.printer.is_ready
+        
+        if is_online and is_ready:
+            # Verde se estiver completamente pronta (online e idle)
+            status_color = self.colors["success_color"]
+        elif is_online:
+            # Amarelo se estiver online mas não idle
+            status_color = self.colors["warning_color"]
+        else:
+            # Vermelho se não estiver online
+            status_color = self.colors["error_color"]
+        
+        # Cria um bitmap para o status
+        status_bitmap = wx.Bitmap(20, 20)
+        dc = wx.MemoryDC()
+        dc.SelectObject(status_bitmap)
+        
+        # Define fundo transparente
+        dc.SetBackground(wx.Brush(self.colors["card_bg"]))
+        dc.Clear()
+        
+        # Desenha o círculo de status
+        dc.SetBrush(wx.Brush(status_color))
+        dc.SetPen(wx.Pen(status_color))
+        dc.DrawCircle(10, 10, 8)
+        
+        # Finaliza o desenho
+        dc.SelectObject(wx.NullBitmap)
+        
+        # Cria e adiciona o bitmap ao layout
+        status_icon = wx.StaticBitmap(header_panel, bitmap=status_bitmap)
+        header_sizer.Add(status_icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 15)
+        
         header_panel.SetSizer(header_sizer)
+        
+        # Adiciona um borda arredondada ao header
+        def on_header_paint(event):
+            dc = wx.BufferedPaintDC(header_panel)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = header_panel.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in header_panel.GetChildren():
+                child.Refresh()
+            
+        header_panel.Bind(wx.EVT_PAINT, on_header_paint)
+        header_panel.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
         
         main_sizer.Add(header_panel, 0, wx.EXPAND | wx.ALL, 10)
         
-        # Separador
-        separator = wx.StaticLine(self.panel, style=wx.LI_HORIZONTAL)
-        main_sizer.Add(separator, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        # Cria um panel personalizado para abrigar o notebook com tabs estilizadas
+        tabs_container = wx.Panel(self.panel)
+        tabs_container.SetBackgroundColour(self.colors["bg_color"])
+        tabs_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Notebook para categorias de informações
-        self.notebook = wx.Notebook(self.panel)
-        self.notebook.SetBackgroundColour(self.colors["panel_bg"])
+        # Cria um panel para as tabs
+        tab_bar = wx.Panel(tabs_container)
+        tab_bar.SetBackgroundColour(self.colors["card_bg"])
+        tab_bar_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
+        # Define as tabs
+        tab_names = ["Resumo", "Conectividade", "Atributos", "Suprimentos", "Diagnóstico"]
+        self.tab_buttons = []
+        self.tab_panels = []
+        
+        # Cria os botões das tabs com estilo moderno
+        for i, tab_name in enumerate(tab_names):
+            tab_button = wx.Panel(tab_bar)
+            tab_button.SetBackgroundColour(self.colors["card_bg"])
+            tab_button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            
+            # Texto da tab
+            tab_text = wx.StaticText(tab_button, label=tab_name)
+            tab_text.SetForegroundColour(self.colors["text_color"])
+            tab_text.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+            
+            tab_button_sizer.Add(tab_text, 0, wx.ALL | wx.ALIGN_CENTER, 10)
+            tab_button.SetSizer(tab_button_sizer)
+            
+            # Armazena dados para selecionar a tab
+            tab_button.index = i
+            tab_button.selected = (i == 0)  # A primeira tab começa selecionada
+            
+            # Eventos de clique e hover
+            def on_tab_click(evt, button=tab_button):
+                self._select_tab(button.index)
+            
+            def on_tab_enter(evt, button=tab_button):
+                if not button.selected:
+                    button.SetBackgroundColour(wx.Colour(40, 40, 40))
+                    button.Refresh()
+            
+            def on_tab_leave(evt, button=tab_button):
+                if not button.selected:
+                    button.SetBackgroundColour(self.colors["card_bg"])
+                    button.Refresh()
+            
+            tab_button.Bind(wx.EVT_LEFT_DOWN, on_tab_click)
+            tab_button.Bind(wx.EVT_ENTER_WINDOW, on_tab_enter)
+            tab_button.Bind(wx.EVT_LEAVE_WINDOW, on_tab_leave)
+            
+            # Destaca a tab selecionada
+            if i == 0:
+                tab_button.SetBackgroundColour(self.colors["accent_color"])
+                tab_text.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            
+            tab_bar_sizer.Add(tab_button, 0, wx.RIGHT, 1)
+            self.tab_buttons.append(tab_button)
+        
+        tab_bar.SetSizer(tab_bar_sizer)
+        tabs_sizer.Add(tab_bar, 0, wx.EXPAND)
+        
+        # Cria os painéis de conteúdo
         # Guia de resumo
-        self.summary_panel = wx.ScrolledWindow(self.notebook)
-        self.summary_panel.SetBackgroundColour(self.colors["panel_bg"])
-        self.summary_panel.SetScrollRate(0, 10)
+        self.summary_panel = self._create_tab_panel(tabs_container)
         summary_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Texto de carregamento
@@ -296,24 +419,28 @@ class PrinterDetailsDialog(wx.Dialog):
         self.summary_panel.SetSizer(summary_sizer)
         
         # Guia de informações de conectividade
-        self.connectivity_panel = wx.Panel(self.notebook)
-        self.connectivity_panel.SetBackgroundColour(self.colors["panel_bg"])
+        self.connectivity_panel = self._create_tab_panel(tabs_container)
         connectivity_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Cria um painel "card" para as informações de conectividade
+        connectivity_card = wx.Panel(self.connectivity_panel)
+        connectivity_card.SetBackgroundColour(self.colors["card_bg"])
+        connectivity_card_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # IP
         if self.printer.ip:
-            ip_panel = self._create_info_row(self.connectivity_panel, "IP:", self.printer.ip)
-            connectivity_sizer.Add(ip_panel, 0, wx.EXPAND | wx.ALL, 5)
+            ip_panel = self._create_info_row(connectivity_card, "IP:", self.printer.ip)
+            connectivity_card_sizer.Add(ip_panel, 0, wx.EXPAND | wx.ALL, 5)
         
         # MAC Address
         if self.printer.mac_address:
-            mac_panel = self._create_info_row(self.connectivity_panel, "MAC Address:", self.printer.mac_address)
-            connectivity_sizer.Add(mac_panel, 0, wx.EXPAND | wx.ALL, 5)
+            mac_panel = self._create_info_row(connectivity_card, "MAC Address:", self.printer.mac_address)
+            connectivity_card_sizer.Add(mac_panel, 0, wx.EXPAND | wx.ALL, 5)
         
         # URI
         if self.printer.uri:
-            uri_panel = self._create_info_row(self.connectivity_panel, "URI:", self.printer.uri)
-            connectivity_sizer.Add(uri_panel, 0, wx.EXPAND | wx.ALL, 5)
+            uri_panel = self._create_info_row(connectivity_card, "URI:", self.printer.uri)
+            connectivity_card_sizer.Add(uri_panel, 0, wx.EXPAND | wx.ALL, 5)
         
         # Status
         is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
@@ -321,32 +448,72 @@ class PrinterDetailsDialog(wx.Dialog):
         is_usable = is_online and is_ready
         
         status_text = "Pronta" if is_usable else "Indisponível"
-        status_panel = self._create_info_row(self.connectivity_panel, "Status:", status_text)
-        connectivity_sizer.Add(status_panel, 0, wx.EXPAND | wx.ALL, 5)
+        status_panel = self._create_info_row(connectivity_card, "Status:", status_text)
+        connectivity_card_sizer.Add(status_panel, 0, wx.EXPAND | wx.ALL, 5)
         
         # Estado
         if self.printer.state:
-            state_panel = self._create_info_row(self.connectivity_panel, "Estado:", self.printer.state)
-            connectivity_sizer.Add(state_panel, 0, wx.EXPAND | wx.ALL, 5)
+            state_panel = self._create_info_row(connectivity_card, "Estado:", self.printer.state)
+            connectivity_card_sizer.Add(state_panel, 0, wx.EXPAND | wx.ALL, 5)
         
         # Portas
         if self.printer.attributes and 'ports' in self.printer.attributes:
             ports = ", ".join(str(p) for p in self.printer.attributes['ports'])
-            ports_panel = self._create_info_row(self.connectivity_panel, "Portas:", ports)
-            connectivity_sizer.Add(ports_panel, 0, wx.EXPAND | wx.ALL, 5)
+            ports_panel = self._create_info_row(connectivity_card, "Portas:", ports)
+            connectivity_card_sizer.Add(ports_panel, 0, wx.EXPAND | wx.ALL, 5)
+        
+        connectivity_card.SetSizer(connectivity_card_sizer)
+        
+        # Adiciona borda arredondada ao card
+        def on_card_paint(event):
+            dc = wx.BufferedPaintDC(connectivity_card)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = connectivity_card.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in connectivity_card.GetChildren():
+                child.Refresh()
+        
+        connectivity_card.Bind(wx.EVT_PAINT, on_card_paint)
+        connectivity_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+        
+        connectivity_sizer.Add(connectivity_card, 0, wx.EXPAND | wx.ALL, 10)
         
         # Botão para diagnóstico (somente se tiver IP)
         if self.printer.ip:
-            diagnostic_button = wx.Button(self.connectivity_panel, label="Executar Diagnóstico")
+            diagnostic_button = wx.Button(self.connectivity_panel, label="Executar Diagnóstico", size=(-1, 36))
+            diagnostic_button.SetBackgroundColour(self.colors["accent_color"])
+            diagnostic_button.SetForegroundColour(self.colors["text_color"])
             diagnostic_button.Bind(wx.EVT_BUTTON, self._on_diagnostic)
-            connectivity_sizer.Add(diagnostic_button, 0, wx.ALIGN_CENTER | wx.ALL, 10)
+            
+            # Eventos de hover para o botão
+            def on_btn_enter(evt):
+                diagnostic_button.SetBackgroundColour(wx.Colour(255, 120, 70))
+                diagnostic_button.Refresh()
+            
+            def on_btn_leave(evt):
+                diagnostic_button.SetBackgroundColour(self.colors["accent_color"])
+                diagnostic_button.Refresh()
+            
+            diagnostic_button.Bind(wx.EVT_ENTER_WINDOW, on_btn_enter)
+            diagnostic_button.Bind(wx.EVT_LEAVE_WINDOW, on_btn_leave)
+            
+            connectivity_sizer.Add(diagnostic_button, 0, wx.ALIGN_CENTER | wx.ALL, 15)
         
         self.connectivity_panel.SetSizer(connectivity_sizer)
         
         # Guia de atributos
-        self.attributes_panel = wx.ScrolledWindow(self.notebook)
-        self.attributes_panel.SetBackgroundColour(self.colors["panel_bg"])
-        self.attributes_panel.SetScrollRate(0, 10)
+        self.attributes_panel = self._create_tab_panel(tabs_container)
         self.attributes_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Texto de carregamento
@@ -357,9 +524,7 @@ class PrinterDetailsDialog(wx.Dialog):
         self.attributes_panel.SetSizer(self.attributes_sizer)
         
         # Guia de suprimentos
-        self.supplies_panel = wx.ScrolledWindow(self.notebook)
-        self.supplies_panel.SetBackgroundColour(self.colors["panel_bg"])
-        self.supplies_panel.SetScrollRate(0, 10)
+        self.supplies_panel = self._create_tab_panel(tabs_container)
         self.supplies_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Texto de carregamento
@@ -370,46 +535,150 @@ class PrinterDetailsDialog(wx.Dialog):
         self.supplies_panel.SetSizer(self.supplies_sizer)
         
         # Guia de diagnóstico
-        self.diagnostic_panel = wx.ScrolledWindow(self.notebook)
-        self.diagnostic_panel.SetBackgroundColour(self.colors["panel_bg"])
-        self.diagnostic_panel.SetScrollRate(0, 10)
+        self.diagnostic_panel = self._create_tab_panel(tabs_container)
         self.diagnostic_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Card para as instruções de diagnóstico
+        diagnostic_card = wx.Panel(self.diagnostic_panel)
+        diagnostic_card.SetBackgroundColour(self.colors["card_bg"])
+        diagnostic_card_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Texto de instrução
         diagnostic_text = wx.StaticText(
-            self.diagnostic_panel, 
+            diagnostic_card, 
             label="Execute um diagnóstico na guia de Conectividade para verificar o status da impressora."
         )
         diagnostic_text.SetForegroundColour(self.colors["text_color"])
-        self.diagnostic_sizer.Add(diagnostic_text, 0, wx.ALL | wx.CENTER, 20)
+        diagnostic_text.Wrap(500)  # Wrap text para manter uma boa apresentação
+        diagnostic_card_sizer.Add(diagnostic_text, 0, wx.ALL | wx.CENTER, 20)
+        
+        diagnostic_card.SetSizer(diagnostic_card_sizer)
+        
+        # Adiciona borda arredondada ao card
+        def on_diagnostic_card_paint(event):
+            dc = wx.BufferedPaintDC(diagnostic_card)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = diagnostic_card.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in diagnostic_card.GetChildren():
+                child.Refresh()
+        
+        diagnostic_card.Bind(wx.EVT_PAINT, on_diagnostic_card_paint)
+        diagnostic_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+        
+        self.diagnostic_sizer.Add(diagnostic_card, 0, wx.EXPAND | wx.ALL, 15)
         
         self.diagnostic_panel.SetSizer(self.diagnostic_sizer)
         
-        # Adiciona as guias ao notebook
-        self.notebook.AddPage(self.summary_panel, "Resumo")
-        self.notebook.AddPage(self.connectivity_panel, "Conectividade")
-        self.notebook.AddPage(self.attributes_panel, "Atributos")
-        self.notebook.AddPage(self.supplies_panel, "Suprimentos")
-        self.notebook.AddPage(self.diagnostic_panel, "Diagnóstico")
+        # Adiciona os paineis à lista
+        self.tab_panels = [
+            self.summary_panel,
+            self.connectivity_panel,
+            self.attributes_panel,
+            self.supplies_panel,
+            self.diagnostic_panel
+        ]
         
-        main_sizer.Add(self.notebook, 1, wx.EXPAND | wx.ALL, 10)
+        # Mostra apenas o primeiro painel por padrão
+        for i, panel in enumerate(self.tab_panels):
+            tabs_sizer.Add(panel, 1, wx.EXPAND)
+            if i > 0:
+                panel.Hide()
+        
+        tabs_container.SetSizer(tabs_sizer)
+        main_sizer.Add(tabs_container, 1, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         
         # Botões
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para atualizar
-        self.refresh_button = wx.Button(self.panel, label="Atualizar Informações")
+        self.refresh_button = wx.Button(self.panel, label="Atualizar Informações", size=(-1, 36))
+        self.refresh_button.SetBackgroundColour(self.colors["accent_color"])
+        self.refresh_button.SetForegroundColour(self.colors["text_color"])
         self.refresh_button.Bind(wx.EVT_BUTTON, self._on_refresh)
+        
+        # Eventos de hover para o botão
+        def on_refresh_enter(evt):
+            self.refresh_button.SetBackgroundColour(wx.Colour(255, 120, 70))
+            self.refresh_button.Refresh()
+        
+        def on_refresh_leave(evt):
+            self.refresh_button.SetBackgroundColour(self.colors["accent_color"])
+            self.refresh_button.Refresh()
+        
+        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
+        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
+        
         button_sizer.Add(self.refresh_button, 0, wx.RIGHT, 10)
         
         # Botão para fechar
-        close_button = wx.Button(self.panel, label="Fechar")
+        close_button = wx.Button(self.panel, label="Fechar", size=(-1, 36))
+        close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+        close_button.SetForegroundColour(self.colors["text_color"])
         close_button.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CANCEL))
+        
+        # Eventos de hover para o botão
+        def on_close_enter(evt):
+            close_button.SetBackgroundColour(wx.Colour(80, 80, 80))
+            close_button.Refresh()
+        
+        def on_close_leave(evt):
+            close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+            close_button.Refresh()
+        
+        close_button.Bind(wx.EVT_ENTER_WINDOW, on_close_enter)
+        close_button.Bind(wx.EVT_LEAVE_WINDOW, on_close_leave)
+        
         button_sizer.Add(close_button, 0)
         
         main_sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
         
         self.panel.SetSizer(main_sizer)
+        
+        # Carrega os detalhes da impressora
+        self._load_printer_details()
+    
+    def _create_tab_panel(self, parent):
+        """Cria um painel para uma tab"""
+        panel = wx.ScrolledWindow(parent)
+        panel.SetBackgroundColour(self.colors["panel_bg"])
+        panel.SetScrollRate(0, 10)
+        return panel
+    
+    def _select_tab(self, index):
+        """Seleciona uma tab pelo índice"""
+        # Atualiza os botões das tabs
+        for i, button in enumerate(self.tab_buttons):
+            if i == index:
+                button.selected = True
+                button.SetBackgroundColour(self.colors["accent_color"])
+                button.GetChildren()[0].SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            else:
+                button.selected = False
+                button.SetBackgroundColour(self.colors["card_bg"])
+                button.GetChildren()[0].SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+            button.Refresh()
+        
+        # Mostra o painel correto
+        for i, panel in enumerate(self.tab_panels):
+            if i == index:
+                panel.Show()
+            else:
+                panel.Hide()
+        
+        # Atualiza o layout
+        self.panel.Layout()
     
     def _create_info_row(self, parent, label, value):
         """
@@ -424,7 +693,7 @@ class PrinterDetailsDialog(wx.Dialog):
             wx.Panel: Painel com a linha de informação
         """
         panel = wx.Panel(parent)
-        panel.SetBackgroundColour(self.colors["panel_bg"])
+        panel.SetBackgroundColour(self.colors["card_bg"])
         sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Rótulo
@@ -440,7 +709,7 @@ class PrinterDetailsDialog(wx.Dialog):
         # Se o valor for longo, adiciona um botão para copiar
         if len(str(value)) > 30:
             value_panel = wx.Panel(panel)
-            value_panel.SetBackgroundColour(self.colors["panel_bg"])
+            value_panel.SetBackgroundColour(self.colors["card_bg"])
             value_sizer = wx.BoxSizer(wx.HORIZONTAL)
             
             # Trunca o valor para exibição
@@ -450,8 +719,23 @@ class PrinterDetailsDialog(wx.Dialog):
             value_sizer.Add(value_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
             
             # Botão para copiar
-            copy_button = wx.Button(value_panel, label="Copiar", size=(60, 25))
+            copy_button = wx.Button(value_panel, label="Copiar", size=(70, 26))
+            copy_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+            copy_button.SetForegroundColour(self.colors["text_color"])
             copy_button.Bind(wx.EVT_BUTTON, lambda evt, v=value: self._copy_to_clipboard(v))
+            
+            # Eventos de hover para o botão
+            def on_copy_enter(evt):
+                copy_button.SetBackgroundColour(wx.Colour(80, 80, 80))
+                copy_button.Refresh()
+            
+            def on_copy_leave(evt):
+                copy_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+                copy_button.Refresh()
+            
+            copy_button.Bind(wx.EVT_ENTER_WINDOW, on_copy_enter)
+            copy_button.Bind(wx.EVT_LEAVE_WINDOW, on_copy_leave)
+            
             value_sizer.Add(copy_button, 0, wx.ALIGN_CENTER_VERTICAL)
             
             value_panel.SetSizer(value_sizer)
@@ -517,7 +801,7 @@ class PrinterDetailsDialog(wx.Dialog):
         except Exception as e:
             wx.MessageBox(f"Erro ao iniciar diagnóstico: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
             loading_text.Destroy()
-            
+    
     def _update_diagnostic_ui(self, message):
         """
         Atualiza a interface do diagnóstico
@@ -545,38 +829,74 @@ class PrinterDetailsDialog(wx.Dialog):
         for child in self.diagnostic_panel.GetChildren():
             child.Destroy()
             
+        # Card para os resultados
+        results_card = wx.Panel(self.diagnostic_panel)
+        results_card.SetBackgroundColour(self.colors["card_bg"])
+        results_sizer = wx.BoxSizer(wx.VERTICAL)
+        
         # Adiciona o resultado geral
         overall = results.get("overall", {})
         success = overall.get("success", False)
         message = overall.get("message", "Diagnóstico concluído")
         
         # Cor baseada no resultado
-        color = wx.Colour(40, 167, 69) if success else wx.Colour(220, 53, 69)
+        color = self.colors["success_color"] if success else self.colors["error_color"]
         
         # Título do resultado
-        result_text = wx.StaticText(self.diagnostic_panel, label=f"Resultado: {message}")
+        result_text = wx.StaticText(results_card, label=f"Resultado: {message}")
         result_text.SetForegroundColour(color)
         result_text.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        self.diagnostic_sizer.Add(result_text, 0, wx.ALL | wx.CENTER, 10)
+        results_sizer.Add(result_text, 0, wx.ALL | wx.CENTER, 15)
         
         # Separador
-        separator = wx.StaticLine(self.diagnostic_panel, style=wx.LI_HORIZONTAL)
-        self.diagnostic_sizer.Add(separator, 0, wx.EXPAND | wx.ALL, 10)
+        separator = wx.StaticLine(results_card, style=wx.LI_HORIZONTAL)
+        results_sizer.Add(separator, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 15)
         
         # Adiciona os resultados detalhados de cada teste
         for test_id, test_result in results.items():
             if test_id != "overall":
-                self._add_test_result(test_id, test_result)
+                test_panel = self._add_test_result_panel(results_card, test_id, test_result)
+                results_sizer.Add(test_panel, 0, wx.EXPAND | wx.ALL, 10)
         
+        results_card.SetSizer(results_sizer)
+        
+        # Adiciona borda arredondada ao card
+        def on_results_card_paint(event):
+            dc = wx.BufferedPaintDC(results_card)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = results_card.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in results_card.GetChildren():
+                child.Refresh()
+        
+        results_card.Bind(wx.EVT_PAINT, on_results_card_paint)
+        results_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+        
+        self.diagnostic_sizer.Add(results_card, 0, wx.EXPAND | wx.ALL, 15)
         self.diagnostic_panel.Layout()
-        
-    def _add_test_result(self, test_id, result):
+    
+    def _add_test_result_panel(self, parent, test_id, result):
         """
-        Adiciona o resultado de um teste ao painel de diagnóstico
+        Adiciona o painel de resultado de um teste
         
         Args:
+            parent: Painel pai
             test_id: ID do teste
             result: Resultado do teste
+            
+        Returns:
+            wx.Panel: Painel de resultado
         """
         # Nome do teste formatado
         test_names = {
@@ -588,8 +908,8 @@ class PrinterDetailsDialog(wx.Dialog):
         test_name = test_names.get(test_id, test_id.replace("_", " ").title())
         
         # Cria um painel para o resultado
-        test_panel = wx.Panel(self.diagnostic_panel)
-        test_panel.SetBackgroundColour(self.colors["panel_bg"])
+        test_panel = wx.Panel(parent)
+        test_panel.SetBackgroundColour(self.colors["card_bg"])
         test_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Título do teste
@@ -598,7 +918,7 @@ class PrinterDetailsDialog(wx.Dialog):
         title = wx.StaticText(test_panel, label=f"{test_name}: {status}")
         
         # Cor baseada no resultado
-        color = wx.Colour(40, 167, 69) if success else wx.Colour(220, 53, 69)
+        color = self.colors["success_color"] if success else self.colors["error_color"]
         title.SetForegroundColour(color)
         title.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         test_sizer.Add(title, 0, wx.ALL, 5)
@@ -615,11 +935,11 @@ class PrinterDetailsDialog(wx.Dialog):
         if details:
             details_text = wx.StaticText(test_panel, label=details)
             details_text.SetForegroundColour(self.colors["text_secondary"])
-            details_text.Wrap(self.diagnostic_panel.GetSize().width - 40)  # Wrap text to fit in panel
+            details_text.Wrap(parent.GetSize().width - 40)  # Wrap text to fit in panel
             test_sizer.Add(details_text, 0, wx.LEFT | wx.BOTTOM, 5)
         
         test_panel.SetSizer(test_sizer)
-        self.diagnostic_sizer.Add(test_panel, 0, wx.EXPAND | wx.ALL, 5)
+        return test_panel
     
     def _load_printer_details(self):
         """Carrega os detalhes da impressora"""
@@ -662,23 +982,64 @@ class PrinterDetailsDialog(wx.Dialog):
             details: Detalhes da impressora
         """
         if not details:
-            self.summary_loading_text.SetLabel("Não foi possível carregar os detalhes da impressora.")
-            self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
-            self.supplies_loading_text.SetLabel("Não foi possível carregar informações de suprimentos.")
+            if hasattr(self, 'summary_loading_text') and self.summary_loading_text:
+                try:
+                    self.summary_loading_text.SetLabel("Não foi possível carregar os detalhes da impressora.")
+                except wx.PyDeadObjectError:
+                    self.summary_loading_text = None
+                
+            if hasattr(self, 'loading_text') and self.loading_text:
+                try:
+                    self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
+                except wx.PyDeadObjectError:
+                    self.loading_text = None
+                
+            if hasattr(self, 'supplies_loading_text') and self.supplies_loading_text:
+                try:
+                    self.supplies_loading_text.SetLabel("Não foi possível carregar informações de suprimentos.")
+                except wx.PyDeadObjectError:
+                    self.supplies_loading_text = None
             return
         
         # Atualiza a impressora com os detalhes
         self.printer.update_from_discovery(details)
         
-        # Atualiza cada painel
-        self._update_summary_panel(details)
-        self._update_attributes_panel(details)
-        self._update_supplies_panel(details)
+        # Atualiza cada painel - garante que apenas um será executado por vez
+        try:
+            self._update_summary_panel(details)
+        except Exception as e:
+            logger.error(f"Erro ao atualizar resumo: {str(e)}")
+            
+        try:
+            self._update_attributes_panel(details)
+        except Exception as e:
+            logger.error(f"Erro ao atualizar atributos: {str(e)}")
+            
+        try:
+            self._update_supplies_panel(details)
+        except Exception as e:
+            logger.error(f"Erro ao atualizar suprimentos: {str(e)}")
         
         # Atualiza o estado de conectividade
-        self._update_connectivity_status()
+        try:
+            self._update_connectivity_status()
+        except Exception as e:
+            logger.error(f"Erro ao atualizar status de conectividade: {str(e)}")
         
         self.details_loaded = True
+    
+    def _on_refresh(self, event):
+        """Manipula o clique no botão de atualizar"""
+        # Desabilita o botão durante a atualização
+        self.refresh_button.Disable()
+        self.refresh_button.SetLabel("Atualizando...")
+        
+        # Carrega os detalhes novamente
+        self._load_printer_details()
+        
+        # Reabilita o botão
+        self.refresh_button.Enable()
+        self.refresh_button.SetLabel("Atualizar Informações")
     
     def _update_summary_panel(self, details):
         """
@@ -688,65 +1049,153 @@ class PrinterDetailsDialog(wx.Dialog):
             details: Detalhes da impressora
         """
         # Limpa o painel
-        self.summary_loading_text.Destroy()
+        if hasattr(self, 'summary_loading_text') and self.summary_loading_text:
+            try:
+                self.summary_loading_text.Destroy()
+                self.summary_loading_text = None
+            except (wx.PyDeadObjectError, Exception):
+                self.summary_loading_text = None
+                
         self.summary_panel.GetSizer().Clear()
+
+        # Card para o resumo
+        summary_card = wx.Panel(self.summary_panel)
+        summary_card.SetBackgroundColour(self.colors["card_bg"])
+        summary_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Cria um estilo de texto para título
-        title_style = wx.TextAttr()
-        title_style.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        title_style.SetTextColour(self.colors["text_color"])
+        # Título do resumo
+        title = wx.StaticText(summary_card, label="RESUMO DA IMPRESSORA")
+        title.SetForegroundColour(self.colors["text_color"])
+        title.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        summary_sizer.Add(title, 0, wx.ALL, 15)
         
-        # Cria um estilo de texto para conteúdo
-        content_style = wx.TextAttr()
-        content_style.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        content_style.SetTextColour(self.colors["text_secondary"])
+        # Painel para informações em duas colunas
+        info_panel = wx.Panel(summary_card)
+        info_panel.SetBackgroundColour(self.colors["card_bg"])
+        info_sizer = wx.FlexGridSizer(rows=0, cols=2, vgap=10, hgap=20)
+        info_sizer.AddGrowableCol(1, 1)  # A segunda coluna é expansível
         
-        # Cria um controle de texto com formatação
-        text_ctrl = wx.TextCtrl(
-            self.summary_panel,
-            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2 | wx.BORDER_NONE
-        )
-        text_ctrl.SetBackgroundColour(self.colors["panel_bg"])
-        
-        # Cabeçalho de resumo
-        text_ctrl.SetDefaultStyle(title_style)
-        text_ctrl.AppendText("RESUMO DA IMPRESSORA: " + self.printer.name + "\n")
-        text_ctrl.AppendText("=" * 50 + "\n")
-        
-        # Informações básicas
-        text_ctrl.SetDefaultStyle(content_style)
-        text_ctrl.AppendText(f"IP: {self.printer.ip or 'Desconhecido'}\n")
-        text_ctrl.AppendText(f"Modelo: {self.printer.model or 'Desconhecido'}\n")
-        text_ctrl.AppendText(f"Localização: {self.printer.location or 'Desconhecida'}\n")
-        text_ctrl.AppendText(f"Status: {self.printer.state or 'Desconhecido'}\n")
+        # Adiciona informações básicas
+        self._add_summary_item(info_panel, info_sizer, "Nome:", self.printer.name)
+        self._add_summary_item(info_panel, info_sizer, "IP:", self.printer.ip or "Desconhecido")
+        self._add_summary_item(info_panel, info_sizer, "Modelo:", self.printer.model or "Desconhecido")
+        self._add_summary_item(info_panel, info_sizer, "Localização:", self.printer.location or "Desconhecida")
+        self._add_summary_item(info_panel, info_sizer, "Status:", self.printer.state or "Desconhecido")
         
         # Informações adicionais
         if 'manufacturer' in details:
-            text_ctrl.AppendText(f"Fabricante: {details['manufacturer']}\n")
+            self._add_summary_item(info_panel, info_sizer, "Fabricante:", details['manufacturer'])
         if 'version' in details:
-            text_ctrl.AppendText(f"Versão: {details['version']}\n")
+            self._add_summary_item(info_panel, info_sizer, "Versão:", details['version'])
         if 'serial' in details:
-            text_ctrl.AppendText(f"Número de Série: {details['serial']}\n")
+            self._add_summary_item(info_panel, info_sizer, "Número de Série:", details['serial'])
         
         # URIs suportadas
         if 'printer-uri-supported' in details:
             uris = details['printer-uri-supported']
+            uri_text = ""
             if isinstance(uris, list):
-                text_ctrl.AppendText(f"URIs suportadas: {uris}\n")
+                uri_text = ", ".join(uris)
             else:
-                text_ctrl.AppendText(f"URIs suportadas: [{uris}]\n")
+                uri_text = str(uris)
+            self._add_summary_item(info_panel, info_sizer, "URIs suportadas:", uri_text)
+        
+        info_panel.SetSizer(info_sizer)
+        summary_sizer.Add(info_panel, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
         
         # Adiciona informações de suprimentos se disponíveis
         if 'supplies' in details and details['supplies']:
-            text_ctrl.AppendText("\nInformações de Suprimentos:\n")
+            supply_title = wx.StaticText(summary_card, label="Informações de Suprimentos")
+            supply_title.SetForegroundColour(self.colors["text_color"])
+            supply_title.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            summary_sizer.Add(supply_title, 0, wx.ALL, 15)
+            
+            supply_panel = wx.Panel(summary_card)
+            supply_panel.SetBackgroundColour(self.colors["card_bg"])
+            supply_sizer = wx.FlexGridSizer(rows=0, cols=3, vgap=8, hgap=15)
+            
+            # Cabeçalho
+            header_name = wx.StaticText(supply_panel, label="Nome")
+            header_name.SetForegroundColour(self.colors["text_secondary"])
+            header_name.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            
+            header_type = wx.StaticText(supply_panel, label="Tipo")
+            header_type.SetForegroundColour(self.colors["text_secondary"])
+            header_type.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            
+            header_level = wx.StaticText(supply_panel, label="Nível")
+            header_level.SetForegroundColour(self.colors["text_secondary"])
+            header_level.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            
+            supply_sizer.Add(header_name, 0)
+            supply_sizer.Add(header_type, 0)
+            supply_sizer.Add(header_level, 0)
+            
+            # Adiciona cada suprimento
             for supply in details['supplies']:
-                text_ctrl.AppendText(f"  {supply['name']}: {supply['level']}% (Tipo: {supply['type']}, Cor: {supply.get('color', 'N/A')})\n")
+                name_text = wx.StaticText(supply_panel, label=supply['name'])
+                name_text.SetForegroundColour(self.colors["text_color"])
+                
+                type_text = wx.StaticText(supply_panel, label=supply['type'])
+                type_text.SetForegroundColour(self.colors["text_color"])
+                
+                level_text = wx.StaticText(supply_panel, label=f"{supply['level']}%")
+                level_text.SetForegroundColour(self.colors["text_color"])
+                
+                supply_sizer.Add(name_text, 0)
+                supply_sizer.Add(type_text, 0)
+                supply_sizer.Add(level_text, 0)
+            
+            supply_panel.SetSizer(supply_sizer)
+            summary_sizer.Add(supply_panel, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
         
-        text_ctrl.AppendText("=" * 50 + "\n")
+        summary_card.SetSizer(summary_sizer)
         
-        # Ajusta o tamanho do controle de texto
-        self.summary_panel.GetSizer().Add(text_ctrl, 1, wx.EXPAND | wx.ALL, 10)
+        # Adiciona borda arredondada ao card
+        def on_summary_card_paint(event):
+            dc = wx.BufferedPaintDC(summary_card)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = summary_card.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in summary_card.GetChildren():
+                child.Refresh()
+        
+        summary_card.Bind(wx.EVT_PAINT, on_summary_card_paint)
+        summary_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+        
+        self.summary_panel.GetSizer().Add(summary_card, 0, wx.EXPAND | wx.ALL, 10)
         self.summary_panel.Layout()
+    
+    def _add_summary_item(self, parent, sizer, label, value):
+        """
+        Adiciona um item ao resumo
+        
+        Args:
+            parent: Painel pai
+            sizer: Sizer
+            label: Rótulo
+            value: Valor
+        """
+        label_ctrl = wx.StaticText(parent, label=label)
+        label_ctrl.SetForegroundColour(self.colors["text_secondary"])
+        label_ctrl.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        
+        value_ctrl = wx.StaticText(parent, label=str(value))
+        value_ctrl.SetForegroundColour(self.colors["text_color"])
+        
+        sizer.Add(label_ctrl, 0, wx.ALIGN_LEFT)
+        sizer.Add(value_ctrl, 0, wx.EXPAND)
     
     def _update_attributes_panel(self, details):
         """
@@ -756,15 +1205,40 @@ class PrinterDetailsDialog(wx.Dialog):
             details: Detalhes da impressora
         """
         if not details:
-            self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
+            if hasattr(self, 'loading_text') and self.loading_text:
+                try:
+                    self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
+                except wx.PyDeadObjectError:
+                    self.loading_text = None
             return
         
         # Limpa o sizer
-        self.loading_text.Destroy()
+        if hasattr(self, 'loading_text') and self.loading_text:
+            try:
+                self.loading_text.Destroy()
+                self.loading_text = None  # Limpa a referência para evitar uso futuro
+            except (wx.PyDeadObjectError, Exception):
+                # Ignora erros se o widget já estiver destruído
+                self.loading_text = None
+                
         self.attributes_sizer.Clear()
+        
+        # Card para os atributos
+        attributes_card = wx.Panel(self.attributes_panel)
+        attributes_card.SetBackgroundColour(self.colors["card_bg"])
+        attributes_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Título
+        title = wx.StaticText(attributes_card, label="ATRIBUTOS DA IMPRESSORA")
+        title.SetForegroundColour(self.colors["text_color"])
+        title.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        attributes_sizer.Add(title, 0, wx.ALL, 15)
         
         # Adiciona os atributos
         sorted_attrs = sorted(details.items())
+        
+        grid_sizer = wx.FlexGridSizer(rows=0, cols=2, vgap=10, hgap=20)
+        grid_sizer.AddGrowableCol(1, 1)  # A segunda coluna é expansível
         
         for i, (key, value) in enumerate(sorted_attrs):
             # Ignora keys já exibidas em outro lugar
@@ -778,19 +1252,74 @@ class PrinterDetailsDialog(wx.Dialog):
                     value = f"Lista com {len(value)} itens"
                 else:
                     value = f"Objeto com {len(value)} atributos"
-                    
-            # Adiciona a linha
-            row = self._create_info_row(self.attributes_panel, f"{key}:", value)
-            self.attributes_sizer.Add(row, 0, wx.EXPAND | wx.ALL, 3)
             
-            # Alterna cor de fundo para melhor legibilidade
-            if i % 2 == 0:
-                row.SetBackgroundColour(self.colors["panel_bg"])
-            else:
-                row.SetBackgroundColour(wx.Colour(30, 30, 30))
+            # Label
+            key_ctrl = wx.StaticText(attributes_card, label=key)
+            key_ctrl.SetForegroundColour(self.colors["text_secondary"])
+            
+            # Valor
+            value_ctrl = wx.StaticText(attributes_card, label=str(value))
+            value_ctrl.SetForegroundColour(self.colors["text_color"])
+            value_ctrl.Wrap(400)  # Wrap text para manter uma boa apresentação
+            
+            grid_sizer.Add(key_ctrl, 0, wx.ALIGN_LEFT)
+            grid_sizer.Add(value_ctrl, 0, wx.EXPAND)
+            
+        attributes_sizer.Add(grid_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 15)
+        attributes_card.SetSizer(attributes_sizer)
         
-        # Atualiza o layout
+        # Adiciona borda arredondada ao card
+        def on_attributes_card_paint(event):
+            dc = wx.BufferedPaintDC(attributes_card)
+            gc = wx.GraphicsContext.Create(dc)
+            
+            rect = attributes_card.GetClientRect()
+            
+            # Desenha o fundo com cantos arredondados
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+            
+            gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+            gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+            
+            gc.DrawPath(path)
+            
+            # Redesenha os filhos
+            for child in attributes_card.GetChildren():
+                child.Refresh()
+        
+        attributes_card.Bind(wx.EVT_PAINT, on_attributes_card_paint)
+        attributes_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+        
+        self.attributes_sizer.Add(attributes_card, 0, wx.EXPAND | wx.ALL, 10)
         self.attributes_panel.Layout()
+    
+    def _update_connectivity_status(self):
+        """Atualiza o status na guia de conectividade"""
+        # Encontra o painel de status
+        for child in self.connectivity_panel.GetChildren():
+            if isinstance(child, wx.Panel):
+                for grandchild in child.GetChildren():
+                    if isinstance(grandchild, wx.Panel):
+                        for great_grandchild in grandchild.GetChildren():
+                            if isinstance(great_grandchild, wx.StaticText) and great_grandchild.GetLabel() == "Status:":
+                                # Encontrou o painel, atualiza o valor
+                                for sibling in grandchild.GetChildren():
+                                    if isinstance(sibling, wx.StaticText) and sibling != great_grandchild:
+                                        # Verifica os atributos da impressora de forma segura
+                                        is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
+                                        is_ready = hasattr(self.printer, 'is_ready') and self.printer.is_ready
+                                        is_usable = is_online and is_ready
+                                        
+                                        status_text = "Pronta" if is_usable else "Indisponível"
+                                        sibling.SetLabel(status_text)
+                                        sibling.SetForegroundColour(
+                                            self.colors["success_color"] if is_usable else self.colors["error_color"]
+                                        )
+                                        grandchild.Layout()
+                                        break
+                                break
+                        break
     
     def _update_supplies_panel(self, details):
         """
@@ -800,14 +1329,31 @@ class PrinterDetailsDialog(wx.Dialog):
             details: Detalhes da impressora
         """
         # Limpa o sizer
-        self.supplies_loading_text.Destroy()
+        if hasattr(self, 'supplies_loading_text') and self.supplies_loading_text:
+            try:
+                self.supplies_loading_text.Destroy()
+                self.supplies_loading_text = None
+            except (wx.PyDeadObjectError, Exception):
+                self.supplies_loading_text = None
+                
         self.supplies_sizer.Clear()
+
+        # Título da seção
+        title = wx.StaticText(self.supplies_panel, label="Níveis de Suprimentos")
+        title.SetForegroundColour(self.colors["text_color"])
+        title.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        self.supplies_sizer.Add(title, 0, wx.ALL | wx.CENTER, 15)
         
         # Verifica se há informações de suprimentos
         if 'supplies' in details and details['supplies']:
+            # Criar um painel de card para os suprimentos
+            supplies_card = wx.Panel(self.supplies_panel)
+            supplies_card.SetBackgroundColour(self.colors["card_bg"])
+            supplies_card_sizer = wx.BoxSizer(wx.VERTICAL)
+            
             for supply in details['supplies']:
-                supply_panel = wx.Panel(self.supplies_panel)
-                supply_panel.SetBackgroundColour(self.colors["panel_bg"])
+                supply_panel = wx.Panel(supplies_card)
+                supply_panel.SetBackgroundColour(self.colors["card_bg"])
                 supply_sizer = wx.BoxSizer(wx.VERTICAL)
                 
                 # Nome do suprimento
@@ -822,62 +1368,132 @@ class PrinterDetailsDialog(wx.Dialog):
                 info.SetForegroundColour(self.colors["text_secondary"])
                 supply_sizer.Add(info, 0, wx.LEFT | wx.BOTTOM, 5)
                 
-                # Barra de progresso
-                gauge = wx.Gauge(supply_panel, range=100, size=(-1, 20))
-                gauge.SetValue(int(supply['level']))
-                supply_sizer.Add(gauge, 0, wx.EXPAND | wx.ALL, 5)
+                # Painel para a barra de progresso e percentual
+                gauge_panel = wx.Panel(supply_panel)
+                gauge_panel.SetBackgroundColour(self.colors["card_bg"])
+                gauge_sizer = wx.BoxSizer(wx.HORIZONTAL)
                 
                 # Nível
-                level_text = f"Nível: {supply['level']}%"
-                level = wx.StaticText(supply_panel, label=level_text)
+                level_text = f"{supply['level']}%"
+                level = wx.StaticText(gauge_panel, label=level_text)
                 level.SetForegroundColour(self.colors["text_secondary"])
-                supply_sizer.Add(level, 0, wx.LEFT | wx.BOTTOM, 5)
+                
+                # Determina a cor baseada no nível
+                level_value = int(supply['level'])
+                if level_value > 50:
+                    color = self.colors["success_color"]  # Verde para nível alto
+                elif level_value > 15:
+                    color = self.colors["warning_color"]  # Amarelo para nível médio
+                else:
+                    color = self.colors["error_color"]  # Vermelho para nível baixo
+                
+                # Barra de progresso personalizada - usando bitmap pré-renderizado
+                gauge_width = 300
+                gauge_height = 18
+                
+                # Cria um bitmap para a barra de progresso
+                progress_bitmap = wx.Bitmap(gauge_width, gauge_height)
+                dc = wx.MemoryDC()
+                dc.SelectObject(progress_bitmap)
+                
+                # Desenha o fundo da barra
+                dc.SetBackground(wx.Brush(wx.Colour(45, 45, 45)))
+                dc.Clear()
+                
+                # Calcula o comprimento do preenchimento da barra
+                fill_width = int((gauge_width * level_value) / 100)
+                
+                # Desenha o preenchimento da barra
+                dc.SetBrush(wx.Brush(color))
+                dc.SetPen(wx.Pen(color))
+                dc.DrawRectangle(0, 0, fill_width, gauge_height)
+                
+                # Finaliza o desenho
+                dc.SelectObject(wx.NullBitmap)
+                
+                # Cria e adiciona o bitmap ao layout
+                progress_bar = wx.StaticBitmap(gauge_panel, bitmap=progress_bitmap, size=(gauge_width, gauge_height))
+                
+                gauge_sizer.Add(progress_bar, 0, wx.RIGHT, 10)
+                gauge_sizer.Add(level, 0, wx.ALIGN_CENTER_VERTICAL)
+                
+                gauge_panel.SetSizer(gauge_sizer)
+                supply_sizer.Add(gauge_panel, 0, wx.LEFT | wx.BOTTOM, 10)
+                
+                # Adiciona linha separadora, exceto no último item
+                if supply != details['supplies'][-1]:
+                    separator = wx.StaticLine(supply_panel)
+                    separator.SetForegroundColour(self.colors["border_color"])
+                    supply_sizer.Add(separator, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 10)
                 
                 supply_panel.SetSizer(supply_sizer)
-                self.supplies_sizer.Add(supply_panel, 0, wx.EXPAND | wx.ALL, 10)
+                supplies_card_sizer.Add(supply_panel, 0, wx.EXPAND | wx.ALL, 5)
+            
+            supplies_card.SetSizer(supplies_card_sizer)
+            
+            # Adiciona borda arredondada ao card de suprimentos
+            def on_supplies_card_paint(event):
+                dc = wx.BufferedPaintDC(supplies_card)
+                gc = wx.GraphicsContext.Create(dc)
+                
+                rect = supplies_card.GetClientRect()
+                
+                # Desenha o fundo com cantos arredondados
+                path = gc.CreatePath()
+                path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+                
+                gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+                gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+                
+                gc.DrawPath(path)
+                
+                # Redesenha os filhos
+                for child in supplies_card.GetChildren():
+                    child.Refresh()
+            
+            supplies_card.Bind(wx.EVT_PAINT, on_supplies_card_paint)
+            supplies_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+            
+            self.supplies_sizer.Add(supplies_card, 0, wx.EXPAND | wx.ALL, 10)
         else:
             # Sem informações de suprimentos
-            no_supplies = wx.StaticText(self.supplies_panel, label="Nenhuma informação de suprimentos disponível.")
+            no_supplies_card = wx.Panel(self.supplies_panel)
+            no_supplies_card.SetBackgroundColour(self.colors["card_bg"])
+            no_supplies_sizer = wx.BoxSizer(wx.VERTICAL)
+            
+            no_supplies = wx.StaticText(no_supplies_card, label="Nenhuma informação de suprimentos disponível.")
             no_supplies.SetForegroundColour(self.colors["text_color"])
-            self.supplies_sizer.Add(no_supplies, 0, wx.ALL | wx.CENTER, 20)
+            no_supplies_sizer.Add(no_supplies, 0, wx.ALL | wx.CENTER, 20)
+            
+            no_supplies_card.SetSizer(no_supplies_sizer)
+            
+            # Adiciona borda arredondada ao card
+            def on_no_supplies_card_paint(event):
+                dc = wx.BufferedPaintDC(no_supplies_card)
+                gc = wx.GraphicsContext.Create(dc)
+                
+                rect = no_supplies_card.GetClientRect()
+                
+                # Desenha o fundo com cantos arredondados
+                path = gc.CreatePath()
+                path.AddRoundedRectangle(0, 0, rect.width, rect.height, 10)
+                
+                gc.SetBrush(wx.Brush(self.colors["card_bg"]))
+                gc.SetPen(wx.Pen(self.colors["border_color"], 1))
+                
+                gc.DrawPath(path)
+                
+                # Redesenha os filhos
+                for child in no_supplies_card.GetChildren():
+                    child.Refresh()
+            
+            no_supplies_card.Bind(wx.EVT_PAINT, on_no_supplies_card_paint)
+            no_supplies_card.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+            
+            self.supplies_sizer.Add(no_supplies_card, 0, wx.EXPAND | wx.ALL, 10)
         
         # Atualiza o layout
         self.supplies_panel.Layout()
-    
-    def _update_connectivity_status(self):
-        """Atualiza o status na guia de conectividade"""
-        # Encontra o painel de status
-        for child in self.connectivity_panel.GetChildren():
-            if isinstance(child, wx.Panel):
-                for grandchild in child.GetChildren():
-                    if isinstance(grandchild, wx.StaticText) and grandchild.GetLabel() == "Status:":
-                        # Encontrou o painel, atualiza o valor
-                        for sibling in child.GetChildren():
-                            if isinstance(sibling, wx.StaticText) and sibling != grandchild:
-                                # Verifica os atributos da impressora de forma segura
-                                is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
-                                is_ready = hasattr(self.printer, 'is_ready') and self.printer.is_ready
-                                is_usable = is_online and is_ready
-                                
-                                status_text = "Pronta" if is_usable else "Indisponível"
-                                sibling.SetLabel(status_text)
-                                sibling.SetForegroundColour(wx.Colour(40, 167, 69) if is_usable else wx.Colour(220, 53, 69))
-                                child.Layout()
-                                break
-                        break
-    
-    def _on_refresh(self, event):
-        """Manipula o clique no botão de atualizar"""
-        # Desabilita o botão durante a atualização
-        self.refresh_button.Disable()
-        self.refresh_button.SetLabel("Atualizando...")
-        
-        # Carrega os detalhes novamente
-        self._load_printer_details()
-        
-        # Reabilita o botão
-        self.refresh_button.Enable()
-        self.refresh_button.SetLabel("Atualizar Informações")
 
 class PrinterListPanel(wx.ScrolledWindow):
     """Painel de lista de impressoras moderno com cards"""
