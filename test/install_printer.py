@@ -1,536 +1,574 @@
 import os
 import sys
 import subprocess
-import tempfile
-import shutil
-import winreg
-import ctypes
-import urllib.request
-import zipfile
-import platform
 import time
+import tempfile
+import urllib.request
+import ctypes
+import winreg
 from pathlib import Path
+import shutil
+import locale
 
-# Verificar se está rodando como administrador
+# Constantes
+PDF_DIR = "c:/pdfs"
+PDF24_MSI_URL = "https://download.pdf24.org/pdf24-creator-11.11.1-x64.msi"
+PRINTER_NAME = "Impressora LoQQuei"
+
+# Detecta o idioma do Windows para usar o nome correto do grupo "Everyone"
+try:
+    lang = locale.getpreferredencoding()
+    if lang.lower() == 'cp1252':  # Português
+        EVERYONE_GROUP = "Todos"
+    else:
+        EVERYONE_GROUP = "Everyone"
+except:
+    EVERYONE_GROUP = "Todos"  # Assumir português como padrão
+
 def is_admin():
+    """Verifica se o script está sendo executado como administrador."""
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
 
-# Função para baixar arquivos
-def download_file(url, destination):
-    try:
-        # Criar objeto Request com User-Agent para evitar bloqueios
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-        req = urllib.request.Request(url, headers=headers)
-        
-        # Baixar o arquivo
-        with urllib.request.urlopen(req) as response, open(destination, 'wb') as out_file:
-            shutil.copyfileobj(response, out_file)
-        return True
-    except Exception as e:
-        print(f"Erro ao baixar arquivo: {e}")
-        return False
-
-# Função para instalar Ghostscript silenciosamente
-def install_ghostscript():
-    # Verificar arquitetura do sistema
-    is_64bit = platform.machine().endswith('64')
+def install_required_packages():
+    """Instala pacotes Python necessários."""
+    required_packages = ['pywin32']
     
-    # URL para a versão mais recente do Ghostscript (10.02.0) - link oficial
-    if is_64bit:
-        gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10020/gs10020w64.exe"
-    else:
-        gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10020/gs10020w32.exe"
-    
-    # Baixar o instalador
-    temp_dir = tempfile.gettempdir()
-    installer_path = os.path.join(temp_dir, "ghostscript_installer.exe")
-    
-    print("Baixando Ghostscript...")
-    if not download_file(gs_url, installer_path):
-        print("Falha ao baixar Ghostscript. Abortando.")
-        return False
-    
-    # Instalar silenciosamente
-    print("Instalando Ghostscript...")
-    try:
-        subprocess.run([
-            installer_path,
-            "/S",  # Instalação silenciosa
-            "/NCRC"  # Não verificar CRC
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Aguardar instalação concluir
-        time.sleep(10)
-        
-        # Verificar se Ghostscript foi instalado corretamente
+    for package in required_packages:
         try:
-            # Verificar chave de registro para instalação
-            reg_path = r"SOFTWARE\GPL Ghostscript"
-                
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg_path) as key:
-                return True
+            subprocess.check_call([sys.executable, '-m', 'pip', 'install', package, '--quiet'])
+            print(f"Pacote {package} instalado com sucesso.")
         except:
-            # Tentar caminhos comuns de instalação
-            potential_paths = [
-                r"C:\Program Files\gs\gs10.02.0\bin\gswin64c.exe",
-                r"C:\Program Files\gs\gs10.01.2\bin\gswin64c.exe",
-                r"C:\Program Files\gs\gs10.00.0\bin\gswin64c.exe",
-                r"C:\Program Files (x86)\gs\gs10.02.0\bin\gswin32c.exe",
-                r"C:\Program Files (x86)\gs\gs10.01.2\bin\gswin32c.exe",
-                r"C:\Program Files (x86)\gs\gs10.00.0\bin\gswin32c.exe"
-            ]
-            
-            for path in potential_paths:
-                if os.path.exists(path):
-                    return True
-            
+            print(f"Erro ao instalar o pacote {package}.")
             return False
-            
-    except Exception as e:
-        print(f"Erro na instalação do Ghostscript: {e}")
-        return False
-    finally:
-        # Limpar o instalador
-        try:
-            os.remove(installer_path)
-        except:
-            pass
     
     return True
 
-# Encontrar o caminho do executável do Ghostscript
-def find_ghostscript_path():
-    gs_path = ""
+def download_file(url, destination):
+    """Baixa arquivo da URL especificada."""
     try:
-        # Procurar nas chaves de registro do Ghostscript
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\GPL Ghostscript") as key:
-            # Obter a versão mais recente (último item na lista)
-            versions = []
-            i = 0
-            while True:
-                try:
-                    version = winreg.EnumKey(key, i)
-                    versions.append(version)
-                    i += 1
-                except WindowsError:
-                    break
-            
-            if versions:
-                # Ordenar versões e pegar a mais recente
-                versions.sort(reverse=True)
-                version = versions[0]
-                
-                with winreg.OpenKey(key, version) as verkey:
-                    gs_install_dir = winreg.QueryValueEx(verkey, "GS_DLL")[0]
-                    gs_install_dir = gs_install_dir.rsplit('\\', 1)[0]  # Remover o nome do arquivo .dll
-                    
-                    # Tentar encontrar o executável
-                    if platform.machine().endswith('64'):
-                        gs_path = os.path.join(gs_install_dir, "gswin64c.exe")
-                    else:
-                        gs_path = os.path.join(gs_install_dir, "gswin32c.exe")
-    except:
-        pass
-    
-    if not gs_path or not os.path.exists(gs_path):
-        # Tentar caminhos padrão
-        potential_paths = [
-            r"C:\Program Files\gs\gs10.02.0\bin\gswin64c.exe",
-            r"C:\Program Files\gs\gs10.01.2\bin\gswin64c.exe",
-            r"C:\Program Files\gs\gs10.00.0\bin\gswin64c.exe",
-            r"C:\Program Files (x86)\gs\gs10.02.0\bin\gswin32c.exe",
-            r"C:\Program Files (x86)\gs\gs10.01.2\bin\gswin32c.exe",
-            r"C:\Program Files (x86)\gs\gs10.00.0\bin\gswin32c.exe"
-        ]
-        
-        for path in potential_paths:
-            if os.path.exists(path):
-                gs_path = path
-                break
-    
-    return gs_path
-
-# Criar um serviço Windows para monitorar a pasta de impressão
-def create_print_monitor_service(install_dir, spool_folder, output_folder, gs_path):
-    # Criar script de serviço para monitorar a pasta e converter PS para PDF
-    monitor_script = f"""import os
-import sys
-import time
-import shutil
-import subprocess
-import logging
-import win32serviceutil
-import win32service
-import win32event
-import servicemanager
-import socket
-from datetime import datetime
-
-# Configuração do logger
-def setup_logging():
-    log_file = r'{install_dir}\\pdf_printer_service.log'
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        filename=log_file,
-        filemode='a'
-    )
-    return logging.getLogger('PDFPrinterService')
-
-# Classe de serviço
-class PDFPrinterService(win32serviceutil.ServiceFramework):
-    _svc_name_ = "PDFPrinterService"
-    _svc_display_name_ = "PDF Printer Service"
-    _svc_description_ = "Monitora arquivos de impressão e converte para PDF"
-
-    def __init__(self, args):
-        win32serviceutil.ServiceFramework.__init__(self, args)
-        self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
-        socket.setdefaulttimeout(60)
-        self.is_running = False
-        self.logger = setup_logging()
-
-    def SvcStop(self):
-        self.logger.info('Parando serviço...')
-        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
-        win32event.SetEvent(self.hWaitStop)
-        self.is_running = False
-
-    def SvcDoRun(self):
-        servicemanager.LogMsg(
-            servicemanager.EVENTLOG_INFORMATION_TYPE,
-            servicemanager.PYS_SERVICE_STARTED,
-            (self._svc_name_, '')
-        )
-        self.logger.info('Serviço iniciado')
-        self.is_running = True
-        self.main()
-
-    def main(self):
-        # Configurações
-        spool_folder = r'{spool_folder}'
-        output_folder = r'{output_folder}'
-        gs_path = r'{gs_path}'
-        
-        # Criar pastas se não existirem
-        os.makedirs(spool_folder, exist_ok=True)
-        os.makedirs(output_folder, exist_ok=True)
-        
-        self.logger.info(f'Monitorando pasta: {{spool_folder}}')
-        self.logger.info(f'Pasta de saída: {{output_folder}}')
-        
-        # Loop principal
-        while self.is_running:
-            try:
-                # Verificar arquivos na pasta de spool
-                files = [f for f in os.listdir(spool_folder) if f.endswith('.ps') or f.endswith('.prn')]
-                
-                for file in files:
-                    try:
-                        input_file = os.path.join(spool_folder, file)
-                        
-                        # Verificar se o arquivo está sendo usado
-                        try:
-                            with open(input_file, 'a'):
-                                pass
-                        except:
-                            # Arquivo em uso, pular
-                            continue
-                        
-                        # Gerar nome de saída com timestamp
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        output_file = os.path.join(output_folder, f'document_{{timestamp}}.pdf')
-                        
-                        # Converter para PDF usando Ghostscript
-                        self.logger.info(f'Convertendo {{file}} para PDF...')
-                        result = subprocess.run([
-                            gs_path,
-                            '-sDEVICE=pdfwrite',
-                            '-dNOPAUSE',
-                            '-dBATCH',
-                            '-dSAFER',
-                            '-sPAPERSIZE=a4',
-                            '-dPDFSETTINGS=/prepress',
-                            '-dCompatibilityLevel=1.7',
-                            f'-sOutputFile={{output_file}}',
-                            input_file
-                        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                        
-                        # Verificar resultado
-                        if result.returncode == 0:
-                            self.logger.info(f'Conversão concluída: {{output_file}}')
-                            # Remover arquivo original
-                            os.remove(input_file)
-                        else:
-                            error = result.stderr.decode('utf-8', errors='ignore')
-                            self.logger.error(f'Erro na conversão: {{error}}')
-                            
-                    except Exception as e:
-                        self.logger.error(f'Erro ao processar arquivo {{file}}: {{str(e)}}')
-                
-                # Aguardar antes de verificar novamente
-                time.sleep(1)
-                
-                # Verificar se o serviço deve parar
-                if win32event.WaitForSingleObject(self.hWaitStop, 1) == win32event.WAIT_OBJECT_0:
-                    break
-                    
-            except Exception as e:
-                self.logger.error(f'Erro no loop principal: {{str(e)}}')
-                time.sleep(5)  # Aguardar mais tempo em caso de erro
-
-if __name__ == '__main__':
-    if len(sys.argv) == 1:
-        servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(PDFPrinterService)
-        servicemanager.StartServiceCtrlDispatcher()
-    else:
-        win32serviceutil.HandleCommandLine(PDFPrinterService)
-"""
-    
-    # Salvar o script do serviço
-    service_script_path = os.path.join(install_dir, "pdf_printer_service.py")
-    with open(service_script_path, "w") as f:
-        f.write(monitor_script)
-    
-    # Instalar dependências necessárias para o serviço
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "pywin32", "--quiet"])
-    except:
-        print("Erro ao instalar pywin32. Tentando continuar...")
-    
-    # Instalar o serviço
-    try:
-        subprocess.run([
-            sys.executable,
-            service_script_path,
-            "install"
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Iniciar o serviço
-        subprocess.run([
-            "net",
-            "start",
-            "PDFPrinterService"
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
+        urllib.request.urlretrieve(url, destination)
         return True
     except Exception as e:
-        print(f"Erro ao instalar serviço: {e}")
-        
-        # Criar script batch para iniciar o monitor na inicialização (alternativa ao serviço)
-        batch_script = f"""@echo off
-REM Script para monitorar a pasta de impressão e converter para PDF
-
-:start
-REM Verificar se há arquivos para converter
-for %%f in ("{spool_folder}\\*.ps" "{spool_folder}\\*.prn") do (
-    echo Convertendo %%f para PDF...
-    REM Gerar timestamp
-    for /f "tokens=1-6 delims=/ :," %%a in ("%date% %time%") do (
-        set timestamp=%%c%%a%%b_%%d%%e%%f
-    )
-    
-    REM Converter para PDF
-    "{gs_path}" -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -sPAPERSIZE=a4 -dPDFSETTINGS=/prepress -dCompatibilityLevel=1.7 -sOutputFile="{output_folder}\\document_%timestamp%.pdf" "%%f"
-    
-    REM Remover arquivo original
-    del "%%f"
-)
-
-REM Aguardar antes de verificar novamente
-timeout /t 1 /nobreak > nul
-goto start
-"""
-        
-        batch_path = os.path.join(install_dir, "monitor_printer.bat")
-        with open(batch_path, "w") as f:
-            f.write(batch_script)
-        
-        # Criar tarefa agendada
-        task_name = "PDFPrinterMonitor"
-        subprocess.run([
-            "schtasks",
-            "/create",
-            "/tn", task_name,
-            "/tr", f'cmd /c "{batch_path}"',
-            "/sc", "onstart",
-            "/ru", "SYSTEM",
-            "/f"
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Iniciar a tarefa agora
-        subprocess.run([
-            "schtasks",
-            "/run",
-            "/tn", task_name
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Iniciar o batch agora
-        subprocess.Popen(["cmd", "/c", batch_path], 
-                        shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        return True
-
-# Configurar a impressora virtual usando FILE: port
-def setup_file_printer(printer_name, spool_folder):
-    try:
-        # Remover impressora anterior se existir
-        subprocess.run([
-            'powershell.exe',
-            '-Command',
-            f'Remove-Printer -Name "{printer_name}" -ErrorAction SilentlyContinue'
-        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Criar porta de arquivo
-        port_name = f"FILE:{spool_folder}\\"
-        
-        # Adicionar a impressora usando um driver PostScript padrão
-        ps_drivers = [
-            "Microsoft PS Class Driver",
-            "MS Publisher Color Printer",
-            "Microsoft Publisher Color Printer",
-            "Generic / Text Only"
-        ]
-        
-        driver_installed = False
-        for driver in ps_drivers:
-            try:
-                # Verificar se o driver existe
-                result = subprocess.run([
-                    'powershell.exe',
-                    '-Command',
-                    f'Get-PrinterDriver -Name "{driver}" -ErrorAction SilentlyContinue'
-                ], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                if driver in result.stdout.decode():
-                    # Adicionar impressora com este driver
-                    subprocess.run([
-                        'powershell.exe',
-                        '-Command',
-                        f'Add-Printer -Name "{printer_name}" -DriverName "{driver}" -PortName "{port_name}"'
-                    ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    
-                    driver_installed = True
-                    break
-            except:
-                continue
-        
-        if not driver_installed:
-            # Tentar adicionar o driver Microsoft PS Class Driver (que normalmente vem com o Windows)
-            try:
-                subprocess.run([
-                    'powershell.exe',
-                    '-Command',
-                    'Add-PrinterDriver -Name "Microsoft PS Class Driver"'
-                ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                # Adicionar impressora
-                subprocess.run([
-                    'powershell.exe',
-                    '-Command',
-                    f'Add-Printer -Name "{printer_name}" -DriverName "Microsoft PS Class Driver" -PortName "{port_name}"'
-                ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                
-                driver_installed = True
-            except:
-                pass
-        
-        if not driver_installed:
-            # Último recurso: usar o driver "Generic / Text Only" que está sempre presente
-            subprocess.run([
-                'RUNDLL32.EXE',
-                'PRINTUI.DLL,PrintUIEntry',
-                '/if',
-                '/b', printer_name,
-                '/f', os.path.join(os.environ["SystemRoot"], "inf", "ntprint.inf"),
-                '/r', port_name,
-                '/m', "Generic / Text Only"
-            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Definir como impressora padrão
-        subprocess.run([
-            'RUNDLL32.EXE',
-            'PRINTUI.DLL,PrintUIEntry',
-            '/y',
-            f'/n"{printer_name}"'
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        
-        # Esconder janelas de diálogo de impressão alterando o registro
-        try:
-            reg_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_WRITE) as key:
-                winreg.SetValueEx(key, "NoFileAssociate", 0, winreg.REG_DWORD, 1)
-        except:
-            pass
-        
-        return True
-    except Exception as e:
-        print(f"Erro na configuração da impressora: {e}")
+        print(f"Erro ao baixar: {e}")
         return False
 
-# Função principal
+def install_pdf24_printer_only():
+    """Baixa e instala APENAS a impressora PDF24 (componente leve)."""
+    temp_dir = tempfile.gettempdir()
+    installer_path = os.path.join(temp_dir, "pdf24_setup.msi")
+    
+    # Baixa o instalador
+    if not download_file(PDF24_MSI_URL, installer_path):
+        return False
+    
+    # Parâmetros para instalação silenciosa MSI - APENAS o componente da impressora
+    install_args = [
+        'msiexec',
+        '/i',
+        installer_path,
+        '/qn',                    # Modo completamente silencioso (sem interface)
+        '/norestart',             # Não reiniciar após instalação
+        'AUTOUPDATE=0',           # Desativar atualizações automáticas
+        'DESKTOPICONS=0',         # Não criar ícones na área de trabalho
+        'STARTMENU=0',            # Não criar atalhos no menu iniciar
+        'AUTOSTART=0',            # Não iniciar automaticamente
+        'ALLUSERS=1',             # Instalar para todos os usuários
+        'COMPONENTS=printer'      # INSTALA APENAS A IMPRESSORA
+    ]
+    
+    try:
+        print("Iniciando instalação apenas da impressora virtual...")
+        # Executa o instalador
+        process = subprocess.Popen(install_args, 
+                                 stdout=subprocess.PIPE, 
+                                 stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        
+        # Verifica se houve erro
+        if process.returncode != 0:
+            print(f"Erro na instalação: Código {process.returncode}")
+            # Tentativa alternativa: instalar com parâmetros padrão e depois configurar
+            print("Tentando método alternativo de instalação...")
+            alt_args = [
+                'msiexec',
+                '/i',
+                installer_path,
+                '/qn',                # Modo completamente silencioso (sem interface)
+                '/norestart',         # Não reiniciar após instalação
+                'AUTOUPDATE=0',       # Desativar atualizações automáticas
+                'DESKTOPICONS=0',     # Não criar ícones na área de trabalho
+                'STARTMENU=0',        # Não criar atalhos no menu iniciar
+                'AUTOSTART=0',        # Não iniciar automaticamente
+                'ALLUSERS=1'          # Instalar para todos os usuários
+            ]
+            process = subprocess.Popen(alt_args, 
+                                    stdout=subprocess.PIPE, 
+                                    stderr=subprocess.PIPE)
+            stdout, stderr = process.communicate()
+        
+        # Aguarda a instalação concluir
+        print("Aguardando conclusão da instalação...")
+        time.sleep(30)
+        
+        # Verifica se a impressora PDF24 foi instalada
+        import win32print
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        pdf24_installed = any("PDF24" in printer for printer in printers)
+        
+        if pdf24_installed:
+            print("Impressora PDF24 instalada com sucesso.")
+            return True
+        else:
+            print("A impressora PDF24 não foi detectada após a instalação.")
+            print("Impressoras disponíveis:", printers)
+            return False
+    
+    except Exception as e:
+        print(f"Erro durante a instalação: {e}")
+        return False
+    finally:
+        # Limpa o arquivo temporário
+        try:
+            if os.path.exists(installer_path):
+                os.remove(installer_path)
+        except:
+            pass
+
+def setup_output_folder():
+    """Cria e configura a pasta de saída com permissões adequadas."""
+    try:
+        # Cria o diretório de destino, se não existir
+        if not os.path.exists(PDF_DIR):
+            os.makedirs(PDF_DIR)
+        
+        # Define permissões para "Todos" usando icacls (Windows)
+        # Usando o nome correto do grupo baseado no idioma
+        subprocess.call(f'icacls "{PDF_DIR}" /grant "{EVERYONE_GROUP}":(OI)(CI)F /T', shell=True)
+        subprocess.call(f'icacls "{PDF_DIR}" /grant SYSTEM:(OI)(CI)F /T', shell=True)
+        
+        return True
+    except Exception as e:
+        print(f"Erro ao configurar pasta de saída: {e}")
+        return False
+
+def disable_ui_executables_only():
+    """Desativa apenas os executáveis relacionados à interface gráfica, preservando os essenciais."""
+    try:
+        # Identifica o diretório de instalação
+        program_files = os.environ.get('PROGRAMFILES', 'C:\\Program Files')
+        pdf24_dir = os.path.join(program_files, 'PDF24')
+        
+        # Mata apenas processos de interface
+        subprocess.call('taskkill /F /IM pdf24creator.exe', shell=True)
+        subprocess.call('taskkill /F /IM pdf24settings.exe', shell=True)
+        
+        # Lista de executáveis UI que devem ser desativados
+        ui_executables = [
+            'pdf24-Creator.exe',     # Interface principal
+            'pdf24-DocTool.exe',      # Ferramenta de documento
+            'pdf24-DesktopTool.exe',  # Ferramenta de desktop
+            'pdf24-Settings.exe'      # Configurações
+        ]
+        
+        if os.path.exists(pdf24_dir):
+            print(f"Desativando interfaces gráficas em {pdf24_dir}...")
+            for ui_exe in ui_executables:
+                filepath = os.path.join(pdf24_dir, ui_exe)
+                if os.path.exists(filepath):
+                    try:
+                        # Renomeia para .disabled
+                        disabled_path = filepath + '.disabled'
+                        if os.path.exists(disabled_path):
+                            os.remove(disabled_path)
+                        os.rename(filepath, disabled_path)
+                        print(f"Desativado: {filepath}")
+                    except Exception as e:
+                        print(f"Não foi possível desativar {filepath}: {e}")
+                        # Não tenta substituir por arquivo vazio para evitar problemas
+        else:
+            print(f"Diretório {pdf24_dir} não encontrado.")
+        
+        return True
+    except Exception as e:
+        print(f"Erro ao desativar executáveis de interface: {e}")
+        return False
+
+def configure_pdf24_silent_mode():
+    """Configura apenas as configurações de modo silencioso essenciais."""
+    try:
+        # Configurações via registro do Windows
+        try:
+            # Configurações para HKLM (todos os usuários)
+            reg_path_all = r"SOFTWARE\PDF24\pdf24Creator"
+            try:
+                key_all = winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, reg_path_all)
+                
+                # Define configurações para todos os usuários
+                winreg.SetValueEx(key_all, "AutoSaveDirectory", 0, winreg.REG_SZ, PDF_DIR)
+                winreg.SetValueEx(key_all, "AutoSaveEnabled", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key_all, "AutoSaveFormat", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key_all, "ShowProcessWindow", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key_all, "ShowFinishWindow", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key_all, "UseAutosave", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key_all, "SilentMode", 0, winreg.REG_DWORD, 1)
+                
+                winreg.CloseKey(key_all)
+            except Exception as e:
+                print(f"Aviso: Não foi possível configurar registro para todos os usuários: {e}")
+                
+            # Caminho do registro para PDF24 (usuário atual)
+            reg_path = r"SOFTWARE\PDF24\pdf24Creator"
+            
+            # Abre a chave (ou cria se não existir)
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, reg_path)
+            
+            # Define configurações para salvar automaticamente e suprimir janelas
+            winreg.SetValueEx(key, "AutoSaveDirectory", 0, winreg.REG_SZ, PDF_DIR)
+            winreg.SetValueEx(key, "AutoSaveEnabled", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, "AutoSaveFormat", 0, winreg.REG_DWORD, 0)  # 0 = PDF
+            winreg.SetValueEx(key, "ShowProcessWindow", 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(key, "ShowFinishWindow", 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(key, "ToolbarIntegration", 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(key, "CheckForUpdates", 0, winreg.REG_DWORD, 0)
+            winreg.SetValueEx(key, "UseAutosave", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, "ShowSaveDialog", 0, winreg.REG_DWORD, 0)
+            
+            # Fecha a chave
+            winreg.CloseKey(key)
+            
+            # Configurações da impressora
+            printer_path = r"SOFTWARE\PDF24\pdf24Creator\Printer"
+            printer_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, printer_path)
+            
+            # Define configurações da impressora
+            winreg.SetValueEx(printer_key, "DefaultOutputFormat", 0, winreg.REG_DWORD, 0)  # 0 = PDF
+            winreg.SetValueEx(printer_key, "DefaultOutputDirectory", 0, winreg.REG_SZ, PDF_DIR)
+            winreg.SetValueEx(printer_key, "AutoSave", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(printer_key, "AutoSaveDirectory", 0, winreg.REG_SZ, PDF_DIR)
+            winreg.SetValueEx(printer_key, "ShowSaveDialog", 0, winreg.REG_DWORD, 0)
+            
+            # Fecha a chave
+            winreg.CloseKey(printer_key)
+            
+            return True
+        except Exception as e:
+            print(f"Erro ao configurar o modo silencioso: {e}")
+            return False
+        
+    except Exception as e:
+        print(f"Erro geral na configuração: {e}")
+        return False
+
+def rename_pdf24_printer():
+    """Renomeia a impressora PDF24 para o nome desejado usando vários métodos."""
+    try:
+        # Primeiro verifica se a impressora PDF24 existe
+        import win32print
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        
+        pdf_printer = None
+        for printer in printers:
+            if "PDF24" in printer:
+                pdf_printer = printer
+                break
+        
+        if not pdf_printer:
+            print("Impressora PDF24 não encontrada para renomear.")
+            print("Impressoras disponíveis:", printers)
+            return False
+        
+        print(f"Renomeando impressora '{pdf_printer}' para '{PRINTER_NAME}'...")
+        
+        # Método 1: Usando PowerShell (mais confiável para renomear impressoras)
+        ps_command = f'powershell -Command "$printer = Get-Printer | Where-Object {{$_.Name -eq \'{pdf_printer}\'}}; if ($printer) {{ Rename-Printer -Name $printer.Name -NewName \'{PRINTER_NAME}\' }}"'
+        subprocess.call(ps_command, shell=True)
+        
+        # Aguarda um pouco para garantir que a renomeação foi concluída
+        time.sleep(5)
+        
+        # Verifica se a renomeação foi bem-sucedida
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        if PRINTER_NAME in printers:
+            print(f"Impressora renomeada com sucesso para '{PRINTER_NAME}'.")
+            return True
+        
+        # Método 2: Usando wmic (alternativa)
+        wmic_command = f'wmic printer where "name=\'{pdf_printer}\'" call RenamePrinter name="{PRINTER_NAME}"'
+        subprocess.call(wmic_command, shell=True)
+        
+        # Aguarda um pouco para garantir que a renomeação foi concluída
+        time.sleep(5)
+        
+        # Verifica novamente
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        if PRINTER_NAME in printers:
+            print(f"Impressora renomeada com sucesso para '{PRINTER_NAME}' (método 2).")
+            return True
+        
+        # Método 3: Usando o PrintUIEntry (última tentativa)
+        rename_cmd = f'rundll32 printui.dll,PrintUIEntry /Xs /n"{pdf_printer}" Name "{PRINTER_NAME}"'
+        subprocess.call(rename_cmd, shell=True)
+        
+        # Aguarda um pouco e verifica uma última vez
+        time.sleep(5)
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        if PRINTER_NAME in printers:
+            print(f"Impressora renomeada com sucesso para '{PRINTER_NAME}' (método 3).")
+            return True
+        else:
+            print(f"Não foi possível renomear a impressora. Nome atual: '{pdf_printer}'")
+            return False
+        
+    except Exception as e:
+        print(f"Erro ao renomear impressora: {e}")
+        return False
+
+def set_as_default_printer():
+    """Define a impressora como padrão."""
+    try:
+        import win32print
+        
+        # Aguarda um pouco para garantir que a impressora foi instalada
+        time.sleep(5)
+        
+        # Tentativa 1: Encontra a impressora pelo novo nome
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        
+        for printer in printers:
+            if PRINTER_NAME in printer:
+                # Define como impressora padrão
+                win32print.SetDefaultPrinter(printer)
+                print(f"Impressora '{printer}' definida como padrão.")
+                return True
+        
+        # Tentativa 2: Se não encontrou pelo nome personalizado, tenta pelo nome do PDF24
+        for printer in printers:
+            if "PDF24" in printer:
+                # Define como impressora padrão
+                win32print.SetDefaultPrinter(printer)
+                print(f"Impressora PDF24 '{printer}' definida como padrão.")
+                
+                # Tenta renomear novamente
+                rename_cmd = f'rundll32 printui.dll,PrintUIEntry /Xs /n"{printer}" Name "{PRINTER_NAME}"'
+                subprocess.call(rename_cmd, shell=True)
+                return True
+        
+        print("Nenhuma impressora PDF24 encontrada para definir como padrão.")
+        print("Impressoras disponíveis:", printers)
+        return False
+    
+    except Exception as e:
+        print(f"Erro ao definir impressora padrão: {e}")
+        return False
+
+def configure_pdf24_service():
+    """Configura o serviço PDF24 corretamente."""
+    try:
+        # Configura o serviço PDF24 para iniciar automaticamente
+        subprocess.call('sc config "PDF24" start= auto', shell=True)
+        
+        # Garante que o serviço esteja em execução
+        subprocess.call('sc start "PDF24"', shell=True)
+        
+        return True
+    except Exception as e:
+        print(f"Erro ao configurar serviço PDF24: {e}")
+        return False
+
+def disable_pdf24_autostart():
+    """Desativa inicialização automática do PDF24."""
+    try:
+        # Remove entradas do registro que podem iniciar o PDF24 automaticamente
+        autorun_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, autorun_path, 0, winreg.KEY_ALL_ACCESS)
+            try:
+                winreg.DeleteValue(key, "PDF24")
+            except:
+                pass
+            try:
+                winreg.DeleteValue(key, "PDF24Creator")
+            except:
+                pass
+            winreg.CloseKey(key)
+        except:
+            pass
+            
+        # Remove também da inicialização para todos os usuários
+        try:
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, autorun_path, 0, winreg.KEY_ALL_ACCESS)
+            try:
+                winreg.DeleteValue(key, "PDF24")
+            except:
+                pass
+            try:
+                winreg.DeleteValue(key, "PDF24Creator") 
+            except:
+                pass
+            winreg.CloseKey(key)
+        except:
+            pass
+            
+        return True
+    except:
+        return False
+
+def configure_printer_settings():
+    """Configurações adicionais da impressora."""
+    try:
+        # Configura spooler de impressão
+        subprocess.call('sc config "Spooler" start= auto', shell=True)
+        subprocess.call('sc start "Spooler"', shell=True)
+        
+        # Configura permissões para o serviço PDF24
+        subprocess.call('sc sdset PDF24 D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)(A;;CR;;;AU)', shell=True)
+        
+        return True
+    except Exception as e:
+        print(f"Erro ao configurar ajustes da impressora: {e}")
+        return False
+
+def restartprint_service():
+    """Reinicia o serviço de impressão."""
+    try:
+        # Reinicia o serviço de impressão para aplicar as alterações
+        print("Reiniciando serviços de impressão...")
+        subprocess.call('net stop spooler', shell=True)
+        time.sleep(3)
+        subprocess.call('net start spooler', shell=True)
+        time.sleep(3)
+        return True
+    except Exception as e:
+        print(f"Erro ao reiniciar serviço de impressão: {e}")
+        return False
+
+def verify_installation():
+    """Verifica se a instalação foi bem-sucedida."""
+    try:
+        import win32print
+        
+        # Lista todas as impressoras instaladas
+        printers = [printer[2] for printer in win32print.EnumPrinters(2)]
+        
+        print("\nImpressoras instaladas:")
+        for printer in printers:
+            print(f"- {printer}")
+        
+        # Verifica se a nossa impressora está na lista
+        if PRINTER_NAME in printers:
+            print(f"\nInstalação verificada: A impressora '{PRINTER_NAME}' está instalada corretamente.")
+            return True
+        elif any("PDF24" in printer for printer in printers):
+            pdf24_printer = next(printer for printer in printers if "PDF24" in printer)
+            print(f"\nImpressora PDF24 '{pdf24_printer}' encontrada, mas não foi possível renomeá-la.")
+            return True
+        else:
+            print("\nAVISO: Nenhuma impressora PDF24 ou com o nome personalizado foi encontrada!")
+            return False
+    
+    except Exception as e:
+        print(f"Erro na verificação da instalação: {e}")
+        return False
+
+def create_test_print():
+    """Cria um arquivo de teste para verificar se a impressora funciona corretamente."""
+    try:
+        # Cria um arquivo de texto simples
+        test_file = os.path.join(tempfile.gettempdir(), "pdf24_test.txt")
+        with open(test_file, "w") as f:
+            f.write("Este é um teste da impressora virtual PDF24.\n")
+            f.write(f"Data e hora: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("Se este teste for bem sucedido, um arquivo PDF será criado na pasta de destino sem mostrar janelas.")
+        
+        # Imprime o arquivo usando a impressora configurada
+        print_cmd = f'powershell -Command "Get-Content \'{test_file}\' | Out-Printer -Name \'{PRINTER_NAME}\'"'
+        subprocess.call(print_cmd, shell=True)
+        
+        print(f"\nArquivo de teste enviado para impressão. Verifique a pasta {PDF_DIR} em alguns instantes.")
+        return True
+    except Exception as e:
+        print(f"Erro ao criar teste de impressão: {e}")
+        return False
+
 def main():
-    # Verificar se está rodando em Windows
-    if platform.system() != "Windows":
-        print("Este script funciona apenas no Windows.")
-        return
-    
-    # Verificar privilégios de administrador
+    # Verifica se está sendo executado como administrador
     if not is_admin():
-        # Relançar o script com privilégios de administrador
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+        # Tenta reexecutar como administrador
+        print("Solicitando privilégios de administrador...")
+        try:
+            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+        except:
+            print("Não foi possível obter privilégios de administrador.")
         return
     
-    # Configurações
-    install_dir = os.path.join(os.environ["ProgramFiles"], "SilentPDFPrinter")
-    spool_folder = os.path.join(install_dir, "Spool")
-    printer_name = "PDF Printer Silent"
-    output_folder = os.path.join(os.path.expanduser("~"), "Documents", "PDFPrints")
+    print(f"Iniciando configuração da impressora virtual '{PRINTER_NAME}'...")
     
-    # Criar pastas necessárias
-    os.makedirs(install_dir, exist_ok=True)
-    os.makedirs(spool_folder, exist_ok=True)
-    os.makedirs(output_folder, exist_ok=True)
+    # Passo 1: Instalar pacotes necessários
+    print("\nInstalando pacotes Python necessários...")
+    if not install_required_packages():
+        print("Falha ao instalar pacotes necessários. Continuando mesmo assim...")
     
-    # 1. Instalar Ghostscript
-    print("Instalando Ghostscript...")
-    if not install_ghostscript():
-        print("Falha na instalação do Ghostscript. Abortando.")
+    # Passo 2: Configurar pasta de saída com permissões adequadas
+    print(f"\nConfigurando pasta de destino {PDF_DIR}...")
+    setup_output_folder()
+    
+    # Passo 3: Instalar APENAS o componente da impressora PDF24 (muito mais leve)
+    print("\nInstalando o componente da impressora PDF24 (instalação mínima)...")
+    if not install_pdf24_printer_only():
+        print("Falha na instalação do componente da impressora PDF24.")
         return
     
-    # 2. Encontrar o caminho do executável do Ghostscript
-    gs_path = find_ghostscript_path()
-    if not gs_path:
-        print("Erro: Não foi possível encontrar o executável do Ghostscript.")
-        print("Por favor, instale o Ghostscript manualmente.")
-        return
+    # Espera um pouco para garantir que a instalação foi concluída
+    print("\nAguardando conclusão da instalação...")
+    time.sleep(20)
     
-    # 3. Configurar a impressora virtual usando porta FILE:
-    print("Configurando impressora virtual...")
-    if not setup_file_printer(printer_name, spool_folder):
-        print("Falha na configuração da impressora. Abortando.")
-        return
+    # Passo 4: Desativar APENAS executáveis de interface gráfica
+    print("\nDesativando interfaces gráficas (preservando funcionalidades essenciais)...")
+    disable_ui_executables_only()
     
-    # 4. Criar e iniciar o serviço/monitor
-    print("Configurando monitor de impressão...")
-    if not create_print_monitor_service(install_dir, spool_folder, output_folder, gs_path):
-        print("Falha na configuração do monitor. Abortando.")
-        return
+    # Passo 5: Configurar o PDF24 com modo silencioso básico
+    print("\nConfigurando o PDF24 em modo silencioso (preservando funcionalidades essenciais)...")
+    configure_pdf24_silent_mode()
     
-    print(f"Instalação concluída com sucesso!")
-    print(f"A impressora '{printer_name}' está configurada.")
-    print(f"Os PDFs serão salvos em: {output_folder}")
+    # Passo 6: Configurações da impressora
+    print("\nAplicando configurações específicas da impressora...")
+    configure_printer_settings()
+    
+    # Passo 7: Renomear impressora
+    print("\nRenomeando a impressora para 'Impressora LoQQuei'...")
+    rename_pdf24_printer()
+    
+    # Passo 8: Configurar serviço PDF24
+    print("\nConfigurando serviço PDF24...")
+    configure_pdf24_service()
+    
+    # Passo 9: Definir como impressora padrão
+    print("\nDefinindo como impressora padrão...")
+    set_as_default_printer()
+    
+    # Passo 10: Desativar inicialização automática de componentes desnecessários
+    print("\nDesativando inicialização automática de componentes desnecessários...")
+    disable_pdf24_autostart()
+    
+    # Passo 11: Reiniciar o serviço de impressão
+    print("\nReiniciando serviços de impressão...")
+    restartprint_service()
+    
+    # Verificação final
+    print("\nVerificando instalação...")
+    verify_installation()
+    
+    # Teste de impressão (opcional)
+    print("\nCriando teste de impressão...")
+    create_test_print()
+    
+    print(f"\nInstalação concluída! A impressora '{PRINTER_NAME}' está configurada para salvar PDFs em {PDF_DIR}.")
+    print("A instalação foi feita usando apenas o componente da impressora, economizando espaço em disco.")
+    print("Configurações de modo silencioso foram aplicadas para suprimir interfaces, mantendo funcionalidades essenciais.")
+    print("\nDica: Verifique a pasta {PDF_DIR} após usar a impressora. Se não funcionar, pode ser necessário reiniciar o PC.")
 
 if __name__ == "__main__":
-    # Verificar se está em modo silencioso
-    silent_mode = "--silent" in sys.argv
-    if silent_mode:
-        # Redirecionar saída para arquivo temporário
-        sys.stdout = open(os.devnull, 'w')
-        sys.stderr = open(os.devnull, 'w')
-    
     main()
