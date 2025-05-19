@@ -1,3 +1,10 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Componente de listagem de documentos moderno
+"""
+
 import logging
 import os
 import wx
@@ -6,13 +13,204 @@ from src.api.client import APIError
 
 logger = logging.getLogger("PrintManager.UI.DocumentList")
 
-class DocumentListPanel(wx.Panel):
+class DocumentCardPanel(wx.Panel):
+    """Painel de card para exibir um documento com botões de ação"""
+    
+    def __init__(self, parent, document, on_print, on_delete):
+        """
+        Inicializa o painel de card
+        
+        Args:
+            parent: Painel pai
+            document: Documento a ser exibido
+            on_print: Callback para impressão
+            on_delete: Callback para exclusão
+        """
+        super().__init__(parent, style=wx.BORDER_NONE)
+        
+        self.document = document
+        self.on_print = on_print
+        self.on_delete = on_delete
+        
+        # Define cor de fundo (cinza escuro)
+        self.SetBackgroundColour(wx.Colour(35, 35, 35))
+        
+        # Eventos para hover
+        self.hover = False
+        self.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        
+        self._init_ui()
+    
+    def _init_ui(self):
+        """Inicializa a interface do usuário do card"""
+        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Ícone do documento (esquerda)
+        doc_icon_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
+            "src", "ui", "resources", "document.png"
+        )
+        
+        if os.path.exists(doc_icon_path):
+            doc_icon = wx.StaticBitmap(
+                self,
+                bitmap=wx.Bitmap(doc_icon_path),
+                size=(32, 32)
+            )
+            main_sizer.Add(doc_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        
+        # Painel de informações (centro)
+        info_panel = wx.Panel(self)
+        info_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+        info_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Nome do documento
+        doc_name = wx.StaticText(info_panel, label=self.document.name)
+        doc_name.SetForegroundColour(wx.WHITE)
+        doc_name.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        info_sizer.Add(doc_name, 0, wx.BOTTOM, 5)
+        
+        # Detalhes do documento
+        details_text = f"{self._format_date(self.document.created_at)} · {self.document.formatted_size}"
+        if hasattr(self.document, "pages") and self.document.pages > 0:
+            details_text += f" · {self.document.pages} páginas"
+            
+        details = wx.StaticText(info_panel, label=details_text)
+        details.SetForegroundColour(wx.Colour(180, 180, 180))
+        details.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        info_sizer.Add(details, 0)
+        
+        info_panel.SetSizer(info_sizer)
+        main_sizer.Add(info_panel, 1, wx.EXPAND | wx.ALL, 10)
+        
+        # Painel de ações (direita)
+        actions_panel = wx.Panel(self)
+        actions_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+        actions_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Botão de impressão
+        self.print_button = self._create_action_button(
+            actions_panel, 
+            "Imprimir", 
+            wx.Colour(255, 90, 36), 
+            self._on_print_click
+        )
+        actions_sizer.Add(self.print_button, 0, wx.RIGHT, 10)
+        
+        # Botão de exclusão
+        self.delete_button = self._create_action_button(
+            actions_panel, 
+            "Excluir", 
+            wx.Colour(60, 60, 60), 
+            self._on_delete_click
+        )
+        actions_sizer.Add(self.delete_button, 0)
+        
+        actions_panel.SetSizer(actions_sizer)
+        main_sizer.Add(actions_panel, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
+        
+        self.SetSizer(main_sizer)
+    
+    def _create_action_button(self, parent, label, color, handler):
+        """
+        Cria um botão de ação
+        
+        Args:
+            parent: Painel pai
+            label: Texto do botão
+            color: Cor de fundo do botão
+            handler: Função de tratamento de clique
+            
+        Returns:
+            wx.Button: Botão criado
+        """
+        button = wx.Button(parent, label=label, size=(90, 36))
+        button.SetBackgroundColour(color)
+        button.SetForegroundColour(wx.WHITE)
+        button.Bind(wx.EVT_BUTTON, handler)
+        
+        # Eventos de hover para o botão
+        def on_btn_enter(evt):
+            if color == wx.Colour(255, 90, 36):  # Laranja
+                button.SetBackgroundColour(wx.Colour(255, 120, 70))
+            else:
+                button.SetBackgroundColour(wx.Colour(80, 80, 80))
+            button.Refresh()
+        
+        def on_btn_leave(evt):
+            button.SetBackgroundColour(color)
+            button.Refresh()
+        
+        button.Bind(wx.EVT_ENTER_WINDOW, on_btn_enter)
+        button.Bind(wx.EVT_LEAVE_WINDOW, on_btn_leave)
+        
+        return button
+    
+    def _on_print_click(self, event):
+        """Manipula o clique no botão de impressão"""
+        if self.on_print:
+            self.on_print(self.document)
+    
+    def _on_delete_click(self, event):
+        """Manipula o clique no botão de exclusão"""
+        if self.on_delete:
+            self.on_delete(self.document)
+    
+    def on_enter(self, event):
+        """Manipula o evento de mouse sobre o card"""
+        self.hover = True
+        self.Refresh()
+    
+    def on_leave(self, event):
+        """Manipula o evento de mouse saindo do card"""
+        self.hover = False
+        self.Refresh()
+    
+    def on_paint(self, event):
+        """Redesenha o card com cantos arredondados e efeito de hover"""
+        dc = wx.BufferedPaintDC(self)
+        gc = wx.GraphicsContext.Create(dc)
+        
+        rect = self.GetClientRect()
+        
+        # Cor de fundo baseada no estado de hover
+        if self.hover:
+            bg_color = wx.Colour(45, 45, 45)  # Cinza mais claro no hover
+        else:
+            bg_color = wx.Colour(35, 35, 35)  # Cor normal
+        
+        # Desenha o fundo com cantos arredondados
+        path = gc.CreatePath()
+        path.AddRoundedRectangle(0, 0, rect.width, rect.height, 8)
+        
+        gc.SetBrush(wx.Brush(bg_color))
+        gc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))  # Borda sutil
+        
+        gc.DrawPath(path)
+    
+    def _format_date(self, date_str):
+        """Formata a data"""
+        try:
+            if not date_str:
+                return ""
+            
+            dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+            return dt.strftime("%d/%m/%Y %H:%M")
+        except Exception as e:
+            logger.error(f"Erro ao formatar data: {str(e)}")
+            return date_str
 
+class DocumentListPanel(wx.ScrolledWindow):
+    """Painel de lista de documentos moderna com cards"""
+    
     def __init__(self, parent, theme_manager, api_client, on_print, on_delete):
         super().__init__(
             parent,
             id=wx.ID_ANY,
             pos=wx.DefaultPosition,
+            size=wx.DefaultSize,
             style=wx.TAB_TRAVERSAL
         )
 
@@ -22,38 +220,66 @@ class DocumentListPanel(wx.Panel):
         self.on_delete = on_delete
 
         self.documents = []
-
-        self.colors = self.theme_manager.get_theme_colors()
+        self.colors = {"bg_color": wx.Colour(18, 18, 18), 
+                       "panel_bg": wx.Colour(25, 25, 25),
+                       "accent_color": wx.Colour(255, 90, 36),
+                       "text_color": wx.WHITE,
+                       "text_secondary": wx.Colour(180, 180, 180)}
 
         self._init_ui()
+        
+        # Configura scrolling
+        self.SetScrollRate(0, 10)
 
     def _init_ui(self):
         """Inicializa a interface gráfica"""
-        self.SetBackgroundColour(self.colors["panel_bg"])
+        self.SetBackgroundColour(self.colors["bg_color"])
 
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
-
-        self.document_list = wx.ListCtrl(
-            self,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE
-        )
-
-        # Ajusta as colunas para incluir a página
-        self.document_list.InsertColumn(0, "Nome", width=300)
-        self.document_list.InsertColumn(1, "Data", width=150)
-        self.document_list.InsertColumn(2, "Tamanho", width=100)
-        self.document_list.InsertColumn(3, "Páginas", width=80)  # Nova coluna para páginas
-        self.document_list.InsertColumn(4, "Ações", width=200)
-
-        self.document_list.SetBackgroundColour(self.colors["panel_bg"])
-        self.document_list.SetForegroundColour(self.colors["text_color"])
-
-        self.document_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_document_selected)
-
-        self.empty_panel = wx.Panel(self)
-        self.empty_panel.SetBackgroundColour(self.colors["panel_bg"])
+        self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Painel de cabeçalho com título e botão de atualizar
+        header_panel = wx.Panel(self)
+        header_panel.SetBackgroundColour(self.colors["bg_color"])
+        header_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        title = wx.StaticText(header_panel, label="Arquivos para Impressão")
+        title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        title.SetForegroundColour(self.colors["text_color"])
+        
+        self.refresh_button = wx.Button(header_panel, label="Atualizar", size=(120, 36))
+        self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+        self.refresh_button.SetForegroundColour(self.colors["text_color"])
+        self.refresh_button.Bind(wx.EVT_BUTTON, self.load_documents)
+        
+        # Eventos de hover para o botão
+        def on_refresh_enter(evt):
+            self.refresh_button.SetBackgroundColour(wx.Colour(80, 80, 80))
+            self.refresh_button.Refresh()
+        
+        def on_refresh_leave(evt):
+            self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
+            self.refresh_button.Refresh()
+        
+        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
+        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
+        
+        header_sizer.Add(title, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
+        header_sizer.AddStretchSpacer()
+        header_sizer.Add(self.refresh_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 20)
+        
+        header_panel.SetSizer(header_sizer)
+        
+        # Painel de conteúdo para os cards
+        self.content_panel = wx.Panel(self)
+        self.content_panel.SetBackgroundColour(self.colors["bg_color"])
+        self.content_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Painel para exibir mensagem de "sem documentos"
+        self.empty_panel = wx.Panel(self.content_panel)
+        self.empty_panel.SetBackgroundColour(self.colors["bg_color"])
         empty_sizer = wx.BoxSizer(wx.VERTICAL)
-
+        
+        # Ícone de documento vazio
         document_icon_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
             "src", "ui", "resources", "empty_document.png"
@@ -65,34 +291,43 @@ class DocumentListPanel(wx.Panel):
                 bitmap=wx.Bitmap(document_icon_path),
                 size=(64, 64)
             )
-            empty_sizer.Add(empty_icon, 0, wx.ALIGN_CENTER | wx.TOP, 30)
+            empty_sizer.Add(empty_icon, 0, wx.ALIGN_CENTER | wx.TOP, 50)
 
+        # Texto para quando não há documentos
         empty_text = wx.StaticText(
             self.empty_panel,
             label="Nenhum documento encontrado para impressão"
         )
         empty_text.SetForegroundColour(self.colors["text_secondary"])
-        empty_text.SetFont(wx.Font(
-            12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL
-        ))
-
-        empty_sizer.Add(empty_text, 0, wx.ALIGN_CENTER | wx.TOP, 15)
+        empty_text.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        
+        empty_sizer.Add(empty_text, 0, wx.ALIGN_CENTER | wx.TOP, 20)
         self.empty_panel.SetSizer(empty_sizer)
-
-        main_sizer.Add(self.document_list, 1, wx.EXPAND)
-        main_sizer.Add(self.empty_panel, 1, wx.EXPAND)
-
-        self.empty_panel.Hide()
-
-        self.SetSizer(main_sizer)
+        
+        self.content_sizer.Add(self.empty_panel, 1, wx.EXPAND)
+        self.content_panel.SetSizer(self.content_sizer)
+        
+        # Adiciona ao layout principal
+        self.main_sizer.Add(header_panel, 0, wx.EXPAND | wx.BOTTOM, 20)
+        self.main_sizer.Add(self.content_panel, 1, wx.EXPAND)
+        
+        self.SetSizer(self.main_sizer)
 
         self.load_documents()
 
-    def load_documents(self):
+    def load_documents(self, event=None):
         """Carrega os documentos disponíveis para impressão diretamente do sistema de arquivos"""
         try:
-            self.document_list.DeleteAllItems()
-            self.document_list.InsertItem(0, "Carregando...")
+            # Limpa os cards existentes
+            for child in self.content_panel.GetChildren():
+                if isinstance(child, DocumentCardPanel):
+                    child.Destroy()
+            
+            # Adiciona um indicador de carregamento
+            loading_text = wx.StaticText(self.content_panel, label="Carregando documentos...")
+            loading_text.SetForegroundColour(self.colors["text_color"])
+            self.content_sizer.Insert(0, loading_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
+            self.content_panel.Layout()
             wx.GetApp().Yield()
 
             # Tenta obter documentos do monitor de arquivos da tela principal se estiver disponível
@@ -108,117 +343,32 @@ class DocumentListPanel(wx.Panel):
                 file_monitor._load_initial_documents()
                 self.documents = file_monitor.get_documents()
 
-            self.document_list.DeleteAllItems()
+            # Remove o indicador de carregamento
+            loading_text.Destroy()
 
+            # Atualiza a visualização
             if self.documents and len(self.documents) > 0:
-                for i, doc in enumerate(self.documents):
-                    date_str = self._format_date(doc.created_at)
-                    size_str = self._format_size(doc.size)
-                    pages_str = str(doc.pages) if hasattr(doc, "pages") and doc.pages > 0 else "?"
-
-                    index = self.document_list.InsertItem(i, doc.name)
-                    self.document_list.SetItem(index, 1, date_str)
-                    self.document_list.SetItem(index, 2, size_str)
-                    self.document_list.SetItem(index, 3, pages_str)  # Exibe contagem de páginas
-                    
-                    self._create_action_buttons(doc, index)
-
-                self.document_list.Show()
                 self.empty_panel.Hide()
-
+                
+                # Cria um card para cada documento
+                for doc in self.documents:
+                    card = DocumentCardPanel(self.content_panel, doc, self.on_print, self.on_delete)
+                    self.content_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
             else:
-                self.document_list.Hide()
                 self.empty_panel.Show()
+            
+            # Ajusta o layout
+            self.content_panel.Layout()
+            self.Layout()
+            self.Refresh()
 
         except Exception as e:
             logger.error("Erro ao carregar documentos: %s", e)
-            self.document_list.DeleteAllItems()
-            self.document_list.InsertItem(0, "Erro ao carregar documentos")
-
-    def _create_action_buttons(self, document, index):
-        """
-        Cria os botões de ações para um documento
-        
-        Args:
-            document (Document): Documento para o qual criar botões
-            index (int): Índice na lista
-        """
-        rect = self.document_list.GetItemRect(index, wx.LIST_RECT_BOUNDS)
-        col_rect = self.document_list.GetSubItemRect(index, 4)  # Coluna de ações é agora a 4
-
-        panel = wx.Panel(self.document_list, size=(col_rect.width, rect.height))
-        panel.SetBackgroundColour(self.colors["panel_bg"])
-
-        sizer = wx.BoxSizer(wx.HORIZONTAL)
-
-        print_button = self.theme_manager.get_custom_button(panel, "Imprimir", accent=True)
-        print_button.SetMinSize((100, 30))
-
-        # Manter referência ao documento atual para os callbacks
-        current_document = document
-
-        def on_print(event):
-            self.on_print(current_document)
-
-        print_button.Bind(wx.EVT_BUTTON, on_print)
-
-        delete_button = self.theme_manager.get_custom_button(panel, "Excluir")
-        delete_button.SetMinSize((80, 30))
-
-        def on_delete(event):
-            dialog = wx.MessageDialog(
-                self,
-                "Tem certeza que deseja excluir o documento?",
-                "Confirmar exclusão",
-                wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION
-            )
-
-            if dialog.ShowModal() == wx.ID_YES:
-                self.on_delete(current_document)
-
-            dialog.Destroy()
-
-        delete_button.Bind(wx.EVT_BUTTON, on_delete)
-
-        sizer.Add(print_button, 0, wx.RIGHT, 5)
-        sizer.Add(delete_button, 0)
-
-        panel.SetSizer(sizer)
-
-        window_rect = self.document_list.GetRect()
-        panel.SetPosition(wx.Point(col_rect.x, rect.y))
-
-    def on_document_selected(self, event):
-        """Executa quando um item é selecionado"""
-        self.document_list.Select(event.GetIndex(), False)
-
-    def _format_date(self, date_str):
-        """Formata a data"""
-        try:
-            if not date_str:
-                return ""
             
-            dt = datetime.datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-
-            return dt.strftime("%d/%m/%Y %H:%M")
-        except Exception as e:
-            logger.error("Erro ao formatar data: %s", e)
-            return date_str
-        
-    def _format_size(self, size_bytes):
-        """Formata o tamanho"""
-        try:
-            if not size_bytes:
-                return "0 KB"
+            # Exibe mensagem de erro
+            error_text = wx.StaticText(self.content_panel, label=f"Erro ao carregar documentos: {str(e)}")
+            error_text.SetForegroundColour(wx.Colour(220, 53, 69))  # Vermelho
+            self.content_sizer.Add(error_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
             
-            if size_bytes < 1024:
-                return f"{size_bytes} B"
-            elif size_bytes < 1024 * 1024:
-                return f"{size_bytes / 1024:.2f} KB"
-            elif size_bytes < 1024 * 1024 * 1024:
-                return f"{size_bytes / (1024 * 1024):.2f} MB"
-            else:
-                return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-        except Exception as e:
-            logger.error("Erro ao formatar tamanho: %s", e)
-            return str(size_bytes) + " B"
+            self.content_panel.Layout()
+            self.Layout()

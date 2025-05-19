@@ -15,14 +15,14 @@ class ThemeManager:
     
     # Cores para o tema escuro
     DARK_THEME = {
-        "bg_color": wx.Colour(25, 25, 25),
-        "panel_bg": wx.Colour(35, 35, 35),
-        "input_bg": wx.Colour(45, 45, 45),
+        "bg_color": wx.Colour(18, 18, 18),
+        "panel_bg": wx.Colour(25, 25, 25),
+        "input_bg": wx.Colour(35, 35, 35),
         "text_color": wx.Colour(240, 240, 240),
-        "text_secondary": wx.Colour(200, 200, 200),
+        "text_secondary": wx.Colour(180, 180, 180),
         "accent_color": wx.Colour(255, 90, 36),
         "accent_hover": wx.Colour(255, 120, 70),
-        "border_color": wx.Colour(60, 60, 60),
+        "border_color": wx.Colour(45, 45, 45),
         "icon_color": wx.Colour(200, 200, 200),
         "btn_text": wx.Colour(255, 255, 255),
         "success_color": wx.Colour(40, 167, 69),
@@ -31,21 +31,21 @@ class ThemeManager:
         "info_color": wx.Colour(23, 162, 184),
         "toggle_on": wx.Colour(255, 90, 36),
         "toggle_off": wx.Colour(100, 100, 100),
-        "hover_bg": wx.Colour(50, 50, 50),
+        "hover_bg": wx.Colour(40, 40, 40),
         "disabled_bg": wx.Colour(70, 70, 70),
         "disabled_text": wx.Colour(150, 150, 150),
     }
     
     # Cores para o tema claro
     LIGHT_THEME = {
-        "bg_color": wx.Colour(240, 240, 240),
-        "panel_bg": wx.Colour(250, 250, 250),
-        "input_bg": wx.Colour(255, 255, 255),
+        "bg_color": wx.Colour(248, 248, 248),
+        "panel_bg": wx.Colour(255, 255, 255),
+        "input_bg": wx.Colour(245, 245, 245),
         "text_color": wx.Colour(33, 37, 41),
         "text_secondary": wx.Colour(90, 90, 90),
         "accent_color": wx.Colour(255, 90, 36),
-        "accent_hover": wx.Colour(220, 70, 20),
-        "border_color": wx.Colour(222, 226, 230),
+        "accent_hover": wx.Colour(255, 120, 70),
+        "border_color": wx.Colour(230, 230, 230),
         "icon_color": wx.Colour(40, 40, 40),
         "btn_text": wx.Colour(255, 255, 255),
         "success_color": wx.Colour(40, 167, 69),
@@ -54,7 +54,7 @@ class ThemeManager:
         "info_color": wx.Colour(23, 162, 184),
         "toggle_on": wx.Colour(255, 90, 36),
         "toggle_off": wx.Colour(200, 200, 200),
-        "hover_bg": wx.Colour(230, 230, 230),
+        "hover_bg": wx.Colour(240, 240, 240),
         "disabled_bg": wx.Colour(200, 200, 200),
         "disabled_text": wx.Colour(120, 120, 120),
     }
@@ -183,7 +183,7 @@ class ThemeManager:
             if child.GetChildren():
                 self._apply_theme_to_children(child, colors)
     
-    def get_custom_button(self, parent, label, accent=False, icon=None):
+    def get_custom_button(self, parent, label, accent=False, icon=None, size=(-1, -1)):
         """
         Cria um botão personalizado com o tema atual
         
@@ -192,20 +192,45 @@ class ThemeManager:
             label (str): Texto do botão
             accent (bool): Se o botão deve usar cor de destaque
             icon (wx.Bitmap, optional): Ícone do botão
+            size (tuple): Tamanho do botão
             
         Returns:
             wx.Button: Botão personalizado
         """
-        button = wx.Button(parent, label=label)
+        button = wx.Button(parent, label=label, size=size)
         colors = self.get_theme_colors()
         
         if accent:
             button.SetBackgroundColour(colors["accent_color"])
             button.SetForegroundColour(colors["btn_text"])
             button.is_accent_button = True
+            
+            # Eventos de hover para botão de destaque
+            def on_enter(evt):
+                button.SetBackgroundColour(colors["accent_hover"])
+                button.Refresh()
+                
+            def on_leave(evt):
+                button.SetBackgroundColour(colors["accent_color"])
+                button.Refresh()
+            
+            button.Bind(wx.EVT_ENTER_WINDOW, on_enter)
+            button.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
         else:
             button.SetBackgroundColour(colors["panel_bg"])
             button.SetForegroundColour(colors["text_color"])
+            
+            # Eventos de hover para botão normal
+            def on_enter(evt):
+                button.SetBackgroundColour(colors["hover_bg"])
+                button.Refresh()
+                
+            def on_leave(evt):
+                button.SetBackgroundColour(colors["panel_bg"])
+                button.Refresh()
+            
+            button.Bind(wx.EVT_ENTER_WINDOW, on_enter)
+            button.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
         
         if icon:
             button.SetBitmap(icon)
