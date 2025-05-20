@@ -111,14 +111,16 @@ class AuthManager:
         if user_info and user_info.get("remember_me") and user_info.get("token"):
             try:
                 self.current_user = user_info
+
                 self.api_client.set_token(user_info["token"])
                 
                 # Verifica se o token é válido
-                try:
-                    self.api_client.get_user_documents()
+                if self.api_client.validate_user():
+                    logger.info(f"Auto-login bem-sucedido para {user_info.get('email')}")
                     return True
-                except Exception:
+                else:
                     # Token inválido
+                    logger.warning("Token inválido durante auto-login")
                     self.logout()
                     return False
                 

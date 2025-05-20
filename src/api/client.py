@@ -167,6 +167,24 @@ class APIClient:
                 raise APIError("Email ou senha inválidos", 401)
             raise
     
+    def validate_user(self):
+        """
+        Verifica se o usuário atual está autenticado
+        
+        Returns:
+            bool: True se o usuário está autenticado
+            
+        Raises:
+            APIError: Se ocorrer um erro na comunicação com a API
+        """
+        try:
+            # Chama o endpoint /desktop/validUser e retorna True se for bem-sucedido
+            self._make_request("GET", "/desktop/validUser")
+            return True
+        except Exception as e:
+            logger.warning(f"Erro ao validar usuário: {str(e)}")
+            return False
+
     def get_printers(self):
         """
         Obtém lista de impressoras disponíveis
