@@ -13,6 +13,7 @@ from .scheduler import TaskScheduler, Task
 from .file_monitor import FileMonitor
 from .printer_discovery import PrinterDiscovery
 from .printer_diagnostic import PrinterDiagnostic
+from .updater import AppUpdater
 
 __all__ = [
     'AuthManager', 
@@ -24,5 +25,6 @@ __all__ = [
     'Task',
     'FileMonitor',
     'PrinterDiscovery',
-    'PrinterDiagnostic'
+    'PrinterDiagnostic',
+    'AppUpdater'
 ]

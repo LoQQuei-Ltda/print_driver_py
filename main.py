@@ -63,24 +63,30 @@ def main():
         # Cria e inicia a aplicação wxPython passando a configuração diretamente
         app = PrintManagementApp(config)
         
-        # Inicializa a aplicação
-        # app.OnInit()
-        
         # Loop personalizado para suportar execução em segundo plano
-        while app.keep_running_in_background():
-            app.MainLoop()
-            # Quando o MainLoop terminar, verificamos se devemos continuar em segundo plano
-            time.sleep(0.1)  # Pequena pausa para não consumir CPU
-            
-            # Processa eventos de UI pendentes
-            wx.Yield()
+        app.MainLoop()
         
         logger.info("Aplicação encerrada")
         
     except Exception as e:
-        logger.error(f"Erro fatal na aplicação: {str(e)}", exc_info=True)
-        if 'app' in locals() and isinstance(app, wx.App):
-            wx.MessageBox(f"Erro fatal na aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
+        if 'logger' in locals():
+            logger.error(f"Erro fatal na aplicação: {str(e)}", exc_info=True)
+        else:
+            import traceback
+            print(f"ERRO FATAL: {str(e)}")
+            print(traceback.format_exc())
+            
+        # Tenta mostrar uma mensagem de erro via wxPython
+        try:
+            import wx
+            if 'app' in locals() and isinstance(app, wx.App):
+                wx.MessageBox(f"Erro fatal na aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
+            else:
+                app = wx.App(False)
+                wx.MessageBox(f"Erro fatal na aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
+        except:
+            # Em último caso, mantém o terminal aberto
+            input("Pressione ENTER para fechar...")
 
 if __name__ == "__main__":
     main()
