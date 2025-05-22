@@ -66,6 +66,43 @@ class PrintManagementApp(wx.App):
         # Chama o manipulador padrão de exceções
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
     
+    def _validate_user_task(self, api_client, app_instance):
+        """Tarefa de validação de usuário"""
+        try:
+            logger.debug("Executando validação de usuário...")
+            
+            if not api_client.token:
+                logger.debug("Nenhum token encontrado, pulando validação")
+                return
+            
+            result = api_client.validate_user()
+            
+            if result["is_valid"]:
+                logger.debug("Usuário válido")
+                return
+            
+            if result["should_logout"]:
+                logger.warning(f"Token inválido (401), fazendo logout automático")
+                
+                def do_logout():
+                    try:
+                        if app_instance.auth_manager:
+                            app_instance.auth_manager.logout()
+                        
+                        if hasattr(app_instance, 'on_logout'):
+                            app_instance.on_logout()
+                            
+                    except Exception as e:
+                        logger.error(f"Erro ao fazer logout automático: {e}")
+                
+                wx.CallAfter(do_logout)
+            else:
+                logger.debug(f"Erro na validação (não crítico): {result['error_message']} "
+                            f"(Código: {result['error_code']})")
+                
+        except Exception as e:
+            logger.error(f"Erro inesperado na tarefa de validação: {e}")
+
     def OnInit(self):
         """
         Inicializa a aplicação
@@ -109,6 +146,13 @@ class PrintManagementApp(wx.App):
                 update_application_task,
                 60, # Atualiza a cada minuto
                 args=(self.api_client, self.config)
+            )
+
+            self.scheduler.add_task(
+                "validate_user",
+                lambda: self._validate_user_task(self.api_client, self),
+                60,  # 1 minuto
+                args=()
             )
 
             self.scheduler.start()

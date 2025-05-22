@@ -495,7 +495,7 @@ class MainScreen(wx.Frame):
             self._save_window_geometry()
             
             # Esconde a janela em vez de destruí-la
-            self.Hide()
+            self.Destroy()
             
             # Chama o callback para voltar à tela de login
             if self.on_logout_callback:

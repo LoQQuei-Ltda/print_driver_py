@@ -45,7 +45,7 @@ class AuthManager:
         """
         try:
             user_data = self.api_client.login(email, password)
-            print(user_data)
+
             if user_data and "token" in user_data:
                 self.current_user = {
                     "email": email,
@@ -114,16 +114,25 @@ class AuthManager:
 
                 self.api_client.set_token(user_info["token"])
                 
+                validation_result = self.api_client.validate_user()
+
                 # Verifica se o token é válido
-                if self.api_client.validate_user():
+                if validation_result["is_valid"]:
                     logger.info(f"Auto-login bem-sucedido para {user_info.get('email')}")
                     return True
                 else:
-                    # Token inválido
-                    logger.warning("Token inválido durante auto-login")
-                    self.logout()
-                    return False
-                
+                    # Token inválido ou outro erro
+                    if validation_result["should_logout"]:
+                        logger.warning("Token inválido durante auto-login (401)")
+
+                        self.logout()
+                        return False
+                    else:
+                        logger.warning(f"Erro de validação durante auto-login: {validation_result['error_message']} "
+                                     f"(Código: {validation_result['error_code']})")
+                    
+                    return True
+
             except Exception as e:
                 logger.error(f"Erro ao realizar login automático: {str(e)}")
                 return False

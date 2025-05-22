@@ -48,7 +48,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 ; Executável principal (se existir - PyInstaller standalone)
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: FileExists('dist\{#MyAppExeName}')
+Source: "build\exe\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion; Check: FileExists('build\exe\{#MyAppExeName}')
 ; Arquivos Python originais (sempre incluir como fallback)
 Source: "main.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "src\*"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs createallsubdirs

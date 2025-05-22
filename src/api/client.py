@@ -172,18 +172,43 @@ class APIClient:
         Verifica se o usuário atual está autenticado
         
         Returns:
-            bool: True se o usuário está autenticado
-            
-        Raises:
-            APIError: Se ocorrer um erro na comunicação com a API
+            dict: Resultado da validação com campos:
+                - is_valid (bool): True se o usuário está autenticado
+                - should_logout (bool): True se deve fazer logout (apenas para erro 401)
+                - error_code (int): Código de erro se houver
+                - error_message (str): Mensagem de erro se houver
         """
         try:
-            # Chama o endpoint /desktop/validUser e retorna True se for bem-sucedido
+            # Chama o endpoint /desktop/validUser
             self._make_request("GET", "/desktop/validUser")
-            return True
+            return {
+                "is_valid": True,
+                "should_logout": False,
+                "error_code": None,
+                "error_message": None
+            }
+        except APIError as e:
+            logger.warning(f"Erro ao validar usuário: {str(e)} (Status: {e.status_code})")
+            
+            # Apenas força logout se receber erro 401 (não autorizado)
+            should_logout = e.status_code == 401
+            
+            return {
+                "is_valid": False,
+                "should_logout": should_logout,
+                "error_code": e.status_code,
+                "error_message": str(e)
+            }
         except Exception as e:
-            logger.warning(f"Erro ao validar usuário: {str(e)}")
-            return False
+            logger.warning(f"Erro inesperado ao validar usuário: {str(e)}")
+            
+            # Para outros erros (conexão, timeout, etc.), não força logout
+            return {
+                "is_valid": False,
+                "should_logout": False,
+                "error_code": 0,
+                "error_message": str(e)
+            }
 
     def get_printers(self):
         """

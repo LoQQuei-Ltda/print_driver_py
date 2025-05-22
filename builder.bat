@@ -15,41 +15,28 @@ if not exist "%PROGRAMFILES(X86)%\Inno Setup 6\ISCC.exe" (
   )
 )
 
-@REM echo Limpando diretórios de build anteriores...
-@REM if exist "dist" (
-@REM   echo - Removendo pasta dist...
-@REM   rmdir /s /q dist
-@REM )
+echo Limpando diretórios de build anteriores...
+if exist "build" (
+  echo - Removendo build...
+  rmdir /s /q build
+)
 
-@REM if exist "build" (
-@REM   echo - Removendo build...
-@REM   rmdir /s /q build
-@REM )
+if exist "Output" (
+  echo - Removendo pasta Output...
+  rmdir /s /q Output
+)
 
-@REM if exist "Output" (
-@REM   echo - Removendo pasta Output...
-@REM   rmdir /s /q Output
-@REM )
+REM Pausa para garantir que todos os processos foram encerrados
+timeout /t 2 /nobreak >nul
 
-@REM REM Pausa para garantir que todos os processos foram encerrados
-@REM timeout /t 2 /nobreak >nul
-
-@REM if exist "dist" (
-@REM   echo - Removendo pasta dist...
-@REM   rmdir /s /q dist 2>nul
-@REM   if exist "dist" (
-@REM     rd /s /q dist 2>nul
-@REM   )
-@REM )
-
-@REM echo.
-@REM echo Construindo aplicação...
-@REM call python setup.py bdist_pyinstaller
-@REM if %ERRORLEVEL% NEQ 0 (
-@REM   echo Erro: Não foi possível construir a aplicação
-@REM   pause
-@REM   exit /b 1
-@REM )
+echo.
+echo Construindo aplicação...
+call python setup_cx_freeze.py build
+if %ERRORLEVEL% NEQ 0 (
+  echo Erro: Não foi possível construir a aplicação
+  pause
+  exit /b 1
+)
 
 echo.
 echo Compilando o instalador com Inno Setup...
