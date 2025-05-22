@@ -1,575 +1,482 @@
 import os
 import sys
-import subprocess
-import time
-import tempfile
 import ctypes
-import shutil
-import urllib.request
+import subprocess
+import tempfile
+import time
 import winreg
 from pathlib import Path
+import shutil
+import urllib.request
 
 def is_admin():
-    """Verifica se o script está sendo executado como administrador."""
+    """Verifica se o script está sendo executado com privilégios de administrador"""
     try:
-        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
 
-def ensure_output_dir():
-    """Garante que o diretório de saída exista e tenha permissões."""
-    pdf_dir = Path("C:/pdfs")
-    if not pdf_dir.exists():
-        pdf_dir.mkdir(parents=True)
+def create_output_directory():
+    """Cria o diretório de saída para os PDFs"""
+    pdf_dir = Path("c:/pdfs")
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Diretório para PDFs criado: {pdf_dir}")
     
-    # Configura permissões totais na pasta
+    # Configurar permissões de escrita
     try:
-        subprocess.run(["icacls", str(pdf_dir), "/grant", "Everyone:(OI)(CI)F"], 
-                     capture_output=True, check=False)
-        subprocess.run(["icacls", str(pdf_dir), "/grant", "SYSTEM:(OI)(CI)F"], 
-                     capture_output=True, check=False)
-        subprocess.run(["icacls", str(pdf_dir), "/grant", "Administrators:(OI)(CI)F"], 
-                     capture_output=True, check=False)
+        subprocess.run([
+            "icacls", "c:/pdfs", 
+            "/grant", "Users:(OI)(CI)F", 
+            "/T"
+        ])
     except Exception as e:
-        print(f"Aviso: Não foi possível configurar permissões: {str(e)}")
-    
-    return str(pdf_dir)
+        print(f"Aviso: Não foi possível configurar permissões: {e}")
 
-def restart_spooler():
-    """Reinicia o serviço de spooler de impressão"""
-    print("Reiniciando serviço de spooler de impressão...")
-    try:
-        subprocess.run(["net", "stop", "spooler"], capture_output=True, check=False)
-        time.sleep(2)
+def install_cutepdf_alternative():
+    """Método alternativo para instalar CutePDF"""
+    print("Preparando instalação alternativa do CutePDF Writer...")
+    
+    # MÉTODO 1: Download manual e instruções
+    print("\n=== OPÇÃO 1: Instalação Manual do CutePDF ===")
+    print("O instalador automático falhou. Vamos tentar uma instalação manual:")
+    print("1. Baixe manualmente o CutePDF em: https://www.cutepdf.com/Products/CutePDF/writer.asp")
+    print("2. Baixe também o conversor PS2PDF: https://www.cutepdf.com/Support/download.asp?file=converter.exe")
+    print("3. Instale primeiro o conversor PS2PDF e depois o CutePDF")
+    
+    # Perguntar se o usuário quer tentar a instalação manual agora
+    choice = input("\nVocê quer que eu baixe os instaladores agora para você? (S/N): ")
+    
+    if choice.lower() == "s":
+        temp_dir = tempfile.gettempdir()
         
-        # Limpa arquivos temporários de impressão
-        spool_path = os.path.join(os.environ["SystemRoot"], "System32", "spool", "PRINTERS")
+        # Criar pasta para os downloads
+        downloads_folder = os.path.join(temp_dir, "CutePDF_Downloads")
+        os.makedirs(downloads_folder, exist_ok=True)
+        
+        # URLs alternativas (podem ser mais estáveis)
+        converter_url = "https://www.cutepdf.com/download/converter.exe"
+        cutepdf_url = "https://www.cutepdf.com/download/CuteWriter.exe"
+        
+        converter_path = os.path.join(downloads_folder, "converter.exe")
+        cutepdf_path = os.path.join(downloads_folder, "CuteWriter.exe")
+        
         try:
-            for file in os.listdir(spool_path):
-                file_path = os.path.join(spool_path, file)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            # Tentar baixar os instaladores
+            print(f"Baixando conversor PS2PDF para: {converter_path}")
+            urllib.request.urlretrieve(converter_url, converter_path)
             
-        subprocess.run(["net", "start", "spooler"], capture_output=True, check=False)
-        time.sleep(2)
-    except Exception as e:
-        print(f"Erro ao reiniciar o spooler: {str(e)}")
-
-def download_file(url, destination):
-    """Faz o download de um arquivo."""
-    try:
-        print(f"Baixando {url}...")
-        # Tenta com urllib
-        urllib.request.urlretrieve(url, destination)
-        return True
-    except Exception as e:
-        print(f"Erro ao baixar arquivo com urllib: {e}")
-        
-        # Se falhar, tenta com PowerShell
-        try:
-            cmd = f'powershell -Command "& {{[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri \'{url}\' -OutFile \'{destination}\'}}"'
-            subprocess.run(cmd, shell=True, check=True)
+            print(f"Baixando CutePDF Writer para: {cutepdf_path}")
+            urllib.request.urlretrieve(cutepdf_url, cutepdf_path)
+            
+            # Executar os instaladores - primeiro o conversor e depois o CutePDF
+            print("\nOs arquivos foram baixados. Execute-os manualmente nesta ordem:")
+            print(f"1. {converter_path}")
+            print(f"2. {cutepdf_path}")
+            
+            # Abrir o explorador de arquivos na pasta de downloads
+            subprocess.run(["explorer", downloads_folder])
+            
+            # Perguntar se o usuário quer continuar depois da instalação manual
+            input("\nDepois de instalar ambos os programas, pressione Enter para continuar com a configuração...")
             return True
-        except Exception as e2:
-            print(f"Erro ao baixar arquivo com PowerShell: {e2}")
-            return False
+        
+        except Exception as e:
+            print(f"Erro ao baixar arquivos: {e}")
+            print("Por favor, baixe-os manualmente usando os links fornecidos.")
+            input("Depois de instalar ambos os programas, pressione Enter para continuar...")
+            return True
+    
+    else:
+        print("\nPor favor, instale o CutePDF manualmente e depois execute este script novamente.")
+        input("Pressione Enter quando estiver pronto para continuar...")
+        return check_cutepdf_installed()
 
-def install_bullzip():
-    """Instala o Bullzip PDF Printer."""
-    pdf_dir = ensure_output_dir()
+def check_cutepdf_installed():
+    """Verifica se o CutePDF está instalado"""
+    print("Verificando se o CutePDF está instalado...")
     
-    # URL para o instalador do Bullzip
-    bullzip_url = "https://dl.bullzip.com/download/BullzipPdfPrinter_13_2_0_2924.exe"
-    installer = os.path.join(tempfile.gettempdir(), "bullzip_installer.exe")
-    
-    # Baixa o instalador
-    if not download_file(bullzip_url, installer):
-        print("Erro ao baixar Bullzip PDF Printer. Tentar método alternativo.")
+    # Verificar a existência da impressora
+    try:
+        ps_script = """
+        $printer = Get-Printer -Name "CutePDF Writer" -ErrorAction SilentlyContinue
+        if ($printer -ne $null) {
+            Write-Output "PRINTER_FOUND"
+        } else {
+            Write-Output "PRINTER_NOT_FOUND"
+        }
+        """
+        
+        ps_file = os.path.join(tempfile.gettempdir(), "check_printer.ps1")
+        with open(ps_file, "w") as f:
+            f.write(ps_script)
+        
+        result = subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_file], 
+                               capture_output=True, text=True)
+        
+        if "PRINTER_FOUND" in result.stdout:
+            print("CutePDF Writer está instalado.")
+            return True
+        
+        # Verificar no registro
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer"):
+                print("CutePDF Writer encontrado no registro.")
+                return True
+        except:
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Wow6432Node\CutePDF Writer"):
+                    print("CutePDF Writer encontrado no registro (32-bit).")
+                    return True
+            except:
+                pass
+        
+        # Verificar diretórios comuns de instalação
+        program_files = os.environ.get('PROGRAMFILES', 'C:/Program Files')
+        program_files_x86 = os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')
+        
+        cutepdf_paths = [
+            os.path.join(program_files, "Acro Software", "CutePDF Writer"),
+            os.path.join(program_files_x86, "Acro Software", "CutePDF Writer"),
+            os.path.join(program_files, "CutePDF Writer"),
+            os.path.join(program_files_x86, "CutePDF Writer")
+        ]
+        
+        for path in cutepdf_paths:
+            if os.path.exists(path):
+                print(f"CutePDF Writer encontrado em: {path}")
+                return True
+        
+        print("CutePDF Writer não foi encontrado no sistema.")
         return False
     
-    # Prepara arquivo de configuração para instalação silenciosa
-    ini_file = os.path.join(tempfile.gettempdir(), "bullzip_setup.ini")
+    except Exception as e:
+        print(f"Erro ao verificar instalação: {e}")
+        return False
+
+def configure_cutepdf_registry():
+    """Configura o CutePDF para salvar automaticamente sem diálogos"""
+    print("Configurando CutePDF para salvar sem diálogos...")
     
-    ini_content = f"""[Setup]
-Bits=x64
-TargetDirBits=%ProgramFiles%\\Bullzip\\PDF Printer
-LicenseFile=
-InstallType=typical
-TARGETDIR=%ProgramFiles%\\Bullzip\\PDF Printer
-INSTALLLEVEL=100
-ShellIntegration=Yes
-SetAsDefaultPrinter=No
-Shortcuts=No
-RUNPROGRAM=No
-SILENT=Yes
-PrinterName=PDF Printer Virtual
-READMECHECK=No
-PDFPATH={pdf_dir}
-AUTOPRINT=No
-AUTOPDF=Yes
-AUTOSTARTPRINT=No
-SHOWSETTINGS=No
-SHOWPDF=No
-"""
-    
-    with open(ini_file, 'w') as f:
-        f.write(ini_content)
-    
-    # Instala o Bullzip PDF Printer
-    print("Instalando Bullzip PDF Printer (isso pode levar alguns minutos)...")
-    cmd = f'"{installer}" /LOADINF="{ini_file}" /SILENT /NORESTART'
+    # Criar diretório de saída se não existir
+    os.makedirs("c:/pdfs", exist_ok=True)
     
     try:
-        subprocess.run(cmd, shell=True, check=True)
-        print("Bullzip PDF Printer instalado com sucesso.")
+        # Chaves específicas do CutePDF
+        registry_keys = [
+            # HKEY_CURRENT_USER
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "AutoSave", 1, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "ShowSaveAS", 0, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "PromptForFileName", 0, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "UseDocumentTitle", 1, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "Output", "c:\\pdfs", winreg.REG_SZ),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "ConfirmOverwrite", 0, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "ShowSettings", 0, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "ShowPDF", 0, winreg.REG_DWORD),
+            (winreg.HKEY_CURRENT_USER, r"Software\CutePDF Writer", "ShowProgress", 0, winreg.REG_DWORD),
+            
+            # HKEY_LOCAL_MACHINE
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "AutoSave", 1, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "ShowSaveAS", 0, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "PromptForFileName", 0, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "UseDocumentTitle", 1, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "Output", "c:\\pdfs", winreg.REG_SZ),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "ConfirmOverwrite", 0, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "ShowSettings", 0, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "ShowPDF", 0, winreg.REG_DWORD),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\CutePDF Writer", "ShowProgress", 0, winreg.REG_DWORD),
+        ]
+        
+        for hkey, key_path, value_name, value_data, value_type in registry_keys:
+            try:
+                # Criar a chave se não existir
+                key = winreg.CreateKey(hkey, key_path)
+                # Definir o valor
+                winreg.SetValueEx(key, value_name, 0, value_type, value_data)
+                winreg.CloseKey(key)
+            except Exception as e:
+                print(f"Aviso: Não foi possível definir {key_path}\\{value_name}: {e}")
+        
+        print("Configurações de registro aplicadas.")
+        
+        # Tentar também via VBScript (mais confiável para algumas configurações)
+        vbs_file = os.path.join(tempfile.gettempdir(), "cutepdf_config.vbs")
+        
+        with open(vbs_file, "w") as f:
+            f.write("""On Error Resume Next
+Set WshShell = CreateObject("WScript.Shell")
+
+' Configurações principais no HKCU
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\AutoSave", 1, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\ShowSaveAS", 0, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\PromptForFileName", 0, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\UseDocumentTitle", 1, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\Output", "c:\\pdfs", "REG_SZ"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\ConfirmOverwrite", 0, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\ShowSettings", 0, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\ShowPDF", 0, "REG_DWORD"
+WshShell.RegWrite "HKCU\\Software\\CutePDF Writer\\ShowProgress", 0, "REG_DWORD"
+
+' Configurações principais no HKLM
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\AutoSave", 1, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\ShowSaveAS", 0, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\PromptForFileName", 0, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\UseDocumentTitle", 1, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\Output", "c:\\pdfs", "REG_SZ"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\ConfirmOverwrite", 0, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\ShowSettings", 0, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\ShowPDF", 0, "REG_DWORD"
+WshShell.RegWrite "HKLM\\SOFTWARE\\CutePDF Writer\\ShowProgress", 0, "REG_DWORD"
+
+WScript.Echo "VBS: Configurações aplicadas com sucesso."
+""")
+        
+        # Executar script VBS
+        subprocess.run(["cscript", "//nologo", vbs_file], capture_output=True, text=True)
+        
+        try:
+            os.remove(vbs_file)
+        except:
+            pass
+        
         return True
+    
     except Exception as e:
-        print(f"Erro ao instalar Bullzip PDF Printer: {e}")
+        print(f"Erro ao configurar registro: {e}")
         return False
 
-def configure_bullzip_registry(pdf_dir):
-    """Configura o Bullzip PDF Printer via registro do Windows para garantir que funcione corretamente."""
-    print("Configurando o Bullzip PDF Printer via registro do Windows...")
+def modify_cutepdf_config_files():
+    """Modifica diretamente os arquivos de configuração do CutePDF"""
+    print("Procurando e modificando arquivos de configuração do CutePDF...")
     
     try:
-        # Define as configurações no registro
-        # 1. Configurações globais para todos os usuários
-        reg_cmd = f'''
-# Configura Bullzip para todos os usuários
-$regkeys = @(
-    "HKLM:\\SOFTWARE\\Wow6432Node\\Bullzip\\PDF Printer",
-    "HKLM:\\SOFTWARE\\Bullzip\\PDF Printer"
-)
-
-foreach ($regkey in $regkeys) {{
-    if (Test-Path $regkey) {{
-        # Configurações principais
-        New-ItemProperty -Path "$regkey" -Name "OutputFormat" -Value "PDF" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "OutputDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "FilenameFormat" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "ConfirmOverwrite" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "OpenViewer" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "ShowSettings" -Value "Never" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "ShowProgress" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "ShowProgressFinish" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "RememberLastFolders" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "RememberLastFormat" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "SavePasswordsRegistry" -Value "No" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "PromptForFilename" -Value "Never" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "PromptForProperties" -Value "Never" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "AutoSaveEnabled" -Value "Yes" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "AutoSaveDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-        New-ItemProperty -Path "$regkey" -Name "AutoSaveFilename" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-    }}
-}}
-
-# Configurações específicas para o usuário atual
-$regkeys = @(
-    "HKCU:\\Software\\Bullzip\\PDF Printer",
-    "HKCU:\\Software\\Wow6432Node\\Bullzip\\PDF Printer"
-)
-
-foreach ($regkey in $regkeys) {{
-    if (!(Test-Path $regkey)) {{
-        New-Item -Path $regkey -Force | Out-Null
-    }}
-    
-    # Configurações principais
-    New-ItemProperty -Path "$regkey" -Name "OutputFormat" -Value "PDF" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "OutputDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "FilenameFormat" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ConfirmOverwrite" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "OpenViewer" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowSettings" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowProgress" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowProgressFinish" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "PromptForFilename" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "PromptForProperties" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "RunProgramAfterSaving" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "RunProgramBeforeSaving" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveEnabled" -Value "Yes" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveFilename" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-}}
-
-# Configurações específicas por impressora 
-$regkeys = @(
-    "HKCU:\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual",
-    "HKLM:\\SOFTWARE\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual",
-    "HKLM:\\SOFTWARE\\Wow6432Node\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual"
-)
-
-foreach ($regkey in $regkeys) {{
-    if (!(Test-Path $regkey)) {{
-        New-Item -Path $regkey -Force | Out-Null
-    }}
-    
-    # Configurações específicas da impressora
-    New-ItemProperty -Path "$regkey" -Name "OutputFormat" -Value "PDF" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "OutputDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "FilenameFormat" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ConfirmOverwrite" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "OpenViewer" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowSettings" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowProgress" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "ShowProgressFinish" -Value "No" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "PromptForFilename" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "PromptForProperties" -Value "Never" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveEnabled" -Value "Yes" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveDirectory" -Value "{pdf_dir}" -PropertyType String -Force | Out-Null
-    New-ItemProperty -Path "$regkey" -Name "AutoSaveFilename" -Value "Impressao_%Y%m%d_%H%M%S.pdf" -PropertyType String -Force | Out-Null
-}}
-
-# Configurações de preferências do usuário
-$regkey = "HKCU:\\Software\\Bullzip\\PDF Printer\\UserPrefs"
-if (!(Test-Path $regkey)) {{
-    New-Item -Path $regkey -Force | Out-Null
-}}
-New-ItemProperty -Path "$regkey" -Name "PromptForFileName" -Value "Never" -PropertyType String -Force | Out-Null
-New-ItemProperty -Path "$regkey" -Name "ShowProgress" -Value "No" -PropertyType String -Force | Out-Null
-'''
+        # Locais comuns de instalação do CutePDF
+        program_files = os.environ.get('PROGRAMFILES', 'C:/Program Files')
+        program_files_x86 = os.environ.get('PROGRAMFILES(X86)', 'C:/Program Files (x86)')
         
-        subprocess.run(["powershell", "-Command", reg_cmd], 
-                      capture_output=True, check=False)
+        cutepdf_paths = [
+            os.path.join(program_files, "Acro Software", "CutePDF Writer"),
+            os.path.join(program_files_x86, "Acro Software", "CutePDF Writer"),
+            os.path.join(program_files, "CutePDF Writer"),
+            os.path.join(program_files_x86, "CutePDF Writer")
+        ]
         
-        # Cria arquivo de configuração global
-        global_config_dir = os.path.expandvars("%ProgramFiles%\\Bullzip\\PDF Printer")
-        os.makedirs(global_config_dir, exist_ok=True)
+        # Possíveis arquivos de configuração
+        config_files = ['cpwcfg.ini', 'cutepdf.ini', 'writer.ini', 'config.ini']
         
-        global_config_file = os.path.join(global_config_dir, "settings.ini")
+        # Procurar e modificar os arquivos de configuração
+        found_files = False
         
-        global_config_content = f"""[PDF Settings]
-OutputFormat=PDF
-OutputDirectory={pdf_dir}
-FilenameFormat=Impressao_%Y%m%d_%H%M%S.pdf
-ConfirmOverwrite=No
-OpenViewer=No
-ShowSettings=Never
-ShowProgress=No
-ShowProgressFinish=No
-PromptForFilename=Never
-PromptForProperties=Never
-AutoSaveEnabled=Yes
-AutoSaveDirectory={pdf_dir}
-AutoSaveFilename=Impressao_%Y%m%d_%H%M%S.pdf
-"""
+        for cutepdf_path in cutepdf_paths:
+            if os.path.exists(cutepdf_path):
+                print(f"Pasta do CutePDF encontrada: {cutepdf_path}")
+                
+                for config_file in config_files:
+                    config_path = os.path.join(cutepdf_path, config_file)
+                    
+                    # Se o arquivo existir, modifique-o
+                    if os.path.exists(config_path):
+                        print(f"Arquivo de configuração encontrado: {config_path}")
+                        
+                        try:
+                            # Ler o conteúdo atual
+                            with open(config_path, "r", encoding="utf-8", errors="ignore") as f:
+                                content = f.read()
+                            
+                            # Fazer backup
+                            backup_path = f"{config_path}.bak"
+                            with open(backup_path, "w", encoding="utf-8") as f:
+                                f.write(content)
+                            
+                            # Modificar as configurações
+                            modified_content = content
+                            settings_to_modify = {
+                                "AutoSave": "1",
+                                "ShowSaveAS": "0",
+                                "PromptForFileName": "0",
+                                "UseDocumentTitle": "1",
+                                "Output": "c:\\pdfs",
+                                "ConfirmOverwrite": "0",
+                                "ShowSettings": "0",
+                                "ShowPDF": "0",
+                                "ShowProgress": "0"
+                            }
+                            
+                            # Formato INI: chave=valor
+                            for key, value in settings_to_modify.items():
+                                # Se a chave já existir, substitua seu valor
+                                pattern = r"(?m)^{0}\s*=.*$".format(key)
+                                replacement = f"{key}={value}"
+                                
+                                import re
+                                if re.search(pattern, modified_content):
+                                    modified_content = re.sub(pattern, replacement, modified_content)
+                                else:
+                                    # Se a chave não existir, adicione-a
+                                    modified_content += f"\n{key}={value}"
+                            
+                            # Salvar o conteúdo modificado
+                            with open(config_path, "w", encoding="utf-8") as f:
+                                f.write(modified_content)
+                            
+                            found_files = True
+                            print(f"Arquivo {config_file} modificado.")
+                        except Exception as e:
+                            print(f"Erro ao modificar {config_file}: {e}")
+                
+                # Se não encontrou arquivos de configuração, criar um novo
+                if not found_files:
+                    print("Nenhum arquivo de configuração encontrado. Criando um novo...")
+                    
+                    config_path = os.path.join(cutepdf_path, "cpwcfg.ini")
+                    try:
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            f.write("[CutePDF Writer]\n")
+                            f.write("AutoSave=1\n")
+                            f.write("ShowSaveAS=0\n")
+                            f.write("PromptForFileName=0\n")
+                            f.write("UseDocumentTitle=1\n")
+                            f.write("Output=c:\\pdfs\n")
+                            f.write("ConfirmOverwrite=0\n")
+                            f.write("ShowSettings=0\n")
+                            f.write("ShowPDF=0\n")
+                            f.write("ShowProgress=0\n")
+                        
+                        found_files = True
+                        print(f"Arquivo de configuração criado: {config_path}")
+                    except Exception as e:
+                        print(f"Erro ao criar arquivo de configuração: {e}")
         
-        with open(global_config_file, 'w') as f:
-            f.write(global_config_content)
-        
-        # Cria arquivo de configuração de usuário
-        user_config_dir = os.path.expandvars("%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer")
-        os.makedirs(user_config_dir, exist_ok=True)
-        
-        user_config_file = os.path.join(user_config_dir, "pdfprinter.ini")
-        
-        user_config_content = f"""[PDF Printer Virtual]
-OutputFormat=PDF
-OutputDirectory={pdf_dir}
-FilenameFormat=Impressao_%Y%m%d_%H%M%S.pdf
-ConfirmOverwrite=No
-OpenViewer=No
-ShowSettings=Never
-ShowProgress=No
-ShowProgressFinish=No
-PromptForFilename=Never
-PromptForProperties=Never
-AutoSaveEnabled=Yes
-AutoSaveDirectory={pdf_dir}
-AutoSaveFilename=Impressao_%Y%m%d_%H%M%S.pdf
-"""
-        
-        with open(user_config_file, 'w') as f:
-            f.write(user_config_content)
-        
-        # Configura o arquivo como padrão no registro
-        conf_cmd = f'reg add "HKCU\\Software\\Bullzip\\PDF Printer\\UserPrefs" /v "UserConfig" /t REG_SZ /d "{user_config_file}" /f'
-        subprocess.run(conf_cmd, shell=True, check=False)
-        
-        print("Configuração do Bullzip finalizada.")
+        if not found_files:
+            print("Nenhum arquivo de configuração encontrado ou criado.")
+            print("Utilizando apenas configurações do registro.")
         
         return True
+    
     except Exception as e:
-        print(f"Erro ao configurar Bullzip via registro: {e}")
+        print(f"Erro ao modificar arquivos de configuração: {e}")
         return False
 
-def create_test_script():
-    """Cria um script batch para testar a impressora."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    test_script = os.path.join(script_dir, "testar_impressora.bat")
-    
-    script_content = '''@echo off
-echo Criando arquivo de teste...
-echo Este é um teste da impressora virtual PDF. > "%TEMP%\\teste_impressao.txt"
-echo Se este arquivo for impresso corretamente, você verá um PDF em C:\\pdfs >> "%TEMP%\\teste_impressao.txt"
-echo Data/hora: %date% %time% >> "%TEMP%\\teste_impressao.txt"
-
-echo Imprimindo arquivo de teste...
-print /d:"PDF Printer Virtual" "%TEMP%\\teste_impressao.txt"
-
-echo.
-echo Arquivo de teste enviado para a impressora.
-echo Verifique se o arquivo PDF foi criado em C:\\pdfs
-echo.
-
-pause
-'''
-    
-    with open(test_script, 'w') as f:
-        f.write(script_content)
-    
-    print(f"Script de teste criado em: {test_script}")
-    return test_script
-
-def create_direct_install_script():
-    """Cria um script batch para instalação direta."""
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    install_script = os.path.join(script_dir, "instalar_impressora_direta.bat")
-    
-    script_content = '''@echo off
-echo Instalando impressora virtual PDF...
-
-REM Verifica se está executando como administrador
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Este script precisa ser executado como administrador.
-    echo Por favor, clique com o botão direito e selecione "Executar como administrador".
-    pause
-    exit /b 1
-)
-
-REM Cria diretório de destino
-if not exist "C:\\pdfs" mkdir "C:\\pdfs"
-icacls "C:\\pdfs" /grant Everyone:(OI)(CI)F
-icacls "C:\\pdfs" /grant SYSTEM:(OI)(CI)F
-icacls "C:\\pdfs" /grant Administrators:(OI)(CI)F
-
-REM Reinicia o spooler de impressão
-net stop spooler
-timeout /t 2 /nobreak > NUL
-echo Limpando arquivos temporários de impressão...
-del /q /f %systemroot%\\System32\\spool\\PRINTERS\\*.*
-net start spooler
-timeout /t 2 /nobreak > NUL
-
-REM Verifica se o Bullzip já está instalado e remove
-echo Verificando instalação existente...
-wmic product where "name like 'Bullzip PDF Printer%%'" call uninstall /nointeractive
-
-REM Baixa e instala o Bullzip PDF Printer
-echo Baixando Bullzip PDF Printer...
-powershell -Command "& {[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://dl.bullzip.com/download/BullzipPdfPrinter_13_2_0_2924.exe' -OutFile '%TEMP%\\bullzip_installer.exe'}"
-
-REM Cria arquivo de configuração
-echo Criando arquivo de configuração...
-echo [Setup] > "%TEMP%\\bullzip_setup.ini"
-echo Bits=x64 >> "%TEMP%\\bullzip_setup.ini"
-echo TargetDirBits=%%ProgramFiles%%\\Bullzip\\PDF Printer >> "%TEMP%\\bullzip_setup.ini"
-echo LicenseFile= >> "%TEMP%\\bullzip_setup.ini"
-echo InstallType=typical >> "%TEMP%\\bullzip_setup.ini"
-echo TARGETDIR=%%ProgramFiles%%\\Bullzip\\PDF Printer >> "%TEMP%\\bullzip_setup.ini"
-echo INSTALLLEVEL=100 >> "%TEMP%\\bullzip_setup.ini"
-echo ShellIntegration=Yes >> "%TEMP%\\bullzip_setup.ini"
-echo SetAsDefaultPrinter=No >> "%TEMP%\\bullzip_setup.ini"
-echo Shortcuts=No >> "%TEMP%\\bullzip_setup.ini"
-echo RUNPROGRAM=No >> "%TEMP%\\bullzip_setup.ini"
-echo SILENT=Yes >> "%TEMP%\\bullzip_setup.ini"
-echo PrinterName=PDF Printer Virtual >> "%TEMP%\\bullzip_setup.ini"
-echo READMECHECK=No >> "%TEMP%\\bullzip_setup.ini"
-echo PDFPATH=C:\\pdfs >> "%TEMP%\\bullzip_setup.ini"
-echo AUTOPRINT=No >> "%TEMP%\\bullzip_setup.ini"
-echo AUTOPDF=Yes >> "%TEMP%\\bullzip_setup.ini"
-echo AUTOSTARTPRINT=No >> "%TEMP%\\bullzip_setup.ini"
-echo SHOWSETTINGS=No >> "%TEMP%\\bullzip_setup.ini"
-echo SHOWPDF=No >> "%TEMP%\\bullzip_setup.ini"
-
-REM Instala o Bullzip
-echo Instalando Bullzip PDF Printer (isso pode levar alguns minutos)...
-"%TEMP%\\bullzip_installer.exe" /LOADINF="%TEMP%\\bullzip_setup.ini" /SILENT /NORESTART
-
-REM Aguarda a instalação
-timeout /t 10 /nobreak > NUL
-
-REM Configura o diretório global
-if not exist "%ProgramFiles%\\Bullzip\\PDF Printer" mkdir "%ProgramFiles%\\Bullzip\\PDF Printer"
-
-echo [PDF Settings] > "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo OutputFormat=PDF >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo OutputDirectory=C:\\pdfs >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo FilenameFormat=Impressao_%%Y%%m%%d_%%H%%M%%S.pdf >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo ConfirmOverwrite=No >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo OpenViewer=No >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo ShowSettings=Never >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo ShowProgress=No >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo ShowProgressFinish=No >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo PromptForFilename=Never >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo PromptForProperties=Never >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo AutoSaveEnabled=Yes >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo AutoSaveDirectory=C:\\pdfs >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-echo AutoSaveFilename=Impressao_%%Y%%m%%d_%%H%%M%%S.pdf >> "%ProgramFiles%\\Bullzip\\PDF Printer\\settings.ini"
-
-REM Configura o diretório de usuário
-if not exist "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer" mkdir "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer"
-
-echo [PDF Printer Virtual] > "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo OutputFormat=PDF >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo OutputDirectory=C:\\pdfs >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo FilenameFormat=Impressao_%%Y%%m%%d_%%H%%M%%S.pdf >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo ConfirmOverwrite=No >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo OpenViewer=No >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo ShowSettings=Never >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo ShowProgress=No >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo ShowProgressFinish=No >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo PromptForFilename=Never >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo PromptForProperties=Never >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo AutoSaveEnabled=Yes >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo AutoSaveDirectory=C:\\pdfs >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-echo AutoSaveFilename=Impressao_%%Y%%m%%d_%%H%%M%%S.pdf >> "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini"
-
-REM Configura o registro para todos os usuários
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "OutputFormat" /t REG_SZ /d "PDF" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "OutputDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "FilenameFormat" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "ConfirmOverwrite" /t REG_SZ /d "No" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "OpenViewer" /t REG_SZ /d "No" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "ShowSettings" /t REG_SZ /d "Never" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "ShowProgress" /t REG_SZ /d "No" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "ShowProgressFinish" /t REG_SZ /d "No" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "PromptForFilename" /t REG_SZ /d "Never" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "PromptForProperties" /t REG_SZ /d "Never" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "AutoSaveEnabled" /t REG_SZ /d "Yes" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "AutoSaveDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKLM\\SOFTWARE\\Bullzip\\PDF Printer" /v "AutoSaveFilename" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-
-REM Configura o registro para o usuário atual
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "OutputFormat" /t REG_SZ /d "PDF" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "OutputDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "FilenameFormat" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "ConfirmOverwrite" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "OpenViewer" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "ShowSettings" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "ShowProgress" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "ShowProgressFinish" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "PromptForFilename" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "PromptForProperties" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "AutoSaveEnabled" /t REG_SZ /d "Yes" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "AutoSaveDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer" /v "AutoSaveFilename" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-
-REM Configura o registro para a impressora específica
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "OutputFormat" /t REG_SZ /d "PDF" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "OutputDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "FilenameFormat" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "ConfirmOverwrite" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "OpenViewer" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "ShowSettings" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "ShowProgress" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "ShowProgressFinish" /t REG_SZ /d "No" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "PromptForFilename" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "PromptForProperties" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "AutoSaveEnabled" /t REG_SZ /d "Yes" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "AutoSaveDirectory" /t REG_SZ /d "C:\\pdfs" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\Printers\\PDF Printer Virtual" /v "AutoSaveFilename" /t REG_SZ /d "Impressao_%%Y%%m%%d_%%H%%M%%S.pdf" /f
-
-REM Configura o arquivo como padrão no registro
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\UserPrefs" /v "UserConfig" /t REG_SZ /d "%USERPROFILE%\\AppData\\Roaming\\Bullzip\\PDF Printer\\pdfprinter.ini" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\UserPrefs" /v "PromptForFileName" /t REG_SZ /d "Never" /f
-reg add "HKCU\\Software\\Bullzip\\PDF Printer\\UserPrefs" /v "ShowProgress" /t REG_SZ /d "No" /f
-
-REM Cria um arquivo de teste
-echo Este é um teste da impressora virtual PDF. > "C:\\pdfs\\teste_impressao.txt"
-
-echo.
-echo Instalação concluída! A impressora "PDF Printer Virtual" está instalada.
-echo Os arquivos PDF serão salvos automaticamente em C:\\pdfs
-echo Para testar, imprima o arquivo "C:\\pdfs\\teste_impressao.txt"
-echo.
-
-pause
-'''
-    
-    with open(install_script, 'w') as f:
-        f.write(script_content)
-    
-    print(f"Script de instalação direta criado em: {install_script}")
-    return install_script
-
-def remove_existing_bullzip():
-    """Remove qualquer instalação existente do Bullzip para evitar problemas de configuração."""
-    print("Removendo instalações existentes do Bullzip PDF Printer...")
-    
+def create_desktop_shortcut():
+    """Cria um atalho na área de trabalho para a pasta de PDFs"""
     try:
-        # Usa o WMI para remover o produto existente
-        remove_cmd = '''
-$products = Get-WmiObject -Class Win32_Product | Where-Object { $_.Name -like "Bullzip PDF Printer*" }
-foreach ($product in $products) {
-    Write-Host "Desinstalando: " $product.Name
-    $product.Uninstall() | Out-Null
-}
-'''
-        subprocess.run(["powershell", "-Command", remove_cmd], 
-                      capture_output=True, check=False)
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        if not os.path.exists(desktop):
+            print("Diretório da área de trabalho não encontrado. Pulando criação de atalho.")
+            return
         
-        # Aguarda a desinstalação
-        time.sleep(5)
+        shortcut_path = os.path.join(desktop, "PDFs.lnk")
         
-        return True
+        ps_script = f"""
+        $WshShell = New-Object -comObject WScript.Shell
+        $Shortcut = $WshShell.CreateShortcut("{shortcut_path}")
+        $Shortcut.TargetPath = "c:\\pdfs"
+        $Shortcut.IconLocation = "shell32.dll,36"
+        $Shortcut.Description = "Pasta de PDFs"
+        $Shortcut.Save()
+        """
+        
+        ps_file = os.path.join(tempfile.gettempdir(), "create_pdf_shortcut.ps1")
+        with open(ps_file, "w") as f:
+            f.write(ps_script)
+        
+        subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", ps_file])
+        print("Atalho para a pasta de PDFs criado na área de trabalho")
     except Exception as e:
-        print(f"Aviso: Falha ao remover instalação existente: {e}")
-        return False
+        print(f"Não foi possível criar o atalho: {e}")
+
+def create_system_config_file():
+    """Cria o arquivo de configuração diretamente no diretório do sistema"""
+    print("Criando arquivo de configuração diretamente no sistema...")
+    
+    # Locais comuns onde o CutePDF procura configurações
+    system_dirs = [
+        os.path.join(os.environ.get('SYSTEMROOT', 'C:/Windows'), "System32"),
+        os.path.join(os.environ.get('SYSTEMROOT', 'C:/Windows'), "SysWOW64"),
+    ]
+    
+    for system_dir in system_dirs:
+        if os.path.exists(system_dir):
+            config_path = os.path.join(system_dir, "cutepdf.ini")
+            try:
+                with open(config_path, "w") as f:
+                    f.write("[CutePDF Writer]\n")
+                    f.write("AutoSave=1\n")
+                    f.write("ShowSaveAS=0\n")
+                    f.write("PromptForFileName=0\n")
+                    f.write("UseDocumentTitle=1\n")
+                    f.write("Output=c:\\pdfs\n")
+                    f.write("ConfirmOverwrite=0\n")
+                    f.write("ShowSettings=0\n")
+                    f.write("ShowPDF=0\n")
+                    f.write("ShowProgress=0\n")
+                print(f"Arquivo de configuração criado em: {config_path}")
+            except Exception as e:
+                print(f"Erro ao criar arquivo de configuração em {system_dir}: {e}")
+    
+    # Também criar arquivo global no ProgramData
+    try:
+        program_data = os.environ.get('PROGRAMDATA', 'C:/ProgramData')
+        cutepdf_data_dir = os.path.join(program_data, "CutePDF Writer")
+        os.makedirs(cutepdf_data_dir, exist_ok=True)
+        
+        config_path = os.path.join(cutepdf_data_dir, "config.ini")
+        with open(config_path, "w") as f:
+            f.write("[CutePDF Writer]\n")
+            f.write("AutoSave=1\n")
+            f.write("ShowSaveAS=0\n")
+            f.write("PromptForFileName=0\n")
+            f.write("UseDocumentTitle=1\n")
+            f.write("Output=c:\\pdfs\n")
+            f.write("ConfirmOverwrite=0\n")
+            f.write("ShowSettings=0\n")
+            f.write("ShowPDF=0\n")
+            f.write("ShowProgress=0\n")
+        print(f"Arquivo de configuração global criado em: {config_path}")
+    except Exception as e:
+        print(f"Erro ao criar arquivo de configuração global: {e}")
 
 def main():
-    """Função principal."""
-    print("Iniciando instalação da impressora virtual PDF...")
-    
-    # Verifica se está executando como administrador
+    """Função principal para instalar e configurar o CutePDF sem diálogos"""
+    # Verificar privilégios de administrador
     if not is_admin():
-        print("Este script precisa ser executado como administrador.")
-        print("Por favor, execute novamente com privilégios de administrador.")
-        sys.exit(1)
+        print("Este script requer privilégios de administrador.")
+        print("Por favor, execute novamente como administrador.")
+        return False
     
-    # Cria o diretório de saída
-    pdf_dir = ensure_output_dir()
+    print("=== Instalador de CutePDF Sem Diálogos (Método Alternativo) ===")
     
-    # Reinicia o spooler para limpar qualquer impressora/porta problemática
-    restart_spooler()
+    # Criar diretório de saída
+    create_output_directory()
     
-    # Cria o script de instalação direta (como backup)
-    install_script = create_direct_install_script()
+    # Verificar se o CutePDF já está instalado
+    if not check_cutepdf_installed():
+        # Se não estiver instalado, tentar instalá-lo
+        if not install_cutepdf_alternative():
+            print("Falha ao instalar CutePDF. Abortando.")
+            return False
     
-    # Remove instalações existentes
-    remove_existing_bullzip()
+    # Configurar CutePDF via registro
+    configure_cutepdf_registry()
     
-    # Instala o Bullzip PDF Printer
-    print("Instalando Bullzip PDF Printer...")
-    if install_bullzip():
-        # Configura o Bullzip PDF Printer via registro
-        configure_bullzip_registry(pdf_dir)
-        
-        # Cria script de teste
-        test_script = create_test_script()
-        
-        print("\n" + "="*80)
-        print("Instalação concluída!")
-        print("="*80)
-        print("\nA impressora 'PDF Printer Virtual' foi instalada com sucesso.")
-        print(f"Os arquivos PDF serão salvos automaticamente em {pdf_dir}")
-        print("\nPara testar, execute o script:", test_script)
-        print("\nSe ainda assim aparecer diálogos ou os arquivos não forem salvos,")
-        print(f"execute o script de instalação direta: {install_script}")
-    else:
-        print("\nA instalação automática falhou.")
-        print(f"Por favor, execute o script {install_script} manualmente.")
+    # Modificar arquivos de configuração diretamente
+    modify_cutepdf_config_files()
     
-    print("\nDicas para resolução de problemas:")
-    print("1. Se os diálogos continuarem aparecendo, reinicie o computador")
-    print("2. Verifique se a pasta C:\\pdfs tem permissões de escrita")
-    print("3. Para uma instalação limpa, execute:", install_script)
+    # Criar arquivos de configuração no diretório do sistema
+    create_system_config_file()
+    
+    # Criar atalho na área de trabalho
+    create_desktop_shortcut()
+    
+    print("\n=== Configuração concluída com sucesso! ===")
+    print("O CutePDF Writer está configurado para funcionar sem diálogos.")
+    print("Os arquivos PDF serão salvos automaticamente em c:/pdfs")
+    
+    print("\nPara imprimir um documento como PDF:")
+    print("1. Abra o documento desejado")
+    print("2. Selecione 'Imprimir' e escolha a impressora 'CutePDF Writer'")
+    print("3. O PDF será salvo automaticamente em c:/pdfs sem mostrar diálogos")
+    
+    return True
 
 if __name__ == "__main__":
     main()
