@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Componente de listagem de documentos moderno
+Componente de listagem de documentos moderno - VERSÃO CORRIGIDA
 """
 
 import logging
@@ -31,6 +31,9 @@ class DocumentCardPanel(wx.Panel):
         self.document = document
         self.on_print = on_print
         self.on_delete = on_delete
+        self.doc_name_widget = None
+        self._is_destroyed = False  # Flag para controlar se foi destruído
+        self._pending_timers = []   # Lista de timers pendentes
         
         # Define cor de fundo (cinza escuro)
         self.SetBackgroundColour(wx.Colour(35, 35, 35))
@@ -41,7 +44,39 @@ class DocumentCardPanel(wx.Panel):
         self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
         self.Bind(wx.EVT_PAINT, self.on_paint)
         
+        # Bind do destroy para limpar timers
+        self.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
+        
         self._init_ui()
+    
+    def _on_destroy(self, event):
+        """Chamado quando o widget está sendo destruído"""
+        self._is_destroyed = True
+        # Cancela todos os timers pendentes
+        for timer in self._pending_timers:
+            try:
+                timer.Stop()
+            except:
+                pass
+        self._pending_timers.clear()
+        event.Skip()
+    
+    def _safe_call_later(self, milliseconds, func):
+        """Versão segura do CallLater que cancela automaticamente se destruído"""
+        if self._is_destroyed:
+            return
+            
+        def safe_wrapper():
+            if not self._is_destroyed and self:
+                try:
+                    func()
+                except RuntimeError:
+                    # Widget foi destruído
+                    pass
+        
+        timer = wx.CallLater(milliseconds, safe_wrapper)
+        self._pending_timers.append(timer)
+        return timer
     
     def _init_ui(self):
         """Inicializa a interface do usuário do card"""
@@ -62,28 +97,35 @@ class DocumentCardPanel(wx.Panel):
             main_sizer.Add(doc_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         
         # Painel de informações (centro)
-        info_panel = wx.Panel(self)
-        info_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+        self.info_panel = wx.Panel(self)
+        self.info_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
         info_sizer = wx.BoxSizer(wx.VERTICAL)
+
+        # Define a fonte do nome
+        self.name_font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+
+        # Inicialmente cria com nome completo
+        self.doc_name_widget = wx.StaticText(self.info_panel, label=self.document.name)
+        self.doc_name_widget.SetForegroundColour(wx.WHITE)
+        self.doc_name_widget.SetFont(self.name_font)
         
-        # Nome do documento
-        doc_name = wx.StaticText(info_panel, label=self.document.name)
-        doc_name.SetForegroundColour(wx.WHITE)
-        doc_name.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        info_sizer.Add(doc_name, 0, wx.BOTTOM, 5)
+        # Adiciona tooltip com nome completo
+        self.doc_name_widget.SetToolTip(self.document.name)
+        
+        info_sizer.Add(self.doc_name_widget, 0, wx.BOTTOM, 5)
         
         # Detalhes do documento
         details_text = f"{self._format_date(self.document.created_at)} · {self.document.formatted_size}"
         if hasattr(self.document, "pages") and self.document.pages > 0:
             details_text += f" · {self.document.pages} páginas"
             
-        details = wx.StaticText(info_panel, label=details_text)
+        details = wx.StaticText(self.info_panel, label=details_text)
         details.SetForegroundColour(wx.Colour(180, 180, 180))
         details.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         info_sizer.Add(details, 0)
         
-        info_panel.SetSizer(info_sizer)
-        main_sizer.Add(info_panel, 1, wx.EXPAND | wx.ALL, 10)
+        self.info_panel.SetSizer(info_sizer)
+        main_sizer.Add(self.info_panel, 1, wx.EXPAND | wx.ALL, 10)
         
         # Painel de ações (direita)
         actions_panel = wx.Panel(self)
@@ -112,6 +154,66 @@ class DocumentCardPanel(wx.Panel):
         main_sizer.Add(actions_panel, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 10)
         
         self.SetSizer(main_sizer)
+        
+        # Bind de eventos de resize
+        self.Bind(wx.EVT_SIZE, self._on_size)
+        
+        # Força o layout inicial e depois ajusta o nome
+        self.Layout()
+        self._safe_call_later(100, self._adjust_document_name)
+    
+    def _on_size(self, event):
+        """Manipula eventos de redimensionamento"""
+        if not self._is_destroyed:
+            self._safe_call_later(50, self._adjust_document_name)
+        event.Skip()
+    
+    def _adjust_document_name(self):
+        """Ajusta o nome do documento baseado no tamanho disponível"""
+        if self._is_destroyed or not self.doc_name_widget:
+            return
+            
+        try:
+            # Calcula a largura disponível
+            total_width = self.GetSize().width
+            if total_width <= 0:
+                return
+                
+            # Subtrai: ícone (52px) + botões (200px) + margens (40px)
+            available_width = max(150, total_width - 292)
+            
+            # Função de truncamento
+            def truncate_text(text, max_width, font):
+                if max_width <= 0:
+                    return text
+                    
+                bmp = wx.Bitmap(1, 1)
+                dc = wx.MemoryDC(bmp)
+                dc.SetFont(font)
+                
+                text_width = dc.GetTextExtent(text)[0]
+                if text_width <= max_width:
+                    return text
+                
+                ellipsis_width = dc.GetTextExtent("...")[0]
+                for i in range(len(text), 0, -1):
+                    sub_text = text[:i]
+                    width = dc.GetTextExtent(sub_text)[0]
+                    if width + ellipsis_width <= max_width:
+                        return sub_text + "..."
+                return "..."
+            
+            # Aplica o truncamento
+            truncated_name = truncate_text(self.document.name, available_width, self.name_font)
+            
+            # Atualiza apenas se necessário
+            if self.doc_name_widget.GetLabel() != truncated_name:
+                self.doc_name_widget.SetLabel(truncated_name)
+                self.info_panel.Layout()
+                
+        except RuntimeError:
+            # Widget foi destruído durante a execução
+            self._is_destroyed = True
     
     def _create_action_button(self, parent, label, color, handler):
         """
@@ -220,6 +322,7 @@ class DocumentListPanel(wx.ScrolledWindow):
         self.on_delete = on_delete
 
         self.documents = []
+        self.document_cards = []  # Mantém referência aos cards criados
         self.colors = {"bg_color": wx.Colour(18, 18, 18), 
                     "panel_bg": wx.Colour(25, 25, 25),
                     "accent_color": wx.Colour(255, 90, 36),
@@ -314,13 +417,26 @@ class DocumentListPanel(wx.ScrolledWindow):
 
         self.load_documents()
 
+    def _clear_existing_cards(self):
+        """Limpa os cards existentes de forma segura"""
+        # Primeiro marca todos os cards como destruídos
+        for card in self.document_cards:
+            if card and not card._is_destroyed:
+                card._is_destroyed = True
+        
+        # Limpa a lista
+        self.document_cards.clear()
+        
+        # Remove os widgets do painel
+        for child in self.content_panel.GetChildren():
+            if isinstance(child, DocumentCardPanel):
+                child.Destroy()
+
     def load_documents(self, event=None):
         """Carrega os documentos disponíveis para impressão diretamente do sistema de arquivos"""
         try:
-            # Limpa os cards existentes
-            for child in self.content_panel.GetChildren():
-                if isinstance(child, DocumentCardPanel):
-                    child.Destroy()
+            # Limpa os cards existentes de forma segura
+            self._clear_existing_cards()
             
             # Adiciona um indicador de carregamento
             loading_text = wx.StaticText(self.content_panel, label="Carregando documentos...")
@@ -352,6 +468,7 @@ class DocumentListPanel(wx.ScrolledWindow):
                 # Cria um card para cada documento
                 for doc in self.documents:
                     card = DocumentCardPanel(self.content_panel, doc, self.on_print, self.on_delete)
+                    self.document_cards.append(card)  # Mantém referência
                     self.content_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
             else:
                 self.empty_panel.Show()

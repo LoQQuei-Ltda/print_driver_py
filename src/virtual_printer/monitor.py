@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Monitor para novos documentos
+Monitor integrado para impressora virtual
 """
 
 import os
@@ -10,15 +10,17 @@ import logging
 from datetime import datetime
 
 from src.utils.file_monitor import FileMonitor
+from .printer_server import PrinterServer
+from .installer import VirtualPrinterInstaller
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Monitor")
 
-class PrintFolderMonitor:
-    """Monitor para novos documentos na pasta de impressão"""
+class VirtualPrinterManager:
+    """Gerenciador completo da impressora virtual"""
     
     def __init__(self, config, api_client=None, on_new_document=None):
         """
-        Inicializa o monitor de pasta
+        Inicializa o gerenciador da impressora virtual
         
         Args:
             config: Configuração da aplicação
@@ -29,64 +31,174 @@ class PrintFolderMonitor:
         self.api_client = api_client
         self.on_new_document = on_new_document
         
+        # Componentes
+        self.printer_server = None
+        self.installer = None
         self.file_monitor = None
+        
+        # Estado
+        self.is_running = False
         self.processed_ids = set()
+        
+        # Inicializar componentes
+        self._init_components()
+    
+    def _init_components(self):
+        """Inicializa os componentes da impressora virtual"""
+        # Criar servidor de impressão
+        self.printer_server = PrinterServer(
+            self.config, 
+            self._on_server_document_created
+        )
+        
+        # Criar instalador
+        self.installer = VirtualPrinterInstaller(self.config)
+        
+        # Monitor de arquivos (será inicializado quando necessário)
+        self.file_monitor = None
+    
+    def _on_server_document_created(self, document):
+        """Callback chamado quando o servidor cria um novo documento"""
+        try:
+            # Marcar como processado
+            if document.id not in self.processed_ids:
+                self.processed_ids.add(document.id)
+                
+                logger.info(f"Novo documento criado pela impressora virtual: {document.name}")
+                
+                # Aplicar impressão automática se configurado
+                self._auto_print_if_enabled(document)
+                
+                # Chamar callback do usuário
+                if self.on_new_document:
+                    self.on_new_document(document)
+        except Exception as e:
+            logger.error(f"Erro ao processar documento do servidor: {e}")
     
     def start(self):
         """
-        Inicia o monitoramento da pasta
+        Inicia o sistema completo da impressora virtual
         
         Returns:
-            bool: True se o monitoramento foi iniciado com sucesso
+            bool: True se foi iniciado com sucesso
         """
-        if self.file_monitor and self.file_monitor.observer and self.file_monitor.observer.is_alive():
+        if self.is_running:
+            logger.info("Sistema de impressora virtual já está rodando")
             return True
         
-        logger.info(f"Iniciando monitoramento da pasta: {self.config.pdf_dir}")
-        
-        # Cria callback para lidar com novos documentos
-        def on_documents_changed(documents):
-            if self.on_new_document and documents:
-                # Chama o callback para cada documento não visto anteriormente
-                for doc in documents:
-                    if doc.id not in self.processed_ids:
-                        logger.info(f"Novo documento detectado: {doc.name}")
-                        
-                        # Marca como processado
-                        self.processed_ids.add(doc.id)
-                        
-                        # Aplica impressão automática se configurado
-                        self._auto_print_if_enabled(doc)
-                        
-                        # Chama o callback do usuário
-                        self.on_new_document(doc)
-        
-        # Cria e inicia o monitor de arquivos
-        self.file_monitor = FileMonitor(self.config, on_documents_changed)
-        self.file_monitor.start()
-        
-        return True
+        try:
+            # 1. Iniciar servidor de impressão
+            logger.info("Iniciando servidor de impressão...")
+            if not self.printer_server.start():
+                logger.error("Falha ao iniciar servidor de impressão")
+                return False
+            
+            # 2. Instalar impressora virtual
+            logger.info("Instalando impressora virtual...")
+            server_info = self.printer_server.get_server_info()
+            if not self.installer.install_with_server_info(server_info):
+                logger.error("Falha ao instalar impressora virtual")
+                self.printer_server.stop()
+                return False
+            
+            # 3. Iniciar monitoramento de arquivos
+            logger.info("Iniciando monitoramento de arquivos...")
+            self._start_file_monitoring()
+            
+            self.is_running = True
+            logger.info("Sistema de impressora virtual iniciado com sucesso")
+            
+            # Log das informações do servidor
+            server_info = self.printer_server.get_server_info()
+            logger.info(f"Servidor rodando em {server_info['ip']}:{server_info['port']}")
+            logger.info(f"PDFs serão salvos em: {self.config.pdf_dir}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao iniciar sistema de impressora virtual: {e}")
+            self.stop()
+            return False
     
     def stop(self):
         """
-        Para o monitoramento da pasta
+        Para o sistema da impressora virtual
         
         Returns:
-            bool: True se o monitoramento foi parado com sucesso
+            bool: True se foi parado com sucesso
         """
-        if self.file_monitor:
-            self.file_monitor.stop()
+        logger.info("Parando sistema de impressora virtual...")
+        
+        try:
+            # Parar monitoramento de arquivos
+            if self.file_monitor:
+                self.file_monitor.stop()
+                self.file_monitor = None
+            
+            # Parar servidor de impressão
+            if self.printer_server:
+                self.printer_server.stop()
+            
+            # Nota: Não removemos a impressora virtual intencionalmente
+            # para que ela permaneça disponível mesmo quando a aplicação não está rodando
+            
+            self.is_running = False
+            logger.info("Sistema de impressora virtual parado")
             return True
-        return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao parar sistema de impressora virtual: {e}")
+            return False
     
-    def is_monitoring(self):
+    def reinstall_printer(self):
         """
-        Verifica se o monitoramento está ativo
+        Reinstala a impressora virtual
         
         Returns:
-            bool: True se o monitoramento está ativo
+            bool: True se a reinstalação foi bem-sucedida
         """
-        return self.file_monitor and self.file_monitor.observer and self.file_monitor.observer.is_alive()
+        logger.info("Reinstalando impressora virtual...")
+        
+        try:
+            if self.installer and self.printer_server:
+                server_info = self.printer_server.get_server_info()
+                if server_info['running']:
+                    return self.installer.reinstall()
+                else:
+                    logger.error("Servidor não está rodando, não é possível reinstalar")
+                    return False
+            else:
+                logger.error("Componentes não inicializados")
+                return False
+        except Exception as e:
+            logger.error(f"Erro ao reinstalar impressora virtual: {e}")
+            return False
+    
+    def _start_file_monitoring(self):
+        """Inicia o monitoramento da pasta de PDFs"""
+        try:
+            def on_documents_changed(documents):
+                if self.on_new_document and documents:
+                    for doc in documents:
+                        # Só processa documentos que não vieram do servidor
+                        if doc.id not in self.processed_ids:
+                            logger.info(f"Novo documento detectado no sistema de arquivos: {doc.name}")
+                            
+                            # Marcar como processado
+                            self.processed_ids.add(doc.id)
+                            
+                            # Aplicar impressão automática se configurado
+                            self._auto_print_if_enabled(doc)
+                            
+                            # Chamar callback do usuário
+                            self.on_new_document(doc)
+            
+            # Criar e iniciar o monitor de arquivos
+            self.file_monitor = FileMonitor(self.config, on_documents_changed)
+            self.file_monitor.start()
+            
+        except Exception as e:
+            logger.error(f"Erro ao iniciar monitoramento de arquivos: {e}")
     
     def _auto_print_if_enabled(self, document):
         """
@@ -106,7 +218,6 @@ class PrintFolderMonitor:
         try:
             logger.info(f"Enviando {document.name} para impressão automática na impressora {default_printer}")
             
-            # Implementação de impressão automática
             from src.utils.printer_utils import PrinterUtils
             PrinterUtils.print_file(document.path, default_printer)
             
@@ -114,6 +225,44 @@ class PrintFolderMonitor:
             
         except Exception as e:
             logger.error(f"Erro ao imprimir automaticamente: {str(e)}")
+    
+    def get_status(self):
+        """
+        Obtém o status do sistema
+        
+        Returns:
+            dict: Status dos componentes
+        """
+        status = {
+            'running': self.is_running,
+            'printer_installed': False,
+            'server_running': False,
+            'server_info': None,
+            'monitoring_active': False
+        }
+        
+        try:
+            # Status da impressora
+            if self.installer:
+                status['printer_installed'] = self.installer.is_installed()
+            
+            # Status do servidor
+            if self.printer_server:
+                server_info = self.printer_server.get_server_info()
+                status['server_running'] = server_info['running']
+                status['server_info'] = server_info
+            
+            # Status do monitoramento
+            if self.file_monitor:
+                status['monitoring_active'] = (
+                    self.file_monitor.observer and 
+                    self.file_monitor.observer.is_alive()
+                )
+            
+        except Exception as e:
+            logger.error(f"Erro ao obter status: {e}")
+        
+        return status
     
     def get_recent_documents(self, limit=50):
         """
@@ -125,14 +274,28 @@ class PrintFolderMonitor:
         Returns:
             list: Lista de objetos Document
         """
-        if not self.file_monitor:
+        try:
+            if not self.file_monitor:
+                # Se o monitor não está ativo, cria um temporário para obter documentos
+                from src.utils.file_monitor import FileMonitor
+                temp_monitor = FileMonitor(self.config)
+                temp_monitor._load_initial_documents()
+                documents = temp_monitor.get_documents()
+            else:
+                documents = self.file_monitor.get_documents()
+            
+            # Ordena por data de criação (mais recente primeiro)
+            documents.sort(key=lambda d: d.created_at, reverse=True)
+            
+            return documents[:limit]
+        except Exception as e:
+            logger.error(f"Erro ao obter documentos recentes: {e}")
             return []
-        
-        # Obtém todos os documentos do monitor
-        documents = self.file_monitor.get_documents()
-        
-        # Ordena por data de criação (mais recente primeiro)
-        documents.sort(key=lambda d: d.created_at, reverse=True)
-        
-        # Retorna apenas os mais recentes
-        return documents[:limit]
+
+# Para compatibilidade com código existente
+class PrintFolderMonitor(VirtualPrinterManager):
+    """Alias para compatibilidade com código existente"""
+    
+    def __init__(self, config, api_client=None, on_new_document=None):
+        super().__init__(config, api_client, on_new_document)
+        logger.warning("PrintFolderMonitor é deprecated. Use VirtualPrinterManager em vez disso.")

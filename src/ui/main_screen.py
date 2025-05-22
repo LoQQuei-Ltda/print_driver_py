@@ -17,305 +17,6 @@ from src.models.printer import Printer
 
 logger = logging.getLogger("PrintManagementSystem.UI.MainScreen")
 
-class CardPanel(wx.Panel):
-    """Painel de card para exibir um item com botões de ação"""
-    
-    def __init__(self, parent, document, on_print, on_delete):
-        """
-        Inicializa o painel de card
-        
-        Args:
-            parent: Painel pai
-            document: Documento a ser exibido
-            on_print: Callback para impressão
-            on_delete: Callback para exclusão
-        """
-        super().__init__(parent, style=wx.BORDER_NONE)
-        
-        self.document = document
-        self.on_print = on_print
-        self.on_delete = on_delete
-        
-        # Define cor de fundo (cinza escuro)
-        self.SetBackgroundColour(wx.Colour(35, 35, 35))
-        
-        # Eventos para hover
-        self.hover = False
-        self.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
-        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
-        self.Bind(wx.EVT_PAINT, self.on_paint)
-        
-        self._init_ui()
-    
-    def _init_ui(self):
-        """Inicializa a interface do usuário"""
-        # Painel principal
-        self.main_panel = wx.Panel(self)
-        self.main_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
-        
-        # Layout principal (horizontal: menu lateral + conteúdo)
-        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-        # Painel de menu lateral
-        self.sidebar_panel = wx.Panel(self.main_panel)
-        self.sidebar_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-        sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Informações do usuário no topo do menu lateral
-        user_panel = wx.Panel(self.sidebar_panel)
-        user_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-        user_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-        # Avatar do usuário (círculo com inicial)
-        user_info = self.auth_manager.get_current_user()
-        user_name = user_info.get("name", user_info.get("email", "Usuário"))
-        user_initial = user_name[0].upper() if user_name else "U"
-
-        user_picture = user_info.get("picture", "")
-        
-        avatar_size = 40
-        avatar_panel = wx.Panel(user_panel, size=(avatar_size, avatar_size))
-        avatar_panel.SetBackgroundColour(wx.Colour(255, 90, 36))  # Laranja
-        
-        def on_avatar_paint(event):
-            dc = wx.PaintDC(avatar_panel)
-            
-            # Draw the circular background first
-            dc.SetBrush(wx.Brush(wx.Colour(255, 90, 36)))
-            dc.SetPen(wx.Pen(wx.Colour(255, 90, 36)))
-            dc.DrawCircle(int(avatar_size/2), int(avatar_size/2), int(avatar_size/2))
-            
-            # Draw the initial
-            dc.SetTextForeground(wx.WHITE)
-            font = wx.Font(16, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
-            dc.SetFont(font)
-            text_width, text_height = dc.GetTextExtent(user_initial)
-            dc.DrawText(user_initial, int((avatar_size - text_width) / 2), int((avatar_size - text_height) / 2))
-
-        avatar_panel.Bind(wx.EVT_PAINT, on_avatar_paint)
-        
-        # Nome do usuário
-        user_name_text = wx.StaticText(user_panel, label=user_name)
-        user_name_text.SetForegroundColour(wx.WHITE)
-        user_name_text.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        
-        user_sizer.Add(avatar_panel, 0, wx.ALL, 10)
-        user_sizer.Add(user_name_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
-        user_panel.SetSizer(user_sizer)
-        
-        sidebar_sizer.Add(user_panel, 0, wx.EXPAND | wx.ALL, 10)
-        sidebar_sizer.Add(wx.StaticLine(self.sidebar_panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
-        
-        # Menu itens
-        menu_items = [
-            {"label": "Documentos", "icon": "document.png", "handler": self.on_show_documents},
-            {"label": "Impressoras", "icon": "printer.png", "handler": self.on_show_printers},
-        ]
-        
-        # Criar os botões do menu
-        self.menu_buttons = []
-        for i, item in enumerate(menu_items):
-            # Criar o painel do botão
-            item_panel = wx.Panel(self.sidebar_panel)
-            item_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-            item_sizer = wx.BoxSizer(wx.HORIZONTAL)
-            
-            # Carregar ícone se existir
-            icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                    "src", "ui", "resources", item.get("icon", ""))
-            
-            if os.path.exists(icon_path):
-                icon = wx.Bitmap(icon_path)
-                icon_bitmap = wx.StaticBitmap(item_panel, wx.ID_ANY, icon)
-                item_sizer.Add(icon_bitmap, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
-            
-            # Texto do item
-            item_text = wx.StaticText(item_panel, wx.ID_ANY, item["label"])
-            item_text.SetForegroundColour(wx.WHITE)
-            item_sizer.Add(item_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
-            
-            item_panel.SetSizer(item_sizer)
-            
-            # Eventos do item
-            item_panel.Bind(wx.EVT_LEFT_DOWN, item["handler"])
-            
-            # Marcar como selecionado o primeiro item (Documentos)
-            if i == 0:
-                item_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-                self.selected_menu = item_panel
-            
-            # Eventos de hover
-            def on_enter(evt, panel=item_panel):
-                if panel != self.selected_menu:
-                    panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-                    panel.Refresh()
-            
-            def on_leave(evt, panel=item_panel):
-                if panel != self.selected_menu:
-                    panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-                    panel.Refresh()
-            
-            item_panel.Bind(wx.EVT_ENTER_WINDOW, on_enter)
-            item_panel.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
-            
-            sidebar_sizer.Add(item_panel, 0, wx.EXPAND | wx.TOP, 5)
-            self.menu_buttons.append(item_panel)
-        
-        # Espaçador para empurrar o botão de logout para o fim
-        sidebar_sizer.Add((0, 0), 1, wx.EXPAND)
-        
-        # Botão de logout
-        logout_panel = wx.Panel(self.sidebar_panel)
-        logout_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-        logout_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-        # Ícone de logout
-        logout_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                    "src", "ui", "resources", "logout.png")
-        
-        if os.path.exists(logout_icon_path):
-            logout_icon = wx.Bitmap(logout_icon_path)
-            logout_bitmap = wx.StaticBitmap(logout_panel, wx.ID_ANY, logout_icon)
-            logout_sizer.Add(logout_bitmap, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
-        
-        # Texto do logout
-        logout_text = wx.StaticText(logout_panel, wx.ID_ANY, "Sair")
-        logout_text.SetForegroundColour(wx.WHITE)
-        logout_sizer.Add(logout_text, 0, wx.LEFT | wx.ALIGN_CENTER_VERTICAL, 10)
-        
-        logout_panel.SetSizer(logout_sizer)
-        
-        # Eventos de hover
-        def on_logout_enter(evt):
-            logout_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-            logout_panel.Refresh()
-        
-        def on_logout_leave(evt):
-            logout_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-            logout_panel.Refresh()
-        
-        logout_panel.Bind(wx.EVT_ENTER_WINDOW, on_logout_enter)
-        logout_panel.Bind(wx.EVT_LEAVE_WINDOW, on_logout_leave)
-        logout_panel.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
-        
-        sidebar_sizer.Add(logout_panel, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 20)
-        
-        self.sidebar_panel.SetSizer(sidebar_sizer)
-        
-        # Painel de conteúdo
-        self.content_panel = wx.Panel(self.main_panel)
-        self.content_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
-        self.content_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Cria o painel de documentos
-        self.documents_panel = DocumentsPanel(self.content_panel, self.theme_manager)
-        self.documents_panel.refresh_button.Bind(wx.EVT_BUTTON, self.on_refresh_documents)
-        
-        # Cria o painel de impressoras
-        from src.ui.printer_list import PrinterListPanel
-        self.printers_panel = wx.Panel(self.content_panel)
-        self.printers_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
-        
-        # Adiciona o painel de lista de impressoras ao painel de impressoras
-        self.printer_list = PrinterListPanel(self.printers_panel, self.theme_manager, 
-                                            self.config, self.api_client)
-        
-        printer_sizer = wx.BoxSizer(wx.VERTICAL)
-        printer_sizer.Add(self.printer_list, 1, wx.EXPAND)
-        self.printers_panel.SetSizer(printer_sizer)
-        self.printers_panel.Hide()
-        
-        self.content_sizer.Add(self.documents_panel, 1, wx.EXPAND)
-        self.content_sizer.Add(self.printers_panel, 1, wx.EXPAND)
-        
-        self.content_panel.SetSizer(self.content_sizer)
-        
-        # Adiciona os painéis ao layout principal
-        main_sizer.Add(self.sidebar_panel, 0, wx.EXPAND)
-        main_sizer.Add(self.content_panel, 1, wx.EXPAND)
-        
-        self.main_panel.SetSizer(main_sizer)
-        
-        # Carrega lista de documentos
-        self.load_documents()
-    
-    def _create_action_button(self, parent, label, color, handler):
-        """
-        Cria um botão de ação
-        
-        Args:
-            parent: Painel pai
-            label: Texto do botão
-            color: Cor de fundo do botão
-            handler: Função de tratamento de clique
-            
-        Returns:
-            wx.Button: Botão criado
-        """
-        button = wx.Button(parent, label=label, size=(90, 36))
-        button.SetBackgroundColour(color)
-        button.SetForegroundColour(wx.WHITE)
-        button.Bind(wx.EVT_BUTTON, handler)
-        
-        # Eventos de hover para o botão
-        def on_btn_enter(evt):
-            if color == wx.Colour(255, 90, 36):  # Laranja
-                button.SetBackgroundColour(wx.Colour(255, 120, 70))
-            else:
-                button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            button.Refresh()
-        
-        def on_btn_leave(evt):
-            button.SetBackgroundColour(color)
-            button.Refresh()
-        
-        button.Bind(wx.EVT_ENTER_WINDOW, on_btn_enter)
-        button.Bind(wx.EVT_LEAVE_WINDOW, on_btn_leave)
-        
-        return button
-    
-    def _on_print_click(self, event):
-        """Manipula o clique no botão de impressão"""
-        if self.on_print:
-            self.on_print(self.document)
-    
-    def _on_delete_click(self, event):
-        """Manipula o clique no botão de exclusão"""
-        if self.on_delete:
-            self.on_delete(self.document)
-    
-    def on_enter(self, event):
-        """Manipula o evento de mouse sobre o card"""
-        self.hover = True
-        self.Refresh()
-    
-    def on_leave(self, event):
-        """Manipula o evento de mouse saindo do card"""
-        self.hover = False
-        self.Refresh()
-    
-    def on_paint(self, event):
-        """Redesenha o card com cantos arredondados e efeito de hover"""
-        dc = wx.BufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        
-        rect = self.GetClientRect()
-        
-        # Cor de fundo baseada no estado de hover
-        if self.hover:
-            bg_color = wx.Colour(45, 45, 45)  # Cinza mais claro no hover
-        else:
-            bg_color = wx.Colour(35, 35, 35)  # Cor normal
-        
-        # Desenha o fundo com cantos arredondados
-        path = gc.CreatePath()
-        path.AddRoundedRectangle(0, 0, rect.width, rect.height, 8)
-        
-        gc.SetBrush(wx.Brush(bg_color))
-        gc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))  # Borda sutil
-        
-        gc.DrawPath(path)
-
 class DocumentsPanel(wx.ScrolledWindow):
     """Painel de lista de documentos com cards"""
     
@@ -429,9 +130,10 @@ class DocumentsPanel(wx.ScrolledWindow):
         """
         self.documents = documents
         
-        # Remove os cards existentes
+        # Remove os cards existentes (importa aqui para evitar dependência circular)
+        from src.ui.document_list import DocumentCardPanel
         for child in self.content_panel.GetChildren():
-            if isinstance(child, CardPanel):
+            if isinstance(child, DocumentCardPanel):
                 child.Destroy()
         
         # Atualiza a visualização
@@ -440,7 +142,7 @@ class DocumentsPanel(wx.ScrolledWindow):
             
             # Cria um card para cada documento
             for doc in documents:
-                card = CardPanel(self.content_panel, doc, on_print, on_delete)
+                card = DocumentCardPanel(self.content_panel, doc, on_print, on_delete)
                 self.content_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         else:
             self.empty_panel.Show()
@@ -466,7 +168,7 @@ class MainScreen(wx.Frame):
             on_logout: Callback chamado quando o usuário faz logout
         """
         # Verifica se há tamanho e posição salvos
-        size = config.get("window_size", wx.Size(900, 700))
+        size = config.get("window_size", wx.Size(800, 600))
         pos = config.get("window_pos", wx.DefaultPosition)
         
         super().__init__(
@@ -478,6 +180,8 @@ class MainScreen(wx.Frame):
             style=wx.DEFAULT_FRAME_STYLE
         )
         
+        self.SetMinSize((800, 600))
+
         self.auth_manager = auth_manager
         self.theme_manager = theme_manager
         self.api_client = api_client
@@ -516,10 +220,6 @@ class MainScreen(wx.Frame):
         # Cria e configura o ícone da bandeja
         self.taskbar_icon = None
         self._setup_taskbar_icon()
-        
-        # Inicia o monitoramento da pasta se a impressão automática estiver ativada
-        if self.config.get("auto_print", False):
-            self._start_folder_monitoring()
     
     def _init_ui(self):
         """Inicializa a interface do usuário"""
@@ -794,9 +494,6 @@ class MainScreen(wx.Frame):
             # Salva o tamanho e posição da janela
             self._save_window_geometry()
             
-            # Para o monitoramento de pastas se estiver ativo
-            self._stop_folder_monitoring()
-            
             # Esconde a janela em vez de destruí-la
             self.Hide()
             
@@ -965,9 +662,6 @@ class MainScreen(wx.Frame):
         # Salva o tamanho e posição da janela
         self._save_window_geometry()
         
-        # Para o monitoramento de pastas se estiver ativo
-        self._stop_folder_monitoring()
-        
         # Remove o ícone da bandeja
         if self.taskbar_icon:
             self.taskbar_icon.RemoveIcon()
@@ -979,22 +673,6 @@ class MainScreen(wx.Frame):
         
         # Encerra a aplicação
         wx.GetApp().ExitMainLoop()
-    
-    def _start_folder_monitoring(self):
-        """Inicia o monitoramento da pasta de PDFs"""
-        if not hasattr(self, 'monitoring_active') or not self.monitoring_active:
-            self.monitoring_active = True
-            self.monitoring_thread = threading.Thread(target=self._monitor_folder, daemon=True)
-            self.monitoring_thread.start()
-    
-    def _stop_folder_monitoring(self):
-        """Para o monitoramento da pasta de PDFs"""
-        self.monitoring_active = False
-    
-    def _monitor_folder(self):
-        """Função executada em thread para monitorar a pasta de PDFs"""
-        # Implementação do monitoramento de pastas
-        pass
     
     def on_size(self, event):
         """Manipula o evento de redimensionamento da janela"""

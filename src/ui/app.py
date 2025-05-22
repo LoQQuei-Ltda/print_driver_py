@@ -13,6 +13,7 @@ from src.api import APIClient
 from src.utils import AuthManager, ThemeManager
 from src.ui.login_screen import LoginScreen
 from src.ui.main_screen import MainScreen
+from src.virtual_printer.monitor import VirtualPrinterManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.App")
 
@@ -35,6 +36,7 @@ class PrintManagementApp(wx.App):
         self.auth_manager = None
         self.theme_manager = None
         self.scheduler = None
+        self.virtual_printer_manager = None
         
         # Flag para controlar se estamos em segundo plano
         self.running_in_background = False
@@ -86,6 +88,9 @@ class PrintManagementApp(wx.App):
             
             # Configura o gerenciador de temas
             self.theme_manager = ThemeManager(self.config)
+            
+            # Inicializa sistema de impressora virtual
+            self._init_virtual_printer()
             
             # Configura o agendador de tarefas
             from src.utils import TaskScheduler
@@ -142,6 +147,50 @@ class PrintManagementApp(wx.App):
             logger.error(f"Erro ao inicializar aplicação: {str(e)}", exc_info=True)
             wx.MessageBox(f"Erro ao inicializar aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
             return False
+    
+    def _init_virtual_printer(self):
+        """Inicializa o sistema de impressora virtual"""
+        try:
+            logger.info("Inicializando sistema de impressora virtual...")
+            
+            # Criar gerenciador da impressora virtual
+            self.virtual_printer_manager = VirtualPrinterManager(
+                self.config,
+                self.api_client,
+                self._on_virtual_printer_document
+            )
+            
+            # Iniciar sistema de impressora virtual
+            if self.virtual_printer_manager.start():
+                logger.info("Sistema de impressora virtual iniciado com sucesso")
+                
+                # Log do status
+                status = self.virtual_printer_manager.get_status()
+                logger.info(f"Status da impressora virtual: {status}")
+            else:
+                logger.error("Falha ao iniciar sistema de impressora virtual")
+                # Continua a aplicação mesmo se a impressora virtual falhar
+                
+        except Exception as e:
+            logger.error(f"Erro ao inicializar impressora virtual: {str(e)}")
+            # Continua a aplicação mesmo se a impressora virtual falhar
+    
+    def _on_virtual_printer_document(self, document):
+        """
+        Callback chamado quando um novo documento é criado pela impressora virtual
+        
+        Args:
+            document: Documento criado
+        """
+        try:
+            logger.info(f"Novo documento da impressora virtual: {document.name}")
+            
+            # Se a tela principal estiver ativa, atualiza a lista de documentos
+            if self.main_screen and self.main_screen.IsShown():
+                wx.CallAfter(self.main_screen.load_documents)
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar documento da impressora virtual: {e}")
     
     def on_login_success(self):
         """Callback chamado quando o login é bem-sucedido"""
@@ -245,3 +294,21 @@ class PrintManagementApp(wx.App):
             window: Janela principal
         """
         super().SetTopWindow(window)
+    
+    def OnExit(self):
+        """Chamado quando a aplicação está sendo encerrada"""
+        try:
+            # Para o agendador
+            if self.scheduler:
+                self.scheduler.stop()
+            
+            # Para o sistema de impressora virtual (mas não remove a impressora)
+            if self.virtual_printer_manager:
+                self.virtual_printer_manager.stop()
+            
+            logger.info("Aplicação encerrada")
+            
+        except Exception as e:
+            logger.error(f"Erro ao encerrar aplicação: {e}")
+        
+        return super().OnExit()

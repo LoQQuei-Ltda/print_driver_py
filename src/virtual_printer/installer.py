@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Instalador da impressora virtual
+Instalador da impressora virtual cross-platform
 """
 
 import os
@@ -13,14 +13,302 @@ import subprocess
 import tempfile
 import shutil
 import ctypes
+import typing
 from pathlib import Path
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Installer")
 
-class VirtualPrinterInstaller:
-    """Instalador da impressora virtual"""
+class PrinterManager:
+    """Classe base para gerenciar impressoras específicas do sistema"""
     
-    PRINTER_NAME = "LoQQuei PDF Printer"
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona uma impressora virtual"""
+        raise NotImplementedError
+    
+    def remove_printer(self, name):
+        """Remove uma impressora"""
+        raise NotImplementedError
+    
+    def remove_port(self, port_name):
+        """Remove uma porta de impressora"""
+        raise NotImplementedError
+    
+    def check_printer_exists(self, name):
+        """Verifica se uma impressora existe"""
+        raise NotImplementedError
+    
+    def check_port_exists(self, port_name):
+        """Verifica se uma porta existe"""
+        raise NotImplementedError
+
+class WindowsPrinterManager(PrinterManager):
+    """Gerenciador de impressoras para Windows"""
+    
+    def __init__(self):
+        self.postscript_printer_drivers = [
+            'Microsoft Print To PDF',
+            'Microsoft XPS Document Writer',
+            'HP Universal Printing PS',
+            'HP Color LaserJet 2800 Series PS',
+            'Generic / Text Only'
+        ]
+        self.default_driver = self._find_available_driver()
+    
+    def _find_available_driver(self):
+        """Encontra um driver disponível"""
+        try:
+            output = subprocess.check_output([
+                'powershell', '-command',
+                'Get-PrinterDriver | Select-Object Name | Format-Table -HideTableHeaders'
+            ], universal_newlines=True)
+            
+            available_drivers = [line.strip() for line in output.splitlines() if line.strip()]
+            
+            for driver in self.postscript_printer_drivers:
+                if driver in available_drivers:
+                    return driver
+            
+            return available_drivers[0] if available_drivers else 'Microsoft Print To PDF'
+        except:
+            return 'Microsoft Print To PDF'
+    
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona impressora no Windows"""
+        if printer_port_name is None:
+            printer_port_name = f"{ip}:{port}"
+        
+        # Criar porta
+        cmd = ['cscript', r'c:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+               '-md', '-a', '-o', 'raw', '-r', printer_port_name, '-h', ip, '-n', str(port)]
+        
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True)
+        except Exception as e:
+            logger.error(f"Erro ao criar porta: {e}")
+            return False
+        
+        # Criar impressora
+        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/if',
+               '/b', name, '/r', printer_port_name, '/m', self.default_driver, '/Z']
+        
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True)
+            logger.info(f"Impressora Windows '{name}' instalada com sucesso!")
+            
+            # Definir comentário se fornecido
+            if comment:
+                self._set_printer_comment(name, comment)
+            
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao criar impressora: {e}")
+            return False
+    
+    def _set_printer_comment(self, name, comment):
+        """Adiciona um comentário à impressora"""
+        comment = comment.replace('"', '\\"').replace('\n', '\\n')
+        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/Xs',
+               '/n', name, 'comment', comment]
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True)
+        except Exception as e:
+            logger.warning(f"Erro ao definir comentário: {e}")
+    
+    def remove_printer(self, name):
+        """Remove impressora no Windows"""
+        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/dl', '/n', name]
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
+            return True
+        except:
+            return False
+    
+    def remove_port(self, port_name):
+        """Remove porta no Windows"""
+        cmd = ['cscript', r'c:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+               '-d', '-r', port_name]
+        try:
+            subprocess.run(cmd, shell=True, capture_output=True)
+        except:
+            pass
+    
+    def check_printer_exists(self, name):
+        """Verifica se impressora existe no Windows"""
+        try:
+            cmd = ['powershell', '-command', 
+                f'if (Get-Printer -Name "{name}" -ErrorAction SilentlyContinue) {{Write-Output "true"}} else {{Write-Output "false"}}']
+            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
+            return result.stdout.decode().strip().lower() == "true"
+        except:
+            return False
+    
+    def check_port_exists(self, port_name):
+        """Verifica se porta existe no Windows"""
+        try:
+            cmd = ['powershell', '-command', 
+                f'if (Get-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue) {{Write-Output "true"}} else {{Write-Output "false"}}']
+            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
+            return result.stdout.decode().strip().lower() == "true"
+        except:
+            return False
+
+class UnixPrinterManager(PrinterManager):
+    """Gerenciador de impressoras para sistemas Unix (Linux/macOS) usando CUPS"""
+    
+    def __init__(self):
+        self.system = platform.system()
+        self.cups_available = self._check_cups_availability()
+        
+        if not self.cups_available:
+            self._install_cups_suggestions()
+    
+    def _check_cups_availability(self):
+        """Verifica se CUPS está instalado e acessível"""
+        try:
+            result = subprocess.run(['which', 'lpadmin'], capture_output=True, text=True)
+            if result.returncode != 0:
+                return False
+            
+            result = subprocess.run(['which', 'lpstat'], capture_output=True, text=True)
+            if result.returncode != 0:
+                return False
+            
+            try:
+                result = subprocess.run(['lpstat', '-r'], capture_output=True, text=True, timeout=5)
+                if "not ready" in result.stdout.lower():
+                    self._start_cups_service()
+            except subprocess.TimeoutExpired:
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao verificar CUPS: {e}")
+            return False
+    
+    def _start_cups_service(self):
+        """Tenta iniciar o serviço CUPS"""
+        logger.info("Tentando iniciar o serviço CUPS...")
+        
+        if self.system == 'Linux':
+            service_commands = [
+                ['sudo', 'systemctl', 'start', 'cups'],
+                ['sudo', 'service', 'cups', 'start'],
+                ['sudo', '/etc/init.d/cups', 'start']
+            ]
+        elif self.system == 'Darwin':  # macOS
+            service_commands = [
+                ['sudo', 'launchctl', 'load', '/System/Library/LaunchDaemons/org.cups.cupsd.plist'],
+                ['sudo', 'brew', 'services', 'start', 'cups']
+            ]
+        else:
+            service_commands = []
+        
+        for cmd in service_commands:
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    logger.info("Serviço CUPS iniciado com sucesso.")
+                    return True
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        
+        return False
+    
+    def _install_cups_suggestions(self):
+        """Fornece sugestões para instalar CUPS"""
+        logger.warning("CUPS não encontrado no sistema")
+        if self.system == 'Linux':
+            logger.info("Para instalar CUPS no Linux: sudo apt-get install cups cups-client")
+        elif self.system == 'Darwin':
+            logger.info("No macOS, CUPS geralmente está pré-instalado. Tente: brew install cups")
+    
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona impressora no Unix usando CUPS"""
+        if not self.cups_available:
+            logger.error("CUPS não está disponível. Não é possível adicionar impressora.")
+            return False
+
+        device_uri = f"socket://{ip}:{port}"
+        
+        cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+        
+        if os.geteuid() != 0:
+            cmd.insert(0, 'sudo')
+        
+        # Tentar diferentes drivers
+        drivers = ['raw', 'drv:///generic.drv/generic.ppd', 'textonly.ppd']
+        
+        success = False
+        for driver in drivers:
+            try:
+                current_cmd = cmd + ['-m', driver]
+                result = subprocess.run(current_cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0:
+                    logger.info(f"Impressora '{name}' instalada com sucesso usando driver: {driver}")
+                    success = True
+                    break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception as e:
+                logger.warning(f"Erro ao instalar com driver {driver}: {e}")
+                continue
+        
+        if not success:
+            logger.error("Não foi possível instalar a impressora com nenhum driver disponível.")
+            return False
+        
+        # Configurações adicionais
+        try:
+            if comment:
+                cmd_comment = ['lpadmin', '-p', name, '-D', comment]
+                if os.geteuid() != 0:
+                    cmd_comment.insert(0, 'sudo')
+                subprocess.run(cmd_comment, capture_output=True, timeout=10)
+        except Exception as e:
+            logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
+        
+        return True
+    
+    def remove_printer(self, name):
+        """Remove impressora no Unix"""
+        if not self.cups_available:
+            return False
+        
+        cmd = ['lpadmin', '-x', name]
+        if os.geteuid() != 0:
+            cmd.insert(0, 'sudo')
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if result.returncode == 0:
+                logger.info(f"Impressora '{name}' removida com sucesso.")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Erro ao remover impressora: {e}")
+            return False
+    
+    def remove_port(self, port_name):
+        """No Unix/CUPS, as portas são gerenciadas automaticamente"""
+        pass
+    
+    def check_printer_exists(self, name):
+        """Verifica se impressora existe no Unix"""
+        try:
+            result = subprocess.run(['lpstat', '-p', name], capture_output=True, timeout=5)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def check_port_exists(self, port_name):
+        """No Unix/CUPS, não é necessário verificar portas separadamente"""
+        return True
+
+class VirtualPrinterInstaller:
+    """Instalador da impressora virtual cross-platform"""
+    
+    PRINTER_NAME = "Impressora LoQQuei"
     
     def __init__(self, config):
         """
@@ -31,33 +319,78 @@ class VirtualPrinterInstaller:
         """
         self.config = config
         self.system = platform.system()
+        self.printer_manager = self._init_printer_manager()
+        self.server_info = None
+    
+    def _init_printer_manager(self):
+        """Inicializa o gerenciador de impressoras baseado no sistema"""
+        if self.system == 'Windows':
+            return WindowsPrinterManager()
+        else:  # Linux ou macOS
+            return UnixPrinterManager()
+    
+    def install_with_server_info(self, server_info):
+        """
+        Instala a impressora virtual com informações do servidor
+        
+        Args:
+            server_info: Dicionário com ip e port do servidor
+            
+        Returns:
+            bool: True se a instalação foi bem-sucedida
+        """
+        self.server_info = server_info
+        
+        try:
+            if self.is_installed():
+                logger.info("Impressora virtual já está instalada, reinstalando...")
+                self.uninstall()
+            
+            ip = server_info['ip']
+            port = server_info['port']
+            
+            comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir}'
+            
+            success = self.printer_manager.add_printer(
+                self.PRINTER_NAME, ip, port,
+                None, False, comment
+            )
+            
+            if success:
+                logger.info(f"Impressora virtual '{self.PRINTER_NAME}' instalada com sucesso!")
+                return True
+            else:
+                logger.error("Falha ao instalar a impressora virtual")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erro ao instalar impressora virtual: {str(e)}")
+            return False
+    
+    def reinstall(self):
+        """
+        Reinstala a impressora virtual
+        
+        Returns:
+            bool: True se a reinstalação foi bem-sucedida
+        """
+        if not self.server_info:
+            logger.error("Informações do servidor não disponíveis para reinstalação")
+            return False
+        
+        logger.info("Reinstalando impressora virtual...")
+        self.uninstall()
+        return self.install_with_server_info(self.server_info)
     
     def install(self):
         """
-        Instala a impressora virtual
+        Instala a impressora virtual (método legado)
         
         Returns:
             bool: True se a instalação foi bem-sucedida
-            
-        Raises:
-            RuntimeError: Se ocorrer um erro na instalação
         """
-        logger.info(f"Instalando impressora virtual no {self.system}")
-        
-        if self.is_installed():
-            logger.info("Impressora virtual já está instalada")
-            return True
-        
-        try:
-            if self.system == "Windows":
-                return self._install_windows()
-            elif self.system == "Darwin":  # macOS
-                return self._install_macos()
-            else:  # Linux ou outros
-                return self._install_linux()
-        except Exception as e:
-            logger.error(f"Erro ao instalar impressora virtual: {str(e)}")
-            raise RuntimeError(f"Erro ao instalar impressora virtual: {str(e)}")
+        logger.warning("Método install() é legado. Use install_with_server_info() em vez disso.")
+        return False
     
     def uninstall(self):
         """
@@ -65,26 +398,21 @@ class VirtualPrinterInstaller:
         
         Returns:
             bool: True se a remoção foi bem-sucedida
-            
-        Raises:
-            RuntimeError: Se ocorrer um erro na remoção
         """
-        logger.info(f"Removendo impressora virtual do {self.system}")
+        logger.info(f"Removendo impressora virtual")
         
         if not self.is_installed():
             logger.info("Impressora virtual não está instalada")
             return True
         
         try:
-            if self.system == "Windows":
-                return self._uninstall_windows()
-            elif self.system == "Darwin":  # macOS
-                return self._uninstall_macos()
-            else:  # Linux ou outros
-                return self._uninstall_linux()
+            success = self.printer_manager.remove_printer(self.PRINTER_NAME)
+            if success:
+                logger.info("Impressora virtual removida com sucesso")
+            return success
         except Exception as e:
             logger.error(f"Erro ao remover impressora virtual: {str(e)}")
-            raise RuntimeError(f"Erro ao remover impressora virtual: {str(e)}")
+            return False
     
     def is_installed(self):
         """
@@ -94,12 +422,7 @@ class VirtualPrinterInstaller:
             bool: True se a impressora está instalada
         """
         try:
-            if self.system == "Windows":
-                return self._is_installed_windows()
-            elif self.system == "Darwin":  # macOS
-                return self._is_installed_macos()
-            else:  # Linux ou outros
-                return self._is_installed_linux()
+            return self.printer_manager.check_printer_exists(self.PRINTER_NAME)
         except Exception as e:
             logger.error(f"Erro ao verificar instalação da impressora virtual: {str(e)}")
             return False
@@ -117,742 +440,4 @@ class VirtualPrinterInstaller:
             else:
                 return os.geteuid() == 0
         except Exception:
-            return False
-    
-    def _request_admin(self, script_path, args=None):
-        """
-        Solicita privilégios de administrador
-        
-        Args:
-            script_path (str): Caminho do script a ser executado com privilégios elevados
-            args (list, optional): Argumentos adicionais para o script
-            
-        Returns:
-            bool: True se o processo foi iniciado com sucesso
-        """
-        args = args or []
-        
-        try:
-            if self.system == "Windows":
-                # No Windows, usa ShellExecute com o verbo "runas"
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{script_path}" {" ".join(args)}', None, 1)
-            elif self.system == "Darwin":  # macOS
-                # No macOS, usa osascript para solicitar privilégios
-                cmd = ["osascript", "-e", f'do shell script "\\"{sys.executable}\\" \\"{script_path}\\" {" ".join(args)}" with administrator privileges']
-                subprocess.Popen(cmd)
-            else:  # Linux ou outros
-                # No Linux, usa sudo, gksudo, pkexec ou equivalente
-                for sudo_cmd in ["pkexec", "gksudo", "kdesudo", "sudo"]:
-                    if shutil.which(sudo_cmd):
-                        subprocess.Popen([sudo_cmd, sys.executable, script_path] + args)
-                        break
-                else:
-                    raise RuntimeError("Não foi possível encontrar um comando para solicitar privilégios de administrador")
-            
-            return True
-        except Exception as e:
-            logger.error(f"Erro ao solicitar privilégios de administrador: {str(e)}")
-            return False
-    
-    # Implementações específicas para Windows
-    
-    def _is_installed_windows(self):
-        """
-        Verifica se a impressora virtual está instalada no Windows
-        
-        Returns:
-            bool: True se a impressora está instalada
-        """
-        try:
-            import win32print
-            
-            printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
-            for _, printer_name, _, _ in printers:
-                if self.PRINTER_NAME in printer_name:
-                    return True
-            
-            return False
-            
-        except ImportError:
-            logger.error("Módulo win32print não encontrado")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao verificar instalação no Windows: {str(e)}")
-            return False
-    
-    def _install_windows(self):
-        """
-        Instala a impressora virtual no Windows
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para instalar a impressora virtual")
-            
-            # Cria um script temporário para instalar a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "install_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Instala a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._install_windows_impl()
-
-if result:
-    print("Impressora virtual instalada com sucesso!")
-else:
-    print("Falha ao instalar impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._install_windows_impl()
-    
-    def _install_windows_impl(self):
-        """
-        Implementação real da instalação no Windows
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        try:
-            import win32print
-            import win32con
-            
-            # Verifica se já existe
-            if self._is_installed_windows():
-                return True
-            
-            # No Windows, usamos um driver de impressora PDF nativo ou instalamos um
-            # Para simplicidade, vamos usar o Microsoft Print to PDF que está disponível no Windows 10 e posterior
-            # Ou PDF-XChange se disponível
-            
-            drivers = [
-                ("Microsoft Print to PDF", "PORTPROMPT:"),
-                ("PDF-XChange Standard Printer Driver", "PORTPROMPT:"),
-                ("PDF24", "PORTPROMPT:"),
-                ("Foxit Reader PDF Printer", "PORTPROMPT:"),
-            ]
-            
-            # Verifica se algum dos drivers está disponível
-            available_drivers = win32print.EnumPrinterDrivers(None, None, 2)
-            driver_found = False
-            driver_name = ""
-            
-            for driver_info in available_drivers:
-                for target_driver, _ in drivers:
-                    if target_driver in driver_info["Name"]:
-                        driver_name = driver_info["Name"]
-                        driver_found = True
-                        break
-                
-                if driver_found:
-                    break
-            
-            if not driver_found:
-                logger.error("Nenhum driver de impressora PDF encontrado no sistema")
-                # TODO: Implementar instalação de um driver PDF
-                return False
-            
-            # Cria um diretório para armazenar os PDFs (vai ser usado no monitor)
-            pdf_dir = self.config.pdf_dir
-            os.makedirs(pdf_dir, exist_ok=True)
-            
-            # Cria uma porta de impressora que salva em arquivo
-            port_name = f"FILE:{pdf_dir}\\$.pdf"
-            
-            # Adiciona impressora
-            win32print.AddPrinter(
-                None,  # servidor local
-                2,  # nível de informação
-                {
-                    "Name": self.PRINTER_NAME,
-                    "ShareName": "",
-                    "PortName": port_name,
-                    "DriverName": driver_name,
-                    "Comment": "Impressora virtual para criação de PDFs",
-                    "Location": "",
-                    "DevMode": None,
-                    "SepFile": "",
-                    "PrintProcessor": "WinPrint",
-                    "Datatype": "RAW",
-                    "Parameters": "",
-                    "Attributes": win32print.PRINTER_ATTRIBUTE_LOCAL | win32print.PRINTER_ATTRIBUTE_SHARED,
-                    "Priority": 1,
-                    "DefaultPriority": 1,
-                    "StartTime": 0,
-                    "UntilTime": 0,
-                    "Status": 0,
-                    "AveragePPM": 0
-                }
-            )
-            
-            return True
-            
-        except ImportError:
-            logger.error("Módulo win32print não encontrado")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao instalar impressora virtual no Windows: {str(e)}")
-            return False
-    
-    def _uninstall_windows(self):
-        """
-        Remove a impressora virtual do Windows
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para remover a impressora virtual")
-            
-            # Cria um script temporário para remover a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "uninstall_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Remove a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._uninstall_windows_impl()
-
-if result:
-    print("Impressora virtual removida com sucesso!")
-else:
-    print("Falha ao remover impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._uninstall_windows_impl()
-    
-    def _uninstall_windows_impl(self):
-        """
-        Implementação real da remoção no Windows
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        try:
-            import win32print
-            
-            # Procura a impressora
-            printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)
-            for _, printer_name, _, _ in printers:
-                if self.PRINTER_NAME in printer_name:
-                    # Abre a impressora
-                    handle = win32print.OpenPrinter(printer_name)
-                    
-                    try:
-                        # Remove a impressora
-                        win32print.DeletePrinter(handle)
-                    finally:
-                        win32print.ClosePrinter(handle)
-                    
-                    return True
-            
-            # Impressora não encontrada
-            return True
-            
-        except ImportError:
-            logger.error("Módulo win32print não encontrado")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao remover impressora virtual do Windows: {str(e)}")
-            return False
-    
-    # Implementações específicas para macOS
-    
-    def _is_installed_macos(self):
-        """
-        Verifica se a impressora virtual está instalada no macOS
-        
-        Returns:
-            bool: True se a impressora está instalada
-        """
-        try:
-            # Lista impressoras
-            output = subprocess.check_output(["lpstat", "-p"], universal_newlines=True)
-            
-            # Procura pelo nome da impressora
-            return self.PRINTER_NAME in output
-            
-        except subprocess.CalledProcessError:
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao verificar instalação no macOS: {str(e)}")
-            return False
-    
-    def _install_macos(self):
-        """
-        Instala a impressora virtual no macOS
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para instalar a impressora virtual")
-            
-            # Cria um script temporário para instalar a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "install_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Instala a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._install_macos_impl()
-
-if result:
-    print("Impressora virtual instalada com sucesso!")
-else:
-    print("Falha ao instalar impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._install_macos_impl()
-    
-    def _install_macos_impl(self):
-        """
-        Implementação real da instalação no macOS
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        try:
-            # Verifica se já existe
-            if self._is_installed_macos():
-                return True
-            
-            # Cria um diretório para armazenar os PDFs
-            pdf_dir = self.config.pdf_dir
-            os.makedirs(pdf_dir, exist_ok=True)
-            
-            # No macOS, podemos usar o CUPS para criar uma impressora PDF
-            # O backend 'lp' pode ser configurado para "imprimir para arquivo"
-            
-            # Cria o backend script
-            backend_dir = "/usr/libexec/cups/backend"
-            our_backend = os.path.join(backend_dir, "loqquei")
-            
-            with open(our_backend, 'w') as f:
-                f.write(f"""#!/bin/bash
-# CUPS backend for LoQQuei PDF Printer
-
-# The backend receives these arguments:
-# $1 = job ID
-# $2 = user
-# $3 = title
-# $4 = copies
-# $5 = options
-# $6 = file name (for filter)
-
-# Path to save PDFs
-PDF_DIR="{pdf_dir}"
-
-# Make sure the directory exists
-mkdir -p "$PDF_DIR"
-
-# Generate a unique filename
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
-OUTPUT_FILE="$PDF_DIR/$3-$TIMESTAMP.pdf"
-
-# Replace spaces and special characters in filename
-OUTPUT_FILE=$(echo "$OUTPUT_FILE" | sed 's/[^a-zA-Z0-9_.-]/_/g')
-
-# Copy stdin to the output file
-cat > "$OUTPUT_FILE"
-
-# Return success
-exit 0
-""")
-            
-            # Torna o script executável
-            os.chmod(our_backend, 0o755)
-            
-            # Adiciona a impressora usando lpadmin
-            subprocess.run([
-                "lpadmin",
-                "-p", self.PRINTER_NAME,
-                "-E",
-                "-v", f"loqquei:/",
-                "-P", "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/PrintCore.framework/Versions/A/Resources/Generic.ppd",
-                "-o", "printer-is-shared=false"
-            ], check=True)
-            
-            return True
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Erro ao executar lpadmin: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao instalar impressora virtual no macOS: {str(e)}")
-            return False
-    
-    def _uninstall_macos(self):
-        """
-        Remove a impressora virtual do macOS
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para remover a impressora virtual")
-            
-            # Cria um script temporário para remover a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "uninstall_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Remove a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._uninstall_macos_impl()
-
-if result:
-    print("Impressora virtual removida com sucesso!")
-else:
-    print("Falha ao remover impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._uninstall_macos_impl()
-    
-    def _uninstall_macos_impl(self):
-        """
-        Implementação real da remoção no macOS
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        try:
-            # Verifica se existe
-            if not self._is_installed_macos():
-                return True
-            
-            # Remove a impressora
-            subprocess.run(["lpadmin", "-x", self.PRINTER_NAME], check=True)
-            
-            # Remove o backend
-            backend_path = "/usr/libexec/cups/backend/loqquei"
-            if os.path.exists(backend_path):
-                os.remove(backend_path)
-            
-            return True
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Erro ao executar lpadmin: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao remover impressora virtual do macOS: {str(e)}")
-            return False
-    
-    # Implementações específicas para Linux
-    
-    def _is_installed_linux(self):
-        """
-        Verifica se a impressora virtual está instalada no Linux
-        
-        Returns:
-            bool: True se a impressora está instalada
-        """
-        try:
-            # Lista impressoras
-            output = subprocess.check_output(["lpstat", "-p"], universal_newlines=True)
-            
-            # Procura pelo nome da impressora
-            return self.PRINTER_NAME in output
-            
-        except subprocess.CalledProcessError:
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao verificar instalação no Linux: {str(e)}")
-            return False
-    
-    def _install_linux(self):
-        """
-        Instala a impressora virtual no Linux
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para instalar a impressora virtual")
-            
-            # Cria um script temporário para instalar a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "install_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Instala a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._install_linux_impl()
-
-if result:
-    print("Impressora virtual instalada com sucesso!")
-else:
-    print("Falha ao instalar impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._install_linux_impl()
-    
-    def _install_linux_impl(self):
-        """
-        Implementação real da instalação no Linux
-        
-        Returns:
-            bool: True se a instalação foi bem-sucedida
-        """
-        try:
-            # Verifica se já existe
-            if self._is_installed_linux():
-                return True
-            
-            # Cria um diretório para armazenar os PDFs
-            pdf_dir = self.config.pdf_dir
-            os.makedirs(pdf_dir, exist_ok=True)
-            
-            # No Linux, podemos usar o CUPS para criar uma impressora PDF
-            # O backend 'lp' pode ser configurado para "imprimir para arquivo"
-            
-            # Cria o backend script
-            backend_dir = "/usr/lib/cups/backend"
-            if not os.path.exists(backend_dir):
-                backend_dir = "/usr/libexec/cups/backend"
-            
-            our_backend = os.path.join(backend_dir, "loqquei")
-            
-            with open(our_backend, 'w') as f:
-                f.write(f"""#!/bin/bash
-# CUPS backend for LoQQuei PDF Printer
-
-# The backend receives these arguments:
-# $1 = job ID
-# $2 = user
-# $3 = title
-# $4 = copies
-# $5 = options
-# $6 = file name (for filter)
-
-# Path to save PDFs
-PDF_DIR="{pdf_dir}"
-
-# Make sure the directory exists
-mkdir -p "$PDF_DIR"
-
-# Generate a unique filename
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
-OUTPUT_FILE="$PDF_DIR/$3-$TIMESTAMP.pdf"
-
-# Replace spaces and special characters in filename
-OUTPUT_FILE=$(echo "$OUTPUT_FILE" | sed 's/[^a-zA-Z0-9_.-]/_/g')
-
-# Copy stdin to the output file
-cat > "$OUTPUT_FILE"
-
-# Return success
-exit 0
-""")
-            
-            # Torna o script executável
-            os.chmod(our_backend, 0o755)
-            
-            # Adiciona a impressora usando lpadmin
-            subprocess.run([
-                "lpadmin",
-                "-p", self.PRINTER_NAME,
-                "-E",
-                "-v", f"loqquei:/",
-                "-m", "raw",  # Driver raw para aceitar PDF diretamente
-                "-o", "printer-is-shared=false"
-            ], check=True)
-            
-            return True
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Erro ao executar lpadmin: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao instalar impressora virtual no Linux: {str(e)}")
-            return False
-    
-    def _uninstall_linux(self):
-        """
-        Remove a impressora virtual do Linux
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        if not self._is_admin():
-            logger.info("Solicitando privilégios de administrador para remover a impressora virtual")
-            
-            # Cria um script temporário para remover a impressora
-            temp_dir = tempfile.mkdtemp()
-            script_path = os.path.join(temp_dir, "uninstall_printer.py")
-            
-            with open(script_path, 'w') as f:
-                f.write(f"""
-import os
-import sys
-import subprocess
-import time
-
-# Adiciona o diretório do aplicativo ao caminho de importação
-app_dir = {repr(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))}
-sys.path.insert(0, app_dir)
-
-from src.virtual_printer.installer import VirtualPrinterInstaller
-from src.config import AppConfig
-
-# Inicializa a configuração
-config = AppConfig({repr(self.config.data_dir)})
-
-# Remove a impressora
-installer = VirtualPrinterInstaller(config)
-result = installer._uninstall_linux_impl()
-
-if result:
-    print("Impressora virtual removida com sucesso!")
-else:
-    print("Falha ao remover impressora virtual")
-
-# Aguarda para o usuário ver a mensagem
-time.sleep(3)
-""")
-            
-            return self._request_admin(script_path)
-        
-        # Quando já temos privilégios de administrador
-        return self._uninstall_linux_impl()
-    
-    def _uninstall_linux_impl(self):
-        """
-        Implementação real da remoção no Linux
-        
-        Returns:
-            bool: True se a remoção foi bem-sucedida
-        """
-        try:
-            # Verifica se existe
-            if not self._is_installed_linux():
-                return True
-            
-            # Remove a impressora
-            subprocess.run(["lpadmin", "-x", self.PRINTER_NAME], check=True)
-            
-            # Remove o backend
-            for backend_dir in ["/usr/lib/cups/backend", "/usr/libexec/cups/backend"]:
-                backend_path = os.path.join(backend_dir, "loqquei")
-                if os.path.exists(backend_path):
-                    os.remove(backend_path)
-            
-            return True
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Erro ao executar lpadmin: {str(e)}")
-            return False
-        except Exception as e:
-            logger.error(f"Erro ao remover impressora virtual do Linux: {str(e)}")
             return False
