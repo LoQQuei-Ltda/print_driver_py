@@ -1,8 +1,8 @@
-"""Setup para o projeto - VERSÃO CORRIGIDA"""
+"""Setup para o projeto - VERSÃO CORRIGIDA COMPLETA"""
 import os
 import sys
 import platform
-import importlib.util
+import shutil
 from setuptools import setup, find_packages, Command
 
 class PyInstallerCommand(Command):
@@ -16,143 +16,166 @@ class PyInstallerCommand(Command):
         pass
     
     def run(self):
-        # Garante que o pyipp está instalado antes de construir
-        self._ensure_pyipp_installed()
+        # Garante que todas as dependências estão instaladas
+        self._ensure_dependencies()
         
         # Importa PyInstaller
         import PyInstaller.__main__
         
-        # Caminho para o ícone da aplicação
-        icon_path = os.path.join("src", "ui", "resources", "icon.ico")
-        
-        # Cria um arquivo spec personalizado para melhor controle
+        # Cria um arquivo spec personalizado
         spec_content = self._create_spec_file()
-        spec_file = "print_management_system.spec"
+        spec_file = "PrintManagementSystem.spec"
         
         with open(spec_file, 'w', encoding='utf-8') as f:
             f.write(spec_content)
         
-        # Argumentos do PyInstaller usando o spec file
-        pyinstaller_args = [
-            spec_file,
-            '--clean',
-            '--noconfirm'
-        ]
+        # Limpa build anterior
+        if os.path.exists('build'):
+            shutil.rmtree('build')
+        if os.path.exists('dist'):
+            shutil.rmtree('dist')
         
         # Executa o PyInstaller
-        PyInstaller.__main__.run(pyinstaller_args)
+        PyInstaller.__main__.run([spec_file, '--clean', '--noconfirm'])
         
-        print("PyInstaller completed successfully.")
+        # Move o executável para o local esperado pelo Inno Setup
+        if os.path.exists('dist/PrintManagementSystem.exe'):
+            os.makedirs('build/exe', exist_ok=True)
+            shutil.move('dist/PrintManagementSystem.exe', 'build/exe/PrintManagementSystem.exe')
+            print("Executável criado com sucesso em: build/exe/PrintManagementSystem.exe")
     
-    def _ensure_pyipp_installed(self):
-        """Garante que pyipp está instalado"""
-        try:
-            import pyipp
-            print("Módulo pyipp já está instalado.")
-            return True
-        except ImportError:
-            print("Instalando módulo pyipp...")
+    def _ensure_dependencies(self):
+        """Garante que todas as dependências estão instaladas"""
+        import subprocess
+        deps = ['pyipp', 'aiohttp', 'wxPython', 'pypdf', 'watchdog', 'pyyaml', 'requests']
+        
+        for dep in deps:
             try:
-                import subprocess
-                import sys
-                result = subprocess.run([sys.executable, '-m', 'pip', 'install', 'pyipp'], 
-                                      capture_output=True, text=True, check=True)
-                print("pyipp instalado com sucesso.")
-                return True
-            except Exception as e:
-                print(f"ERRO: Não foi possível instalar pyipp: {e}")
-                return False
+                __import__(dep.replace('wxPython', 'wx'))
+                print(f"✓ {dep} já está instalado")
+            except ImportError:
+                print(f"Instalando {dep}...")
+                subprocess.run([sys.executable, '-m', 'pip', 'install', dep], check=True)
     
     def _create_spec_file(self):
-        """Cria um arquivo .spec personalizado para o PyInstaller"""
-        icon_path = os.path.join("src", "ui", "resources", "icon.ico")
+        """Cria um arquivo .spec otimizado"""
+        icon_path = os.path.abspath(os.path.join("src", "ui", "resources", "icon.ico"))
+        
+        # Cria runtime hook para garantir que pyipp seja encontrado
+        runtime_hook_content = '''
+import sys
+import os
+
+# Adiciona o diretório do executável ao PATH do Python
+if hasattr(sys, '_MEIPASS'):
+    sys.path.insert(0, sys._MEIPASS)
+    
+# Força importação de módulos críticos
+try:
+    import pyipp
+    import pyipp.client
+    import pyipp.enums
+    import pyipp.exceptions
+    import aiohttp
+    import asyncio
+    import ssl
+    import certifi
+except Exception as e:
+    print(f"Erro ao importar módulos no runtime hook: {e}")
+'''
+        
+        # Cria o arquivo de runtime hook
+        os.makedirs('hooks', exist_ok=True)
+        with open('hooks/runtime_hook.py', 'w', encoding='utf-8') as f:
+            f.write(runtime_hook_content)
         
         spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 import os
-import platform
+import sys
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
 block_cipher = None
 
-# Detecta dados adicionais
-datas = []
-if os.path.exists(os.path.join("src", "ui", "resources")):
-    datas.append((os.path.join("src", "ui", "resources"), os.path.join("src", "ui", "resources")))
+# Coleta TODOS os dados e binários dos módulos críticos
+pyipp_datas, pyipp_binaries, pyipp_hiddenimports = collect_all('pyipp')
+aiohttp_datas, aiohttp_binaries, aiohttp_hiddenimports = collect_all('aiohttp')
+wx_datas, wx_binaries, wx_hiddenimports = collect_all('wx')
 
-# Hidden imports específicos
-hiddenimports = [
-    'wx',
-    'wx._core',
-    'wx._adv',
-    'wx._html',
-    'wx._xml',
-    'requests',
-    'pypdf',
-    'appdirs',
-    'yaml',
-    'watchdog',
-    'watchdog.observers',
-    'watchdog.events',
-    'pyipp',
-    'pyipp.client',
-    'pyipp.enums',
-    'pyipp.exceptions',
-    'aiohttp',
-    'aiohttp.client',
-    'yarl',
-    'multidict',
-    'async_timeout',
-    'charset_normalizer',
-    'idna',
-    'urllib3',
-    'certifi',
-    'ssl',
-    'socket',
-    'asyncio',
-    'concurrent.futures',
-    'threading',
-    'queue',
-    'json',
-    'logging',
-    'datetime',
-    'time',
-    'os',
-    'sys',
-    'platform',
-    'pathlib'
+# Dados da aplicação
+app_datas = [
+    (os.path.join("src", "ui", "resources"), os.path.join("resources")),
 ]
 
-# Adiciona imports específicos da plataforma
-if platform.system() == "Windows":
-    hiddenimports.extend([
-        'win32api',
-        'win32con',
-        'win32print',
-        'win32gui',
-        'winsound'
-    ])
-elif platform.system() == "Linux":
-    hiddenimports.extend([
-        'cups',
-        'gi',
-        'gi.repository',
-        'gi.repository.Gtk'
+# Combina todos os dados
+all_datas = app_datas + pyipp_datas + aiohttp_datas + wx_datas
+
+# Combina todos os binários
+all_binaries = pyipp_binaries + aiohttp_binaries + wx_binaries
+
+# Hidden imports completos
+all_hiddenimports = [
+    # Módulos principais
+    'wx', 'wx._core', 'wx._adv', 'wx._html', 'wx._xml',
+    'requests', 'pypdf', 'appdirs', 'yaml', 'watchdog',
+    'watchdog.observers', 'watchdog.events',
+    
+    # pyipp e suas dependências
+    'pyipp', 'pyipp.client', 'pyipp.enums', 'pyipp.exceptions',
+    'pyipp.models', 'pyipp.serializer', 'pyipp.constants',
+    
+    # aiohttp e dependências
+    'aiohttp', 'aiohttp.client', 'aiohttp.connector',
+    'aiohttp.client_exceptions', 'aiohttp.hdrs',
+    'yarl', 'multidict', 'async_timeout', 'attrs',
+    'charset_normalizer', 'idna', 'certifi',
+    
+    # Módulos de sistema
+    'asyncio', 'asyncio.base_events', 'asyncio.events',
+    'asyncio.futures', 'asyncio.locks', 'asyncio.protocols',
+    'asyncio.streams', 'asyncio.tasks', 'asyncio.transports',
+    'ssl', 'socket', 'threading', 'queue', 'json',
+    'logging', 'datetime', 'time', 'os', 'sys',
+    
+    # Codecs necessários
+    'encodings', 'encodings.utf_8', 'encodings.ascii',
+    'encodings.latin_1', 'encodings.cp1252',
+]
+
+# Adiciona todos os submódulos do pyipp
+all_hiddenimports.extend(collect_submodules('pyipp'))
+all_hiddenimports.extend(collect_submodules('aiohttp'))
+
+# Remove duplicatas
+all_hiddenimports = list(set(all_hiddenimports + pyipp_hiddenimports + aiohttp_hiddenimports + wx_hiddenimports))
+
+# Adiciona imports específicos do Windows
+if sys.platform == "win32":
+    all_hiddenimports.extend([
+        'win32api', 'win32con', 'win32print', 'win32gui',
+        'win32com', 'pythoncom', 'winsound'
     ])
 
 a = Analysis(
     ['main.py'],
-    pathex=[],
-    binaries=[],
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
+    pathex=[os.getcwd()],
+    binaries=all_binaries,
+    datas=all_datas,
+    hiddenimports=all_hiddenimports,
+    hookspath=['hooks'],
     hooksconfig={{}},
-    runtime_hooks=[],
-    excludes=[],
+    runtime_hooks=['hooks/runtime_hook.py'],
+    excludes=['tkinter', 'matplotlib', 'numpy', 'pandas'],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+# Remove módulos desnecessários para reduzir tamanho
+a.exclude_datas = [
+    ('tcl', 'tcl'), ('tk', 'tk'), ('mpl-data', 'matplotlib'),
+    ('docutils', 'docutils'), ('pydoc_data', 'pydoc_data')
+]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -163,69 +186,50 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='{APP_NAME}',
+    name='PrintManagementSystem',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,  # Mantenha True para debug, mude para False na versão final
+    console=False,  # FALSE para aplicação GUI sem console
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='{icon_path if os.path.exists(icon_path) else ""}',
+    icon='{icon_path}',
+    version_file=None,
+    uac_admin=True,  # Requer privilégios de admin
 )
 '''
         return spec_content
 
-# Resto do setup.py permanece igual...
+# Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
 APP_VERSION = "1.0.0"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
-# Verifica o sistema operacional
-WINDOWS = platform.system() == "Windows"
-MAC = platform.system() == "Darwin"
-LINUX = platform.system() == "Linux"
-
-# Pacotes específicos para cada plataforma
-platform_specific_requires = []
-
-if WINDOWS:
-    platform_specific_requires.extend([
-        "pywin32>=307",
-        "pywin32-ctypes>=0.2.0",
-    ])
-elif MAC:
-    platform_specific_requires.extend([
-        "pyobjc-core>=9.0",
-        "pyobjc-framework-Cocoa>=9.0",
-    ])
-elif LINUX:
-    platform_specific_requires.extend([
-        "python-cups>=2.0.1",
-        "pycups>=2.0.1",
-    ])
-
-# Dependências básicas (comum a todas plataformas)
-basic_requires = [
+# Dependências
+install_requires = [
     "wxPython>=4.2.0",
     "requests>=2.31.0",
-    "pypdf>=5.5.0",
+    "pypdf>=3.1.0",
     "appdirs>=1.4.4",
     "pyyaml>=6.0.1",
     "pillow>=10.0.1",
-    "watchdog>=2.3.0",
+    "watchdog>=3.0.0",
     "pyipp>=0.11.0",
+    "aiohttp>=3.8.0",
     "pyinstaller>=5.0.0",
-    "aiohttp>=3.8.0",  # Dependência do pyipp
 ]
 
-# Configuração principal
+# Adiciona dependências específicas do Windows
+if platform.system() == "Windows":
+    install_requires.extend(["pywin32>=300"])
+
 setup(
     name=APP_NAME,
     version=APP_VERSION,
@@ -234,7 +238,7 @@ setup(
     author_email="contato@loqquei.com.br",
     url="https://loqquei.com.br",
     packages=find_packages(),
-    install_requires=basic_requires + platform_specific_requires,
+    install_requires=install_requires,
     include_package_data=True,
     entry_points={
         "console_scripts": [
@@ -242,24 +246,7 @@ setup(
         ],
     },
     cmdclass={
-        'bdist_pyinstaller': PyInstallerCommand,
+        'build_exe': PyInstallerCommand,
     },
-    classifiers=[
-        "Development Status :: 4 - Beta",
-        "Environment :: X11 Applications",
-        "Environment :: Win32 (MS Windows)",
-        "Environment :: MacOS X",
-        "Intended Audience :: End Users/Desktop",
-        "License :: OSI Approved :: MIT License",
-        "Operating System :: Microsoft :: Windows",
-        "Operating System :: POSIX :: Linux",
-        "Operating System :: MacOS :: MacOS X",
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Topic :: Office/Business",
-    ],
     python_requires=">=3.8",
 )

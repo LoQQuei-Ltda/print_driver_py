@@ -777,7 +777,7 @@ class PrinterDetailsDialog(wx.Dialog):
         self.diagnostic_panel.Layout()
         
         # Muda para a guia de diagnóstico
-        self.notebook.SetSelection(4)
+        self._select_tab(4)
         
         # Executa o diagnóstico em uma thread
         try:

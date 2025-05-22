@@ -75,6 +75,14 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
         self.config = config
         
         # Carrega o ícone da aplicação
+        self._setup_icon()
+        
+        # Vincula eventos de duplo clique
+        if EVT_TASKBAR_LEFT_DCLICK:
+            self.Bind(EVT_TASKBAR_LEFT_DCLICK, self.on_left_dclick)
+    
+    def _setup_icon(self):
+        """Configura o ícone da bandeja"""
         icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
                                 "src", "ui", "resources", "icon.ico")
         
@@ -86,25 +94,20 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
                 # Cria um ícone vazio como fallback
                 icon_bmp = wx.Bitmap(16, 16)
                 dc = wx.MemoryDC(icon_bmp)
-                dc.SetBackground(wx.Brush(wx.Colour(0, 0, 0, 0)))
+                dc.SetBackground(wx.Brush(wx.Colour(0, 0, 255)))
                 dc.Clear()
                 dc.SelectObject(wx.NullBitmap)
                 
                 self.icon = wx.Icon()
                 self.icon.CopyFromBitmap(icon_bmp)
                 self.SetIcon(self.icon, "Sistema de Gerenciamento de Impressão")
+                logger.warning(f"Ícone não encontrado em {icon_path}, usando ícone padrão")
         except Exception as e:
             logger.error(f"Erro ao definir ícone na bandeja: {str(e)}")
-            # Ainda assim, continuamos com o objeto criado
-            pass
-        
-        # Vincula eventos
-        if EVT_TASKBAR_LEFT_DCLICK:
-            self.Bind(EVT_TASKBAR_LEFT_DCLICK, self.on_left_dclick)
     
     def CreatePopupMenu(self):
         """
-        Cria o menu de contexto para o ícone da bandeja
+        Cria o menu de contexto para o ícone da bandeja - USANDO A ABORDAGEM QUE FUNCIONOU NO TESTE
         
         Returns:
             wx.Menu: Menu de contexto
@@ -112,9 +115,9 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
         menu = wx.Menu()
         
         try:
-            # Item para abrir a aplicação
+            # Item para abrir a aplicação - USANDO LAMBDA COMO NO TESTE QUE FUNCIONOU
             open_item = menu.Append(wx.ID_ANY, "Abrir")
-            self.Bind(wx.EVT_MENU, self.on_open, open_item)
+            self.Bind(wx.EVT_MENU, lambda evt: self._action_open(), open_item)
             
             menu.AppendSeparator()
             
@@ -122,13 +125,14 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
             auto_print_active = self.config.get("auto_print", False)
             auto_print_label = "Desativar Impressão Automática" if auto_print_active else "Ativar Impressão Automática"
             auto_print_item = menu.Append(wx.ID_ANY, auto_print_label)
-            self.Bind(wx.EVT_MENU, self.on_toggle_auto_print, auto_print_item)
+            self.Bind(wx.EVT_MENU, lambda evt: self._action_toggle_auto_print(), auto_print_item)
             
             menu.AppendSeparator()
             
-            # Item para sair completamente da aplicação
+            # Item para sair completamente da aplicação - USANDO LAMBDA COMO NO TESTE QUE FUNCIONOU
             exit_item = menu.Append(wx.ID_ANY, "Sair")
-            self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
+            self.Bind(wx.EVT_MENU, lambda evt: self._action_exit(), exit_item)
+            
         except Exception as e:
             logger.error(f"Erro ao criar menu de contexto: {str(e)}")
         
@@ -136,52 +140,79 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
     
     def on_left_dclick(self, event):
         """Manipula o evento de duplo clique no ícone da bandeja"""
-        self.on_open(event)
+        self._action_open()
     
-    def on_open(self, event):
-        """Abre a aplicação"""
-        if self.parent:
+    def _action_open(self):
+        """Ação de abrir a janela - MÉTODO DIRETO COMO NO TESTE QUE FUNCIONOU"""
+        if not self.parent:
+            return
+            
+        try:
+            # Mostra a janela se estiver oculta
+            if not self.parent.IsShown():
+                self.parent.Show(True)
+            
+            # Se estiver minimizada, restaura
+            if self.parent.IsIconized():
+                self.parent.Iconize(False)
+            
+            # Traz para frente
+            self.parent.Raise()
+            
+            # Restaura o tamanho e posição salvos
             try:
-                self.parent.Show()
-                self.parent.Raise()
-                
-                # Restaura o tamanho e posição salvos
                 size = self.config.get("window_size", None)
                 pos = self.config.get("window_pos", None)
                 
-                if size:
+                if size and isinstance(size, (tuple, list)) and len(size) == 2:
                     self.parent.SetSize(size)
                 
-                if pos:
-                    self.parent.SetPosition(pos)
+                if pos and isinstance(pos, (tuple, list)) and len(pos) == 2:
+                    # Verifica se a posição está dentro dos limites da tela
+                    display_size = wx.GetDisplaySize()
+                    if 0 <= pos[0] < display_size[0] and 0 <= pos[1] < display_size[1]:
+                        self.parent.SetPosition(pos)
             except Exception as e:
-                logger.error(f"Erro ao abrir a janela principal: {str(e)}")
+                logger.warning(f"Erro ao restaurar tamanho/posição da janela: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Erro ao abrir a janela principal: {str(e)}")
     
-    def on_toggle_auto_print(self, event):
-        """Alterna o modo de impressão automática"""
+    def _action_toggle_auto_print(self):
+        """Ação de alternar impressão automática - MÉTODO DIRETO COMO NO TESTE QUE FUNCIONOU"""
         try:
             current_state = self.config.get("auto_print", False)
-            self.config.set("auto_print", not current_state)
+            new_state = not current_state
+            self.config.set("auto_print", new_state)
             
             # Atualiza o checkbox na interface principal se estiver visível
             if self.parent and hasattr(self.parent, "auto_print_toggle"):
-                self.parent.auto_print_toggle.SetValue(not current_state)
+                self.parent.auto_print_toggle.SetValue(new_state)
                 
             # Inicia ou para o monitoramento da pasta
             if self.parent:
-                if not current_state:
-                    self.parent._start_folder_monitoring()
+                if new_state:
+                    if hasattr(self.parent, '_start_folder_monitoring'):
+                        self.parent._start_folder_monitoring()
                 else:
-                    self.parent._stop_folder_monitoring()
+                    if hasattr(self.parent, '_stop_folder_monitoring'):
+                        self.parent._stop_folder_monitoring()
         except Exception as e:
             logger.error(f"Erro ao alternar impressão automática: {str(e)}")
     
-    def on_exit(self, event):
-        """Fecha completamente a aplicação"""
+    def _action_exit(self):
+        """Ação de sair - MÉTODO DIRETO COMO NO TESTE QUE FUNCIONOU"""
         try:
-            if self.parent:
+            # Primeiro tenta usar o método específico do parent
+            if self.parent and hasattr(self.parent, 'exit_application'):
                 self.parent.exit_application()
+            elif self.parent and hasattr(self.parent, 'Close'):
+                self.parent.Close(force=True)
+            else:
+                # Fallback direto como no teste que funcionou
+                wx.GetApp().ExitMainLoop()
+                
         except Exception as e:
             logger.error(f"Erro ao sair da aplicação: {str(e)}")
-            # Em caso de erro, força o encerramento
+            # Em caso de erro, força o encerramento como no teste que funcionou
             wx.GetApp().ExitMainLoop()

@@ -11,9 +11,9 @@ import logging
 import threading
 import time
 from io import BytesIO
-from wx.adv import TaskBarIcon
 from src.models.document import Document
 from src.models.printer import Printer
+from src.ui.taskbar_icon import PrintManagerTaskBarIcon
 
 logger = logging.getLogger("PrintManagementSystem.UI.MainScreen")
 
@@ -217,7 +217,7 @@ class MainScreen(wx.Frame):
         # Bind do evento de movimento da janela
         self.Bind(wx.EVT_MOVE, self.on_move)
         
-        # Cria e configura o ícone da bandeja
+        # Cria e configura o ícone da bandeja usando a classe corrigida
         self.taskbar_icon = None
         self._setup_taskbar_icon()
     
@@ -413,38 +413,11 @@ class MainScreen(wx.Frame):
         self.load_documents()
     
     def _setup_taskbar_icon(self):
-        """Configura o ícone da bandeja do sistema"""
+        """Configura o ícone da bandeja do sistema usando a classe corrigida"""
         try:
-            self.taskbar_icon = TaskBarIcon()
-            
-            # Carrega o ícone da aplicação
-            icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                    "src", "ui", "resources", "icon.ico")
-            
-            if os.path.exists(icon_path):
-                icon = wx.Icon(icon_path)
-                self.taskbar_icon.SetIcon(icon, "Sistema de Gerenciamento de Impressão")
-            
-            # Define menu de contexto
-            def create_popup_menu():
-                menu = wx.Menu()
-                
-                # Item para abrir a aplicação
-                open_item = menu.Append(wx.ID_ANY, "Abrir")
-                self.Bind(wx.EVT_MENU, self.on_open_from_tray, open_item)
-                
-                menu.AppendSeparator()
-                
-                # Item para sair
-                exit_item = menu.Append(wx.ID_ANY, "Sair")
-                self.Bind(wx.EVT_MENU, self.on_exit, exit_item)
-                
-                return menu
-            
-            self.taskbar_icon.Bind(wx.adv.EVT_TASKBAR_RIGHT_DOWN, 
-                               lambda evt: self.taskbar_icon.PopupMenu(create_popup_menu()))
-            self.taskbar_icon.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self.on_open_from_tray)
-            
+            # Usa a classe PrintManagerTaskBarIcon que foi corrigida
+            self.taskbar_icon = PrintManagerTaskBarIcon(self, self.config)
+            logger.info("Ícone da bandeja configurado usando classe corrigida")
         except Exception as e:
             logger.error(f"Erro ao criar ícone na bandeja: {str(e)}")
             self.taskbar_icon = None
@@ -640,40 +613,6 @@ class MainScreen(wx.Frame):
         
         dlg.Destroy()
     
-    def on_open_from_tray(self, event):
-        """Abre a aplicação a partir da bandeja do sistema"""
-        self.Show()
-        self.Raise()
-        
-        # Restaura o tamanho e posição salvos
-        size = self.config.get("window_size", None)
-        pos = self.config.get("window_pos", None)
-        
-        if size:
-            self.SetSize(size)
-        else:
-            self.SetSize((800, 600))
-        
-        if pos:
-            self.SetPosition(pos)
-    
-    def on_exit(self, event):
-        """Fecha completamente a aplicação"""
-        # Salva o tamanho e posição da janela
-        self._save_window_geometry()
-        
-        # Remove o ícone da bandeja
-        if self.taskbar_icon:
-            self.taskbar_icon.RemoveIcon()
-            self.taskbar_icon.Destroy()
-            self.taskbar_icon = None
-        
-        # Destrói a janela principal
-        self.Destroy()
-        
-        # Encerra a aplicação
-        wx.GetApp().ExitMainLoop()
-    
     def on_size(self, event):
         """Manipula o evento de redimensionamento da janela"""
         if not self.IsMaximized() and not self.IsIconized():
@@ -711,3 +650,19 @@ class MainScreen(wx.Frame):
         
         # Esconde a janela em vez de fechá-la
         self.Hide()
+    
+    def exit_application(self):
+        """Método para encerrar completamente a aplicação - chamado pelo taskbar icon"""
+        # Salva o tamanho e posição da janela
+        self._save_window_geometry()
+        
+        # Remove o ícone da bandeja
+        if self.taskbar_icon:
+            self.taskbar_icon.Destroy()
+            self.taskbar_icon = None
+        
+        # Destrói a janela principal
+        self.Destroy()
+        
+        # Encerra a aplicação
+        wx.GetApp().ExitMainLoop()
