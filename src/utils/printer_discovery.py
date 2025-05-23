@@ -613,7 +613,7 @@ class PrinterDiscovery:
             else:  # Windows
                 cmd = ['ping', '-n', '1', '-w', '1000', ip]
                 
-            subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1)
+            subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
             
             # Tenta novamente após o ping
             if sys.platform.startswith(('linux', 'darwin')):
@@ -656,7 +656,8 @@ class PrinterDiscovery:
                 cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE,
-                timeout=timeout + 1
+                timeout=timeout + 1, 
+                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
             )
             
             # Retorna True se o comando foi bem-sucedido

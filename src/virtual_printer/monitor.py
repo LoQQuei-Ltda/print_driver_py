@@ -80,7 +80,7 @@ class VirtualPrinterManager:
                 import subprocess
                 result = subprocess.run(
                     ['netsh', 'advfirewall', 'show', 'currentprofile'],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
                 )
                 if result.returncode == 0:
                     if 'State                                 ON' in result.stdout:

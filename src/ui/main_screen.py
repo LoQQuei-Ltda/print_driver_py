@@ -295,6 +295,7 @@ class MainScreen(wx.Frame):
             icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
                                     "src", "ui", "resources", item.get("icon", ""))
             
+            icon_bitmap = None
             if os.path.exists(icon_path):
                 icon = wx.Bitmap(icon_path)
                 icon_bitmap = wx.StaticBitmap(item_panel, wx.ID_ANY, icon)
@@ -307,27 +308,45 @@ class MainScreen(wx.Frame):
             
             item_panel.SetSizer(item_sizer)
             
-            # Eventos do item
-            item_panel.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            # Função para mudança de cor do hover
+            def change_hover_color(panel, color):
+                """Função auxiliar para mudar cor do painel e seus filhos"""
+                panel.SetBackgroundColour(color)
+                # Muda a cor de fundo de todos os filhos também
+                for child in panel.GetChildren():
+                    if hasattr(child, 'SetBackgroundColour'):
+                        child.SetBackgroundColour(color)
+                panel.Refresh()
             
             # Marcar como selecionado o primeiro item (Documentos)
             if i == 0:
-                item_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+                change_hover_color(item_panel, wx.Colour(35, 35, 35))
                 self.selected_menu = item_panel
             
-            # Eventos de hover
+            # Eventos de hover para o painel principal
             def on_enter(evt, panel=item_panel):
                 if panel != self.selected_menu:
-                    panel.SetBackgroundColour(wx.Colour(35, 35, 35))
-                    panel.Refresh()
+                    change_hover_color(panel, wx.Colour(35, 35, 35))
             
             def on_leave(evt, panel=item_panel):
                 if panel != self.selected_menu:
-                    panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-                    panel.Refresh()
+                    change_hover_color(panel, wx.Colour(25, 25, 25))
+                else:
+                    # Garantir que o item selecionado mantenha a cor correta
+                    change_hover_color(panel, wx.Colour(35, 35, 35))
             
+            # Bind eventos no painel principal
             item_panel.Bind(wx.EVT_ENTER_WINDOW, on_enter)
             item_panel.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
+            item_panel.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            
+            # Bind eventos nos elementos filhos (ícone e texto)
+            if icon_bitmap:
+                icon_bitmap.Bind(wx.EVT_MOTION, lambda evt: on_enter(evt))
+                icon_bitmap.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            
+            item_text.Bind(wx.EVT_MOTION, lambda evt: on_enter(evt))
+            item_text.Bind(wx.EVT_LEFT_DOWN, item["handler"])
             
             sidebar_sizer.Add(item_panel, 0, wx.EXPAND | wx.TOP, 5)
             self.menu_buttons.append(item_panel)
@@ -343,6 +362,7 @@ class MainScreen(wx.Frame):
         # Ícone de logout
         logout_icon_path = ResourceManager.get_image_path("logout.png")
         
+        logout_bitmap = None
         if os.path.exists(logout_icon_path):
             logout_icon = wx.Bitmap(logout_icon_path)
             logout_bitmap = wx.StaticBitmap(logout_panel, wx.ID_ANY, logout_icon)
@@ -355,18 +375,35 @@ class MainScreen(wx.Frame):
         
         logout_panel.SetSizer(logout_sizer)
         
-        # Eventos de hover
-        def on_logout_enter(evt):
-            logout_panel.SetBackgroundColour(wx.Colour(35, 35, 35))
+        # Função para mudança de cor do logout
+        def change_logout_color(color):
+            """Função auxiliar para mudar cor do painel de logout e seus filhos"""
+            logout_panel.SetBackgroundColour(color)
+            # Muda a cor de fundo de todos os filhos também
+            for child in logout_panel.GetChildren():
+                if hasattr(child, 'SetBackgroundColour'):
+                    child.SetBackgroundColour(color)
             logout_panel.Refresh()
+        
+        # Eventos de hover para logout
+        def on_logout_enter(evt):
+            change_logout_color(wx.Colour(35, 35, 35))
         
         def on_logout_leave(evt):
-            logout_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
-            logout_panel.Refresh()
+            change_logout_color(wx.Colour(25, 25, 25))
         
+        # Bind eventos no painel de logout
         logout_panel.Bind(wx.EVT_ENTER_WINDOW, on_logout_enter)
         logout_panel.Bind(wx.EVT_LEAVE_WINDOW, on_logout_leave)
         logout_panel.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
+        
+        # Bind eventos nos elementos filhos do logout (ícone e texto)
+        if logout_bitmap:
+            logout_bitmap.Bind(wx.EVT_MOTION, lambda evt: on_logout_enter(evt))
+            logout_bitmap.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
+        
+        logout_text.Bind(wx.EVT_MOTION, lambda evt: on_logout_enter(evt))
+        logout_text.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
         
         sidebar_sizer.Add(logout_panel, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 20)
         
@@ -393,7 +430,7 @@ class MainScreen(wx.Frame):
         self.printers_panel.SetSizer(printer_sizer)
 
         self.printers_panel.Hide()
-       
+    
         self.content_sizer.Add(self.documents_panel, 1, wx.EXPAND)
         self.content_sizer.Add(self.printers_panel, 1, wx.EXPAND)
         

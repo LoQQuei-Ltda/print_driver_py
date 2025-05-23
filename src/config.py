@@ -69,7 +69,7 @@ class AppConfig:
                 import subprocess
                 result = subprocess.run(
                     ["defaults", "read", "-g", "AppleInterfaceStyle"],
-                    capture_output=True, text=True
+                    capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
                 )
                 return "dark" if "Dark" in result.stdout else "light"
             except Exception as e:
@@ -82,7 +82,7 @@ class AppConfig:
                 import subprocess
                 result = subprocess.run(
                     ["gsettings", "get", "org.gnome.desktop.interface", "gtk-theme"],
-                    capture_output=True, text=True
+                    capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
                 )
                 return "dark" if "dark" in result.stdout.lower() else "light"
             except Exception as e:

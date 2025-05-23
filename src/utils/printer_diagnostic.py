@@ -368,7 +368,8 @@ class PrinterDiagnostic:
                 cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE,
-                timeout=timeout + 1
+                timeout=timeout + 1,
+                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
             )
             
             # Retorna True se o comando foi bem-sucedido
