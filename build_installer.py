@@ -108,7 +108,7 @@ def build_executable():
     # Limpa builds anteriores
     for folder in ['build', 'dist', '__pycache__']:
         if os.path.exists(folder):
-            os.rmdir(folder)
+            shutil.rmtree(folder)
             print(f"✓ Pasta {folder} removida")
     
     # Executa o setup.py com o comando customizado

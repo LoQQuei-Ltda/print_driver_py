@@ -1,4 +1,4 @@
-"""Setup para o projeto - VERSÃO CORRIGIDA COMPLETA"""
+"""Setup para o projeto - VERSÃO CORRIGIDA (Sem Admin + Recursos Incluídos)"""
 import os
 import sys
 import platform
@@ -42,7 +42,24 @@ class PyInstallerCommand(Command):
         if os.path.exists('dist/PrintManagementSystem.exe'):
             os.makedirs('build/exe', exist_ok=True)
             shutil.move('dist/PrintManagementSystem.exe', 'build/exe/PrintManagementSystem.exe')
+            
+            # Copia recursos manualmente se existirem
+            self._copy_resources()
+            
             print("Executável criado com sucesso em: build/exe/PrintManagementSystem.exe")
+    
+    def _copy_resources(self):
+        """Copia recursos manualmente para garantir que estejam disponíveis"""
+        resources_src = os.path.join("src", "ui", "resources")
+        resources_dst = os.path.join("build", "exe", "resources")
+        
+        if os.path.exists(resources_src):
+            if os.path.exists(resources_dst):
+                shutil.rmtree(resources_dst)
+            shutil.copytree(resources_src, resources_dst)
+            print(f"✓ Recursos copiados para: {resources_dst}")
+        else:
+            print(f"⚠ Pasta de recursos não encontrada: {resources_src}")
     
     def _ensure_dependencies(self):
         """Garante que todas as dependências estão instaladas"""
@@ -60,6 +77,10 @@ class PyInstallerCommand(Command):
     def _create_spec_file(self):
         """Cria um arquivo .spec otimizado"""
         icon_path = os.path.abspath(os.path.join("src", "ui", "resources", "icon.ico"))
+        if not os.path.exists(icon_path):
+            icon_path = "NONE"
+        else:
+            icon_path = icon_path.replace('\\', '/')
         
         # Cria runtime hook para garantir que pyipp seja encontrado
         runtime_hook_content = '''
@@ -69,6 +90,11 @@ import os
 # Adiciona o diretório do executável ao PATH do Python
 if hasattr(sys, '_MEIPASS'):
     sys.path.insert(0, sys._MEIPASS)
+    
+    # Adiciona pasta de recursos ao sys.path para facilitar localização
+    resources_path = os.path.join(sys._MEIPASS, 'resources')
+    if os.path.exists(resources_path):
+        sys.path.insert(0, resources_path)
     
 # Força importação de módulos críticos
 try:
@@ -101,10 +127,27 @@ pyipp_datas, pyipp_binaries, pyipp_hiddenimports = collect_all('pyipp')
 aiohttp_datas, aiohttp_binaries, aiohttp_hiddenimports = collect_all('aiohttp')
 wx_datas, wx_binaries, wx_hiddenimports = collect_all('wx')
 
-# Dados da aplicação
-app_datas = [
-    (os.path.join("src", "ui", "resources"), os.path.join("resources")),
-]
+# IMPORTANTE: Dados da aplicação - incluindo TODOS os recursos
+app_datas = []
+
+# Adiciona recursos se existirem
+resources_path = os.path.join("src", "ui", "resources")
+if os.path.exists(resources_path):
+    # Coleta TODOS os arquivos da pasta resources recursivamente
+    for root, dirs, files in os.walk(resources_path):
+        for file in files:
+            src_file = os.path.join(root, file)
+            # Calcula o caminho relativo dentro de resources
+            rel_path = os.path.relpath(src_file, resources_path)
+            dst_path = os.path.join("resources", rel_path).replace("\\\\", "/")
+            app_datas.append((src_file, os.path.dirname(dst_path) if os.path.dirname(dst_path) else "resources"))
+    print(f"Incluindo {{len(app_datas)}} arquivos de recursos")
+
+# Adiciona outros dados da aplicação
+config_files = ["config.yaml", "settings.ini", "app.conf"]
+for config_file in config_files:
+    if os.path.exists(config_file):
+        app_datas.append((config_file, "."))
 
 # Combina todos os dados
 all_datas = app_datas + pyipp_datas + aiohttp_datas + wx_datas
@@ -201,7 +244,7 @@ exe = EXE(
     entitlements_file=None,
     icon='{icon_path}',
     version_file=None,
-    uac_admin=True,  # Requer privilégios de admin
+    uac_admin=False,  # MUDANÇA CRÍTICA: Não requer privilégios de admin
 )
 '''
         return spec_content

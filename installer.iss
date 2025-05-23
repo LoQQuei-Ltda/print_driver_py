@@ -1,4 +1,4 @@
-; Script para o Inno Setup - VERSÃO CORRIGIDA (Apenas EXE)
+; Script para o Inno Setup - VERSÃO CORRIGIDA (Instalação Admin, Execução User)
 #define MyAppName "Sistema de Gerenciamento de Impressão"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "LoQQuei"
@@ -24,13 +24,13 @@ LZMANumFastBytes=273
 WizardStyle=modern
 SetupLogging=yes
 
-; Configurações de instalação
+; MUDANÇA CRÍTICA: Instalação requer admin, mas execução não
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 AlwaysRestart=no
 PrivilegesRequired=admin
-ArchitecturesInstallIn64BitMode=x64
+PrivilegesRequiredOverridesAllowed=dialog
 
 ; Configurações de UI
 SetupIconFile=src\ui\resources\icon.ico
@@ -50,25 +50,44 @@ Name: "startup"; Description: "Iniciar automaticamente com o Windows"; GroupDesc
 [Files]
 ; Executável principal (OBRIGATÓRIO - falha se não existir)
 Source: "build\exe\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-; Recursos (ícones, etc) - apenas se existirem dentro do EXE
+; Recursos - INCLUÍDOS EXPLICITAMENTE
 Source: "build\exe\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; Adiciona arquivos de recursos alternativos se existirem
+Source: "src\ui\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+
+[Dirs]
+; MUDANÇA CRÍTICA: Cria diretórios com permissões para usuários comuns
+Name: "{app}"; Permissions: users-modify
+Name: "{app}\logs"; Permissions: users-modify
+Name: "{app}\config"; Permissions: users-modify
+Name: "{app}\temp"; Permissions: users-modify
+Name: "{app}\data"; Permissions: users-modify
+Name: "{app}\cache"; Permissions: users-modify
+Name: "{userappdata}\{#MyAppName}"; Permissions: users-modify
+Name: "{userappdata}\{#MyAppName}\logs"; Permissions: users-modify
+Name: "{userappdata}\{#MyAppName}\config"; Permissions: users-modify
 
 [Icons]
 ; Atalhos do programa
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{group}\Desinstalar {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: quicklaunchicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: quicklaunchicon
 ; Inicialização automática
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startup
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: startup
 
 [Registry]
-; Registro para inicialização automática (alternativa)
-Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startup
+; MUDANÇA CRÍTICA: Remove registro que pode causar problemas de permissão
+; Comentado o registro automático - será tratado pela aplicação se necessário
+; Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startup
+
+; Registra configurações na área do usuário (não requer admin)
+Root: HKCU; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
 
 [Run]
-; Executa a aplicação após instalação
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; Executa a aplicação após instalação SEM privilégios elevados
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 ; Para o processo antes de desinstalar
@@ -127,8 +146,10 @@ begin
   StopApplication();
 end;
 
-// Adiciona informações de versão no Painel de Controle
+// MUDANÇA CRÍTICA: Configura permissões após instalação
 procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -145,5 +166,8 @@ begin
     RegWriteStringValue(HKEY_LOCAL_MACHINE, 
       'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
       'HelpLink', '{#MyAppURL}');
+      
+    Exec('icacls.exe', '"' + ExpandConstant('{app}') + '" /grant Users:(OI)(CI)M /T', 
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;

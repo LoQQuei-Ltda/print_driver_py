@@ -6,6 +6,11 @@ import os
 if hasattr(sys, '_MEIPASS'):
     sys.path.insert(0, sys._MEIPASS)
     
+    # Adiciona pasta de recursos ao sys.path para facilitar localização
+    resources_path = os.path.join(sys._MEIPASS, 'resources')
+    if os.path.exists(resources_path):
+        sys.path.insert(0, resources_path)
+    
 # Força importação de módulos críticos
 try:
     import pyipp
