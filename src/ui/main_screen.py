@@ -279,8 +279,8 @@ class MainScreen(wx.Frame):
         
         # Menu itens
         menu_items = [
-            {"label": "Documentos", "icon": "document.png", "handler": self.on_show_documents},
-            {"label": "Impressoras", "icon": "system.png", "handler": self.on_show_printers},
+            {"label": "Documentos", "icon": ResourceManager.get_image_path("document.png"), "handler": self.on_show_documents},
+            {"label": "Impressoras", "icon": ResourceManager.get_image_path("system.png"), "handler": self.on_show_printers},
         ]
         
         # Criar os botões do menu
