@@ -78,7 +78,7 @@ class WindowsPrinterManager(PrinterManager):
             output = subprocess.check_output([
                 'powershell', '-command',
                 'Get-PrinterDriver | Select-Object Name | Format-Table -HideTableHeaders'
-            ], universal_newlines=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            ], universal_newlines=True, timeout=10)
             
             available_drivers = [line.strip() for line in output.splitlines() if line.strip()]
             
@@ -97,7 +97,7 @@ class WindowsPrinterManager(PrinterManager):
         try:
             output = subprocess.check_output(
                 ['wmic', 'path', 'Win32_PrinterDriver', 'get', 'Name'],
-                universal_newlines=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                universal_newlines=True, timeout=10
             )
             
             lines = output.strip().split('\n')
@@ -167,7 +167,7 @@ class WindowsPrinterManager(PrinterManager):
                 f'Add-PrinterPort -Name "{port_name}" -PrinterHostAddress "{ip}" -PortNumber {port} -ErrorAction Stop'
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
                 logger.info(f"Porta criada via PowerShell: {port_name}")
@@ -198,7 +198,7 @@ class WindowsPrinterManager(PrinterManager):
                     '-a', '-r', port_name, '-h', ip, '-o', 'raw', '-n', str(port)
                 ]
                 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 
                 if result.returncode == 0 or 'already exists' in result.stdout.lower():
                     logger.info(f"Porta criada via prnport.vbs: {port_name}")
@@ -247,7 +247,7 @@ class WindowsPrinterManager(PrinterManager):
                 f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             if result.returncode == 0:
                 logger.info(f"Impressora criada via PowerShell: {name}")
@@ -264,7 +264,7 @@ class WindowsPrinterManager(PrinterManager):
                 '/if', '/b', name, '/r', port_name, '/m', self.default_driver
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             
             # rundll32 não retorna códigos de erro confiáveis, verificar se foi criada
             time.sleep(2)
@@ -296,7 +296,7 @@ class WindowsPrinterManager(PrinterManager):
                     '-a', '-p', name, '-m', self.default_driver, '-r', port_name
                 ]
                 
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 
                 if result.returncode == 0 or 'added printer' in result.stdout.lower():
                     logger.info(f"Impressora criada via prnmngr.vbs: {name}")
@@ -311,9 +311,9 @@ class WindowsPrinterManager(PrinterManager):
     def _restart_spooler(self):
         """Reinicia o serviço de spooler"""
         try:
-            subprocess.run(['net', 'stop', 'spooler'], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            subprocess.run(['net', 'stop', 'spooler'], capture_output=True, timeout=10)
             time.sleep(1)
-            subprocess.run(['net', 'start', 'spooler'], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            subprocess.run(['net', 'start', 'spooler'], capture_output=True, timeout=10)
             time.sleep(2)
             logger.info("Serviço de spooler reiniciado")
         except Exception as e:
@@ -328,7 +328,7 @@ class WindowsPrinterManager(PrinterManager):
                 'powershell', '-command',
                 f'Set-Printer -Name "{name}" -Comment "{comment_escaped}"'
             ]
-            subprocess.run(cmd, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            subprocess.run(cmd, capture_output=True, timeout=10)
         except:
             pass
         
@@ -339,7 +339,7 @@ class WindowsPrinterManager(PrinterManager):
                 'rundll32', 'printui.dll,PrintUIEntry',
                 '/Xs', '/n', name, 'comment', comment_escaped
             ]
-            subprocess.run(cmd, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            subprocess.run(cmd, capture_output=True, timeout=10)
         except:
             pass
     
@@ -350,7 +350,7 @@ class WindowsPrinterManager(PrinterManager):
         # Método 1: PowerShell
         try:
             cmd = ['powershell', '-command', f'Remove-Printer -Name "{name}" -ErrorAction Stop']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 success = True
                 logger.info(f"Impressora removida via PowerShell: {name}")
@@ -361,7 +361,7 @@ class WindowsPrinterManager(PrinterManager):
         if not success:
             try:
                 cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/dl', '/n', name]
-                subprocess.run(cmd, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                subprocess.run(cmd, capture_output=True, timeout=10)
                 time.sleep(1)
                 if not self.check_printer_exists(name):
                     success = True
@@ -376,7 +376,7 @@ class WindowsPrinterManager(PrinterManager):
         # Método 1: PowerShell
         try:
             cmd = ['powershell', '-command', f'Remove-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue']
-            subprocess.run(cmd, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            subprocess.run(cmd, capture_output=True, timeout=10)
         except:
             pass
         
@@ -390,7 +390,7 @@ class WindowsPrinterManager(PrinterManager):
             for script_path in script_paths:
                 if os.path.exists(script_path):
                     cmd = ['cscript', script_path, '-d', '-r', port_name]
-                    subprocess.run(cmd, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                    subprocess.run(cmd, capture_output=True, timeout=10)
                     break
         except:
             pass
@@ -403,7 +403,7 @@ class WindowsPrinterManager(PrinterManager):
                 'powershell', '-command',
                 f'$p = Get-Printer -Name "{name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return result.stdout.strip().lower() == "true"
         except Exception as e:
@@ -412,7 +412,7 @@ class WindowsPrinterManager(PrinterManager):
         # Método 2: wmic
         try:
             cmd = ['wmic', 'printer', 'where', f'name="{name}"', 'get', 'name']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return name in result.stdout
         except Exception as e:
@@ -422,7 +422,7 @@ class WindowsPrinterManager(PrinterManager):
         try:
             # PowerShell list
             cmd = ['powershell', '-command', 'Get-Printer | Select-Object -ExpandProperty Name']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 printers = [p.strip() for p in result.stdout.splitlines() if p.strip()]
                 return name in printers
@@ -432,7 +432,7 @@ class WindowsPrinterManager(PrinterManager):
         try:
             # wmic list
             cmd = ['wmic', 'printer', 'get', 'name']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 lines = result.stdout.strip().split('\n')
                 if len(lines) > 1:
@@ -451,7 +451,7 @@ class WindowsPrinterManager(PrinterManager):
                 'powershell', '-command',
                 f'$p = Get-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return result.stdout.strip().lower() == "true"
         except:
@@ -481,16 +481,16 @@ class UnixPrinterManager(PrinterManager):
     def _check_cups_availability(self):
         """Verifica se CUPS está instalado e acessível"""
         try:
-            result = subprocess.run(['which', 'lpadmin'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(['which', 'lpadmin'], capture_output=True, text=True)
             if result.returncode != 0:
                 return False
             
-            result = subprocess.run(['which', 'lpstat'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(['which', 'lpstat'], capture_output=True, text=True)
             if result.returncode != 0:
                 return False
             
             try:
-                result = subprocess.run(['lpstat', '-r'], capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = subprocess.run(['lpstat', '-r'], capture_output=True, text=True, timeout=5)
                 if "not ready" in result.stdout.lower():
                     self._start_cups_service()
             except subprocess.TimeoutExpired:
@@ -521,7 +521,7 @@ class UnixPrinterManager(PrinterManager):
         
         for cmd in service_commands:
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=100)
                 if result.returncode == 0:
                     logger.info("Serviço CUPS iniciado com sucesso.")
                     return True
@@ -558,7 +558,7 @@ class UnixPrinterManager(PrinterManager):
         for driver in drivers:
             try:
                 current_cmd = cmd + ['-m', driver]
-                result = subprocess.run(current_cmd, capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = subprocess.run(current_cmd, capture_output=True, text=True, timeout=30)
                 
                 if result.returncode == 0:
                     logger.info(f"Impressora '{name}' instalada com sucesso usando driver: {driver}")
@@ -580,7 +580,7 @@ class UnixPrinterManager(PrinterManager):
                 cmd_comment = ['lpadmin', '-p', name, '-D', comment]
                 if os.geteuid() != 0:
                     cmd_comment.insert(0, 'sudo')
-                subprocess.run(cmd_comment, capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                subprocess.run(cmd_comment, capture_output=True, timeout=10)
         except Exception as e:
             logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
         
@@ -596,7 +596,7 @@ class UnixPrinterManager(PrinterManager):
             cmd.insert(0, 'sudo')
         
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
             if result.returncode == 0:
                 logger.info(f"Impressora '{name}' removida com sucesso.")
                 return True
@@ -612,7 +612,7 @@ class UnixPrinterManager(PrinterManager):
     def check_printer_exists(self, name):
         """Verifica se impressora existe no Unix"""
         try:
-            result = subprocess.run(['lpstat', '-p', name], capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = subprocess.run(['lpstat', '-p', name], capture_output=True, timeout=5)
             return result.returncode == 0
         except:
             return False
