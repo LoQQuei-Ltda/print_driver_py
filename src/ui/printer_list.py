@@ -11,6 +11,7 @@ import logging
 import threading
 import json
 from src.models.printer import Printer
+from src.utils.resource_manager import ResourceManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
 
@@ -50,10 +51,7 @@ class PrinterCardPanel(wx.Panel):
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Ícone da impressora (esquerda)
-        printer_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "printer.png"
-        )
+        printer_icon_path = ResourceManager.get_image_path("printer.png")
         
         if os.path.exists(printer_icon_path):
             printer_icon = wx.StaticBitmap(
@@ -243,10 +241,7 @@ class PrinterDetailsDialog(wx.Dialog):
         header_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Ícone da impressora
-        printer_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "printer.png"
-        )
+        printer_icon_path = ResourceManager.get_image_path("printer.png")
         
         if os.path.exists(printer_icon_path):
             printer_icon = wx.StaticBitmap(
@@ -1598,10 +1593,7 @@ class PrinterListPanel(wx.ScrolledWindow):
         empty_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Ícone de impressora vazia
-        printer_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "printer.png"
-        )
+        printer_icon_path = ResourceManager.get_image_path("printer.png")
         
         if os.path.exists(printer_icon_path):
             empty_icon = wx.StaticBitmap(

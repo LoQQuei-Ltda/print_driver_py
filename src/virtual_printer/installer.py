@@ -14,6 +14,7 @@ import tempfile
 import shutil
 import ctypes
 import typing
+import time
 from pathlib import Path
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Installer")
@@ -53,104 +54,419 @@ class WindowsPrinterManager(PrinterManager):
             'Generic / Text Only'
         ]
         self.default_driver = self._find_available_driver()
+        self._debug_environment()
+    
+    def _debug_environment(self):
+        """Debug do ambiente Windows"""
+        logger.debug(f"Sistema operacional: {platform.system()} {platform.release()}")
+        logger.debug(f"Versão do Windows: {platform.version()}")
+        logger.debug(f"Arquitetura: {platform.machine()}")
+        logger.debug(f"Usuário: {os.environ.get('USERNAME', 'Unknown')}")
+        logger.debug(f"É admin: {self._is_admin()}")
+    
+    def _is_admin(self):
+        """Verifica se está rodando como administrador"""
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except:
+            return False
     
     def _find_available_driver(self):
         """Encontra um driver disponível"""
         try:
+            # Método 1: PowerShell
             output = subprocess.check_output([
                 'powershell', '-command',
                 'Get-PrinterDriver | Select-Object Name | Format-Table -HideTableHeaders'
-            ], universal_newlines=True)
+            ], universal_newlines=True, timeout=10)
             
             available_drivers = [line.strip() for line in output.splitlines() if line.strip()]
             
             for driver in self.postscript_printer_drivers:
                 if driver in available_drivers:
+                    logger.info(f"Driver encontrado: {driver}")
                     return driver
             
-            return available_drivers[0] if available_drivers else 'Microsoft Print To PDF'
-        except:
-            return 'Microsoft Print To PDF'
+            if available_drivers:
+                logger.info(f"Usando primeiro driver disponível: {available_drivers[0]}")
+                return available_drivers[0]
+        except Exception as e:
+            logger.warning(f"Erro ao listar drivers via PowerShell: {e}")
+        
+        # Método 2: wmic
+        try:
+            output = subprocess.check_output(
+                ['wmic', 'path', 'Win32_PrinterDriver', 'get', 'Name'],
+                universal_newlines=True, timeout=10
+            )
+            
+            lines = output.strip().split('\n')
+            if len(lines) > 1:
+                for line in lines[1:]:  # Pula o cabeçalho
+                    driver_info = line.strip()
+                    if driver_info:
+                        # wmic retorna no formato "Nome,Versão,Ambiente"
+                        driver_name = driver_info.split(',')[0].strip()
+                        for known_driver in self.postscript_printer_drivers:
+                            if known_driver in driver_name:
+                                logger.info(f"Driver encontrado via wmic: {known_driver}")
+                                return known_driver
+        except Exception as e:
+            logger.warning(f"Erro ao listar drivers via wmic: {e}")
+        
+        # Fallback
+        logger.warning("Nenhum driver específico encontrado, usando Microsoft Print To PDF")
+        return 'Microsoft Print To PDF'
     
     def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
         """Adiciona impressora no Windows"""
         if printer_port_name is None:
-            printer_port_name = f"{ip}:{port}"
+            printer_port_name = f"IP_{ip}:{port}"
         
-        # Criar porta
-        cmd = ['cscript', r'c:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
-               '-md', '-a', '-o', 'raw', '-r', printer_port_name, '-h', ip, '-n', str(port)]
+        logger.info(f"Instalando impressora: {name}")
+        logger.info(f"Driver: {self.default_driver}")
+        logger.info(f"Porta: {printer_port_name}")
+        logger.info(f"IP: {ip}:{port}")
         
-        try:
-            subprocess.run(cmd, shell=True, capture_output=True)
-        except Exception as e:
-            logger.error(f"Erro ao criar porta: {e}")
+        # Criar porta usando diferentes métodos
+        port_created = self._create_port(printer_port_name, ip, port)
+        
+        if not port_created:
+            logger.error("Falha ao criar porta de impressora")
             return False
         
-        # Criar impressora
-        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/if',
-               '/b', name, '/r', printer_port_name, '/m', self.default_driver, '/Z']
+        # Aguardar um pouco para a porta ser registrada
+        time.sleep(2)
         
-        try:
-            subprocess.run(cmd, shell=True, capture_output=True)
-            logger.info(f"Impressora Windows '{name}' instalada com sucesso!")
+        # Criar impressora usando diferentes métodos
+        printer_created = self._create_printer(name, printer_port_name)
+        
+        if printer_created:
+            logger.info(f"Impressora '{name}' instalada com sucesso!")
+            
+            # Aguardar um pouco para a impressora ser registrada
+            time.sleep(2)
             
             # Definir comentário se fornecido
             if comment:
                 self._set_printer_comment(name, comment)
             
             return True
-        except Exception as e:
-            logger.error(f"Erro ao criar impressora: {e}")
+        else:
+            logger.error("Falha ao criar impressora")
+            # Tentar remover a porta criada
+            self.remove_port(printer_port_name)
             return False
+    
+    def _create_port(self, port_name, ip, port):
+        """Cria uma porta de impressora TCP/IP"""
+        # Método 1: PowerShell (Windows 8+)
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'Add-PrinterPort -Name "{port_name}" -PrinterHostAddress "{ip}" -PortNumber {port} -ErrorAction Stop'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"Porta criada via PowerShell: {port_name}")
+                return True
+            else:
+                logger.warning(f"PowerShell Add-PrinterPort falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via PowerShell: {e}")
+        
+        # Método 2: cscript prnport.vbs
+        try:
+            # Tentar diferentes localizações do script
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnport.vbs',
+                r'C:\Windows\System32\prnport.vbs'
+            ]
+            
+            script_path = None
+            for path in script_paths:
+                if os.path.exists(path):
+                    script_path = path
+                    break
+            
+            if script_path:
+                cmd = [
+                    'cscript', script_path,
+                    '-a', '-r', port_name, '-h', ip, '-o', 'raw', '-n', str(port)
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 or 'already exists' in result.stdout.lower():
+                    logger.info(f"Porta criada via prnport.vbs: {port_name}")
+                    return True
+                else:
+                    logger.warning(f"prnport.vbs falhou: {result.stderr}")
+            else:
+                logger.warning("Script prnport.vbs não encontrado")
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via prnport.vbs: {e}")
+        
+        # Método 3: Comando TCP/IP direto (fallback)
+        try:
+            # Criar registro diretamente
+            import winreg
+            
+            port_key = rf"SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\{port_name}"
+            
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, port_key) as key:
+                winreg.SetValueEx(key, "Protocol", 0, winreg.REG_DWORD, 1)  # RAW
+                winreg.SetValueEx(key, "Version", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, "HostName", 0, winreg.REG_SZ, ip)
+                winreg.SetValueEx(key, "IPAddress", 0, winreg.REG_SZ, ip)
+                winreg.SetValueEx(key, "PortNumber", 0, winreg.REG_DWORD, int(port))
+                winreg.SetValueEx(key, "SNMP Community", 0, winreg.REG_SZ, "public")
+                winreg.SetValueEx(key, "SNMP Enabled", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key, "SNMP Index", 0, winreg.REG_DWORD, 1)
+            
+            logger.info(f"Porta criada via registro: {port_name}")
+            
+            # Reiniciar o spooler para aplicar mudanças
+            self._restart_spooler()
+            
+            return True
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via registro: {e}")
+        
+        return False
+    
+    def _create_printer(self, name, port_name):
+        """Cria a impressora usando diferentes métodos"""
+        # Método 1: PowerShell (Windows 8+)
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"Impressora criada via PowerShell: {name}")
+                return True
+            else:
+                logger.warning(f"PowerShell Add-Printer falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via PowerShell: {e}")
+        
+        # Método 2: rundll32 printui.dll
+        try:
+            cmd = [
+                'rundll32', 'printui.dll,PrintUIEntry',
+                '/if', '/b', name, '/r', port_name, '/m', self.default_driver
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            # rundll32 não retorna códigos de erro confiáveis, verificar se foi criada
+            time.sleep(2)
+            if self.check_printer_exists(name):
+                logger.info(f"Impressora criada via rundll32: {name}")
+                return True
+            else:
+                logger.warning("rundll32 printui.dll executado mas impressora não foi criada")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via rundll32: {e}")
+        
+        # Método 3: cscript prnmngr.vbs
+        try:
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnmngr.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnmngr.vbs',
+                r'C:\Windows\System32\prnmngr.vbs'
+            ]
+            
+            script_path = None
+            for path in script_paths:
+                if os.path.exists(path):
+                    script_path = path
+                    break
+            
+            if script_path:
+                cmd = [
+                    'cscript', script_path,
+                    '-a', '-p', name, '-m', self.default_driver, '-r', port_name
+                ]
+                
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode == 0 or 'added printer' in result.stdout.lower():
+                    logger.info(f"Impressora criada via prnmngr.vbs: {name}")
+                    return True
+                else:
+                    logger.warning(f"prnmngr.vbs falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via prnmngr.vbs: {e}")
+        
+        return False
+    
+    def _restart_spooler(self):
+        """Reinicia o serviço de spooler"""
+        try:
+            subprocess.run(['net', 'stop', 'spooler'], capture_output=True, timeout=10)
+            time.sleep(1)
+            subprocess.run(['net', 'start', 'spooler'], capture_output=True, timeout=10)
+            time.sleep(2)
+            logger.info("Serviço de spooler reiniciado")
+        except Exception as e:
+            logger.warning(f"Erro ao reiniciar spooler: {e}")
     
     def _set_printer_comment(self, name, comment):
         """Adiciona um comentário à impressora"""
-        comment = comment.replace('"', '\\"').replace('\n', '\\n')
-        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/Xs',
-               '/n', name, 'comment', comment]
         try:
-            subprocess.run(cmd, shell=True, capture_output=True)
-        except Exception as e:
-            logger.warning(f"Erro ao definir comentário: {e}")
+            # PowerShell
+            comment_escaped = comment.replace('"', '`"').replace('\n', ' ')
+            cmd = [
+                'powershell', '-command',
+                f'Set-Printer -Name "{name}" -Comment "{comment_escaped}"'
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=10)
+        except:
+            pass
+        
+        try:
+            # rundll32 como fallback
+            comment_escaped = comment.replace('"', '\\"').replace('\n', ' ')
+            cmd = [
+                'rundll32', 'printui.dll,PrintUIEntry',
+                '/Xs', '/n', name, 'comment', comment_escaped
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=10)
+        except:
+            pass
     
     def remove_printer(self, name):
         """Remove impressora no Windows"""
-        cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/dl', '/n', name]
+        success = False
+        
+        # Método 1: PowerShell
         try:
-            subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
-            return True
+            cmd = ['powershell', '-command', f'Remove-Printer -Name "{name}" -ErrorAction Stop']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                success = True
+                logger.info(f"Impressora removida via PowerShell: {name}")
         except:
-            return False
+            pass
+        
+        # Método 2: rundll32
+        if not success:
+            try:
+                cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/dl', '/n', name]
+                subprocess.run(cmd, capture_output=True, timeout=10)
+                time.sleep(1)
+                if not self.check_printer_exists(name):
+                    success = True
+                    logger.info(f"Impressora removida via rundll32: {name}")
+            except:
+                pass
+        
+        return success
     
     def remove_port(self, port_name):
         """Remove porta no Windows"""
-        cmd = ['cscript', r'c:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
-               '-d', '-r', port_name]
+        # Método 1: PowerShell
         try:
-            subprocess.run(cmd, shell=True, capture_output=True)
+            cmd = ['powershell', '-command', f'Remove-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue']
+            subprocess.run(cmd, capture_output=True, timeout=10)
+        except:
+            pass
+        
+        # Método 2: prnport.vbs
+        try:
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnport.vbs'
+            ]
+            
+            for script_path in script_paths:
+                if os.path.exists(script_path):
+                    cmd = ['cscript', script_path, '-d', '-r', port_name]
+                    subprocess.run(cmd, capture_output=True, timeout=10)
+                    break
         except:
             pass
     
     def check_printer_exists(self, name):
         """Verifica se impressora existe no Windows"""
+        # Método 1: PowerShell
         try:
-            cmd = ['powershell', '-command', 
-                f'if (Get-Printer -Name "{name}" -ErrorAction SilentlyContinue) {{Write-Output "true"}} else {{Write-Output "false"}}']
-            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
-            return result.stdout.decode().strip().lower() == "true"
+            cmd = [
+                'powershell', '-command',
+                f'$p = Get-Printer -Name "{name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip().lower() == "true"
+        except Exception as e:
+            logger.debug(f"Erro ao verificar via PowerShell: {e}")
+        
+        # Método 2: wmic
+        try:
+            cmd = ['wmic', 'printer', 'where', f'name="{name}"', 'get', 'name']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return name in result.stdout
+        except Exception as e:
+            logger.debug(f"Erro ao verificar via wmic: {e}")
+        
+        # Método 3: Listar todas as impressoras
+        try:
+            # PowerShell list
+            cmd = ['powershell', '-command', 'Get-Printer | Select-Object -ExpandProperty Name']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                printers = [p.strip() for p in result.stdout.splitlines() if p.strip()]
+                return name in printers
         except:
-            return False
+            pass
+        
+        try:
+            # wmic list
+            cmd = ['wmic', 'printer', 'get', 'name']
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    printers = [line.strip() for line in lines[1:] if line.strip()]
+                    return name in printers
+        except:
+            pass
+        
+        return False
     
     def check_port_exists(self, port_name):
         """Verifica se porta existe no Windows"""
+        # Método 1: PowerShell
         try:
-            cmd = ['powershell', '-command', 
-                f'if (Get-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue) {{Write-Output "true"}} else {{Write-Output "false"}}']
-            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=5)
-            return result.stdout.decode().strip().lower() == "true"
+            cmd = [
+                'powershell', '-command',
+                f'$p = Get-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip().lower() == "true"
         except:
-            return False
+            pass
+        
+        # Método 2: Verificar no registro
+        try:
+            import winreg
+            port_key = rf"SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\{port_name}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, port_key):
+                return True
+        except:
+            pass
+        
+        return False
 
 class UnixPrinterManager(PrinterManager):
     """Gerenciador de impressoras para sistemas Unix (Linux/macOS) usando CUPS"""
@@ -342,14 +658,20 @@ class VirtualPrinterInstaller:
         self.server_info = server_info
         
         try:
+            # Verificar se já existe antes de tentar remover
             if self.is_installed():
                 logger.info("Impressora virtual já está instalada, reinstalando...")
                 self.uninstall()
+                time.sleep(2)  # Aguardar um pouco após remover
             
             ip = server_info['ip']
             port = server_info['port']
             
             comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir}'
+            
+            logger.info(f"Iniciando instalação da impressora virtual...")
+            logger.info(f"Nome: {self.PRINTER_NAME}")
+            logger.info(f"Servidor: {ip}:{port}")
             
             success = self.printer_manager.add_printer(
                 self.PRINTER_NAME, ip, port,
@@ -357,8 +679,14 @@ class VirtualPrinterInstaller:
             )
             
             if success:
-                logger.info(f"Impressora virtual '{self.PRINTER_NAME}' instalada com sucesso!")
-                return True
+                # Verificar se realmente foi instalada
+                time.sleep(2)  # Aguardar um pouco para o sistema processar
+                if self.is_installed():
+                    logger.info(f"Impressora virtual '{self.PRINTER_NAME}' instalada e verificada com sucesso!")
+                    return True
+                else:
+                    logger.error("Impressora foi instalada mas não é detectável pelo sistema")
+                    return False
             else:
                 logger.error("Falha ao instalar a impressora virtual")
                 return False
@@ -380,6 +708,7 @@ class VirtualPrinterInstaller:
         
         logger.info("Reinstalando impressora virtual...")
         self.uninstall()
+        time.sleep(2)  # Aguardar entre desinstalar e reinstalar
         return self.install_with_server_info(self.server_info)
     
     def install(self):
@@ -409,6 +738,10 @@ class VirtualPrinterInstaller:
             success = self.printer_manager.remove_printer(self.PRINTER_NAME)
             if success:
                 logger.info("Impressora virtual removida com sucesso")
+                # Remover porta associada se existir
+                if self.server_info:
+                    port_name = f"IP_{self.server_info['ip']}:{self.server_info['port']}"
+                    self.printer_manager.remove_port(port_name)
             return success
         except Exception as e:
             logger.error(f"Erro ao remover impressora virtual: {str(e)}")
@@ -422,22 +755,9 @@ class VirtualPrinterInstaller:
             bool: True se a impressora está instalada
         """
         try:
-            return self.printer_manager.check_printer_exists(self.PRINTER_NAME)
+            exists = self.printer_manager.check_printer_exists(self.PRINTER_NAME)
+            logger.debug(f"Verificação de instalação: {exists}")
+            return exists
         except Exception as e:
-            logger.error(f"Erro ao verificar instalação da impressora virtual: {str(e)}")
-            return False
-    
-    def _is_admin(self):
-        """
-        Verifica se o aplicativo está sendo executado como administrador/root
-        
-        Returns:
-            bool: True se o aplicativo está sendo executado com privilégios elevados
-        """
-        try:
-            if self.system == "Windows":
-                return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            else:
-                return os.geteuid() == 0
-        except Exception:
+            logger.error(f"Erro ao verificar instalação da impressora")
             return False

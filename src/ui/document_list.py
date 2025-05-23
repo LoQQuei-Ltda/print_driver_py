@@ -10,6 +10,7 @@ import os
 import wx
 import datetime
 from src.api.client import APIError
+from src.utils.resource_manager import ResourceManager
 
 logger = logging.getLogger("PrintManager.UI.DocumentList")
 
@@ -83,10 +84,7 @@ class DocumentCardPanel(wx.Panel):
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Ícone do documento (esquerda)
-        doc_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "document.png"
-        )
+        doc_icon_path = ResourceManager.get_image_path("document.png")
         
         if os.path.exists(doc_icon_path):
             doc_icon = wx.StaticBitmap(
@@ -382,10 +380,7 @@ class DocumentListPanel(wx.ScrolledWindow):
         empty_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Ícone de documento vazio
-        document_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "empty_document.png"
-        )
+        document_icon_path = ResourceManager.get_image_path("empty_document.png")
 
         if os.path.exists(document_icon_path):
             empty_icon = wx.StaticBitmap(

@@ -37,7 +37,7 @@ class PrinterServer:
         self.printer_name = 'Impressora LoQQuei'
         self.ip = '127.0.0.1'
         self.port = 0  # Será definido automaticamente
-        self.buffer_size = 1024
+        self.buffer_size = 4096  # Aumentado para melhor performance
         self.running = False
         self.keep_going = False
         self.server_thread = None
@@ -857,17 +857,70 @@ class PrinterServer:
         if self.running:
             return True
         
-        self.running = True
-        self.keep_going = True
-        
-        # Iniciar em thread separada
-        self.server_thread = threading.Thread(target=self._run_server, daemon=True)
-        self.server_thread.start()
-        
-        return True
+        try:
+            # Criar socket ANTES de iniciar a thread
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            
+            # Configurações do socket
+            if self.system == 'Windows':
+                # No Windows, use SO_EXCLUSIVEADDRUSE em vez de SO_REUSEADDR
+                try:
+                    self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                except AttributeError:
+                    # Se não disponível, usa SO_REUSEADDR mesmo
+                    self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            else:
+                self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Tentar fazer bind
+            self.socket.bind((self.ip, self.port))
+            
+            # Obter a porta real atribuída
+            ip, port = self.socket.getsockname()
+            self.port = port
+            
+            # Configurar socket para modo non-blocking
+            self.socket.setblocking(False)
+            
+            # Iniciar listen
+            self.socket.listen(5)
+            
+            logger.info(f'Socket criado e configurado em {ip}:{port}')
+            
+            # Agora que o socket está pronto, marcar como running e iniciar thread
+            self.running = True
+            self.keep_going = True
+            
+            self.server_thread = threading.Thread(target=self._run_server, daemon=True)
+            self.server_thread.start()
+            
+            # Aguardar um pouco para garantir que a thread iniciou
+            time.sleep(0.5)
+            
+            # Verificar se a thread está rodando
+            if not self.server_thread.is_alive():
+                self.running = False
+                self.keep_going = False
+                logger.error("Thread do servidor não iniciou corretamente")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao iniciar servidor: {e}")
+            self.running = False
+            self.keep_going = False
+            if self.socket:
+                try:
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
+            return False
     
     def stop(self):
         """Para o servidor de impressão"""
+        logger.info("Parando servidor de impressão...")
         self.keep_going = False
         self.running = False
         
@@ -876,77 +929,114 @@ class PrinterServer:
                 self.socket.close()
             except:
                 pass
+            self.socket = None
         
         if self.server_thread and self.server_thread.is_alive():
             self.server_thread.join(timeout=5)
+            if self.server_thread.is_alive():
+                logger.warning("Thread do servidor não parou no tempo esperado")
+        
+        logger.info("Servidor de impressão parado")
     
     def get_server_info(self):
         """Retorna informações do servidor"""
         if self.socket:
-            ip, port = self.socket.getsockname()
-            return {'ip': ip, 'port': port, 'running': self.running}
+            try:
+                ip, port = self.socket.getsockname()
+                return {'ip': ip, 'port': port, 'running': self.running}
+            except:
+                pass
         return {'ip': self.ip, 'port': self.port, 'running': self.running}
     
     def _run_server(self):
         """Executa o servidor em thread separada"""
+        logger.info("Thread do servidor iniciada")
+        
         try:
-            # Criar socket
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.socket.bind((self.ip, self.port))
-            ip, port = self.socket.getsockname()
-            self.port = port  # Atualiza com a porta real
-            
-            logger.info(f'Servidor de impressão iniciado em {ip}:{port}')
-            
-            self.socket.listen(1)
-            
             while self.keep_going:
                 try:
-                    # Esperar por conexões com timeout
-                    ready_sockets, _, _ = select.select([self.socket], [], [], 1.0)
-                    if self.socket not in ready_sockets:
+                    # Usar select com timeout para verificar se há conexões
+                    readable, _, _ = select.select([self.socket], [], [], 1.0)
+                    
+                    if not readable:
                         continue
                     
-                    logger.info('Recebendo trabalho de impressão...')
-                    conn, addr = self.socket.accept()
-                    
-                    # Receber dados
-                    buffer = []
-                    while True:
-                        raw = conn.recv(self.buffer_size)
-                        if not raw:
-                            break
-                        buffer.append(raw)
-                    
-                    if buffer:
-                        # Concatenar dados
-                        job_data = b''.join(buffer)
+                    # Aceitar conexão
+                    try:
+                        conn, addr = self.socket.accept()
+                        logger.info(f'Conexão recebida de {addr}')
                         
-                        # Processar em thread separada para não bloquear
-                        processing_thread = threading.Thread(
-                            target=self._process_print_job, 
-                            args=(job_data,), 
+                        # Configurar timeout para a conexão
+                        conn.settimeout(30.0)
+                        
+                        # Processar em thread separada
+                        handler_thread = threading.Thread(
+                            target=self._handle_connection,
+                            args=(conn, addr),
                             daemon=True
                         )
-                        processing_thread.start()
-                    
-                    conn.close()
+                        handler_thread.start()
+                        
+                    except socket.error as e:
+                        if e.errno != 10035:  # WSAEWOULDBLOCK no Windows
+                            logger.error(f"Erro ao aceitar conexão: {e}")
                     
                 except Exception as e:
                     if self.keep_going:
-                        logger.error(f"Erro no servidor: {e}")
+                        logger.error(f"Erro no loop do servidor: {e}")
                         time.sleep(1)
                         
         except Exception as e:
             logger.error(f"Erro crítico no servidor: {e}")
         finally:
-            if self.socket:
+            logger.info("Thread do servidor finalizando")
+    
+    def _handle_connection(self, conn, addr):
+        """Processa uma conexão individual"""
+        logger.info(f'Processando conexão de {addr}')
+        
+        try:
+            # Receber dados
+            buffer = []
+            total_received = 0
+            
+            while True:
                 try:
-                    self.socket.close()
-                except:
-                    pass
-            logger.info("Servidor de impressão encerrado")
+                    raw = conn.recv(self.buffer_size)
+                    if not raw:
+                        break
+                    buffer.append(raw)
+                    total_received += len(raw)
+                    
+                    # Log de progresso para grandes arquivos
+                    if total_received % (100 * 1024) == 0:  # A cada 100KB
+                        logger.debug(f"Recebidos {total_received} bytes...")
+                        
+                except socket.timeout:
+                    logger.warning("Timeout ao receber dados")
+                    break
+                except Exception as e:
+                    logger.error(f"Erro ao receber dados: {e}")
+                    break
+            
+            if buffer:
+                # Concatenar dados
+                job_data = b''.join(buffer)
+                logger.info(f"Recebidos {len(job_data)} bytes de dados de impressão")
+                
+                # Processar o trabalho
+                self._process_print_job(job_data)
+            else:
+                logger.warning("Nenhum dado recebido")
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar conexão: {e}")
+        finally:
+            try:
+                conn.close()
+            except:
+                pass
+            logger.info(f"Conexão de {addr} fechada")
     
     def _process_print_job(self, job_data):
         """Processa um trabalho de impressão"""

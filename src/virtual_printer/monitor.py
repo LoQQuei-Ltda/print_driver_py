@@ -57,6 +57,41 @@ class VirtualPrinterManager:
         # Monitor de arquivos (será inicializado quando necessário)
         self.file_monitor = None
     
+    def _diagnose_system(self):
+        """Diagnostica o sistema e registra informações úteis"""
+        import platform
+        import ctypes
+        
+        logger.info("=== DIAGNÓSTICO DO SISTEMA ===")
+        logger.info(f"Sistema operacional: {platform.system()} {platform.release()}")
+        logger.info(f"Versão: {platform.version()}")
+        logger.info(f"Arquitetura: {platform.machine()}")
+        logger.info(f"Python: {platform.python_version()}")
+        
+        if platform.system() == 'Windows':
+            try:
+                is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+                logger.info(f"Executando como administrador: {is_admin}")
+            except:
+                logger.info("Não foi possível verificar privilégios de administrador")
+            
+            # Verificar firewall
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ['netsh', 'advfirewall', 'show', 'currentprofile'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    if 'State                                 ON' in result.stdout:
+                        logger.warning("Firewall do Windows está ATIVO - pode bloquear conexões")
+                    else:
+                        logger.info("Firewall do Windows está desativado")
+            except:
+                pass
+        
+        logger.info("=== FIM DO DIAGNÓSTICO ===")
+
     def _on_server_document_created(self, document):
         """Callback chamado quando o servidor cria um novo documento"""
         try:
@@ -85,6 +120,8 @@ class VirtualPrinterManager:
         if self.is_running:
             logger.info("Sistema de impressora virtual já está rodando")
             return True
+        
+        self._diagnose_system()
         
         try:
             # 1. Iniciar servidor de impressão

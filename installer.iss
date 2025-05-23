@@ -1,6 +1,6 @@
 ; Script para o Inno Setup - VERSÃO CORRIGIDA (Instalação Admin, Execução User)
 #define MyAppName "Sistema de Gerenciamento de Impressão"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "LoQQuei"
 #define MyAppURL "https://loqquei.com.br"
 #define MyAppExeName "PrintManagementSystem.exe"

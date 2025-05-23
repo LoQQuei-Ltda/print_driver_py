@@ -252,7 +252,7 @@ exe = EXE(
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "1.0.0"
+APP_VERSION = "2.0.0"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências

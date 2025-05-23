@@ -184,7 +184,7 @@ def build_installer():
         subprocess.run([iscc_exe, "installer.iss"], check=True)
         
         # Verifica se o instalador foi criado
-        installer_path = "Output/Instalador_Gerenciamento_LoQQuei_V1.0.0.exe"
+        installer_path = "Output/Instalador_Gerenciamento_LoQQuei_V2.0.0.exe"
         if os.path.exists(installer_path):
             size_mb = os.path.getsize(installer_path) / (1024 * 1024)
             print(f"\n✓ Instalador criado com sucesso!")

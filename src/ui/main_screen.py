@@ -14,6 +14,7 @@ from io import BytesIO
 from src.models.document import Document
 from src.models.printer import Printer
 from src.ui.taskbar_icon import PrintManagerTaskBarIcon
+from src.utils.resource_manager import ResourceManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.MainScreen")
 
@@ -87,10 +88,7 @@ class DocumentsPanel(wx.ScrolledWindow):
         self.empty_panel.SetBackgroundColour(wx.Colour(18, 18, 18))
         empty_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        empty_icon_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-            "src", "ui", "resources", "empty_document.png"
-        )
+        empty_icon_path = ResourceManager.get_image_path("empty_document.png")
         
         if os.path.exists(empty_icon_path):
             empty_icon = wx.StaticBitmap(
@@ -193,8 +191,7 @@ class MainScreen(wx.Frame):
         self.printers = []
         
         # Configura o ícone da aplicação
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                "src", "ui", "resources", "icon.ico")
+        icon_path = ResourceManager.get_icon_path("icon.ico")
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path))
         
@@ -344,8 +341,7 @@ class MainScreen(wx.Frame):
         logout_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Ícone de logout
-        logout_icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                       "src", "ui", "resources", "logout.png")
+        logout_icon_path = ResourceManager.get_image_path("logout.png")
         
         if os.path.exists(logout_icon_path):
             logout_icon = wx.Bitmap(logout_icon_path)

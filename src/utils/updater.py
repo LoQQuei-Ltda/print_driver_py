@@ -66,10 +66,10 @@ class AppUpdater:
                         if "APP_VERSION" in line:
                             return line.split("=")[1].strip().strip('"\'')
             
-            return "1.0.0"  # Versão padrão
+            return "2.0.0"  # Versão padrão
         except Exception as e:
             logger.error(f"Erro ao obter versão atual: {str(e)}")
-            return "1.0.0"
+            return "2.0.0"
     
     def check_for_update(self, silent=True):
         """

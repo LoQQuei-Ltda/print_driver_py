@@ -9,6 +9,7 @@ import os
 import wx
 import logging
 from .taskbar_imports import TaskBarIcon, EVT_TASKBAR_LEFT_DCLICK
+from src.utils.resource_manager import ResourceManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.TaskBarIcon")
 
@@ -83,8 +84,7 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
     
     def _setup_icon(self):
         """Configura o ícone da bandeja"""
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                "src", "ui", "resources", "icon.ico")
+        icon_path = ResourceManager.get_icon_path("icon.ico")
         
         try:
             if os.path.exists(icon_path):

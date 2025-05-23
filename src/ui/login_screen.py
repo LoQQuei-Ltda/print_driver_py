@@ -10,6 +10,7 @@ import wx
 import logging
 from src.api import APIError
 from src.utils import AuthError
+from src.utils.resource_manager import ResourceManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.LoginScreen")
 
@@ -209,7 +210,7 @@ class LoginScreen(wx.Frame):
         self.on_login_success = on_login_success
         
         # Configura o ícone da aplicação
-        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src", "ui", "resources", "icon.ico")
+        icon_path = ResourceManager.get_icon_path("icon.ico")
         if os.path.exists(icon_path):
             self.SetIcon(wx.Icon(icon_path))
         
@@ -234,7 +235,7 @@ class LoginScreen(wx.Frame):
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Logo como na imagem
-        logo_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "src", "ui", "resources", "logo.png")
+        logo_path = ResourceManager.get_image_path("logo.png")
         logo_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         if os.path.exists(logo_path):
