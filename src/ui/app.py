@@ -14,6 +14,7 @@ from src.utils import AuthManager, ThemeManager
 from src.ui.login_screen import LoginScreen
 from src.ui.main_screen import MainScreen
 from src.virtual_printer.monitor import VirtualPrinterManager
+from src.utils.print_system import PrintSystem, PrintQueueManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.App")
 
@@ -217,8 +218,22 @@ class PrintManagementApp(wx.App):
                 
         except Exception as e:
             logger.error(f"Erro ao inicializar impressora virtual: {str(e)}")
-            # Continua a aplicação mesmo se a impressora virtual falhar
     
+    def _init_print_system(self):
+        """Inicializa o sistema de impressão"""
+        try:
+            # Inicializa o gerenciador de fila
+            print_queue_manager = PrintQueueManager.get_instance()
+            print_queue_manager.set_config(self.config)
+            print_queue_manager.start()
+            
+            # Cria o sistema de impressão
+            self.print_system = PrintSystem(self.config)
+            
+            logger.info("Sistema de impressão inicializado com sucesso")
+        except Exception as e:
+            logger.error(f"Erro ao inicializar sistema de impressão: {str(e)}")
+
     def _on_virtual_printer_document(self, document):
         """
         Callback chamado quando um novo documento é criado pela impressora virtual

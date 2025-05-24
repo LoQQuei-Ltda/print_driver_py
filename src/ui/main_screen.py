@@ -15,6 +15,8 @@ from src.models.document import Document
 from src.models.printer import Printer
 from src.ui.taskbar_icon import PrintManagerTaskBarIcon
 from src.utils.resource_manager import ResourceManager
+from src.ui.print_dialog import select_printer_and_print
+from src.ui.print_queue_panel import PrintQueuePanel
 
 logger = logging.getLogger("PrintManagementSystem.UI.MainScreen")
 
@@ -281,6 +283,7 @@ class MainScreen(wx.Frame):
         menu_items = [
             {"label": "Documentos", "icon": ResourceManager.get_image_path("document.png"), "handler": self.on_show_documents},
             {"label": "Impressoras", "icon": ResourceManager.get_image_path("system.png"), "handler": self.on_show_printers},
+            {"label": "Fila de Impressão", "icon": ResourceManager.get_image_path("printer.png"), "handler": self.on_show_print_queue}
         ]
         
         # Criar os botões do menu
@@ -292,8 +295,7 @@ class MainScreen(wx.Frame):
             item_sizer = wx.BoxSizer(wx.HORIZONTAL)
             
             # Carregar ícone se existir
-            icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 
-                                    "src", "ui", "resources", item.get("icon", ""))
+            icon_path = item.get("icon", "")
             
             icon_bitmap = None
             if os.path.exists(icon_path):
@@ -429,10 +431,16 @@ class MainScreen(wx.Frame):
         printer_sizer.Add(self.printer_list, 1, wx.EXPAND)
         self.printers_panel.SetSizer(printer_sizer)
 
+        # Cria o painel de fila de impressão (inicialmente oculto)
+        self.print_queue_panel = PrintQueuePanel(self.content_panel, self.config)
+        
+        # Esconde todos os painéis exceto documentos
         self.printers_panel.Hide()
+        self.print_queue_panel.Hide()
     
         self.content_sizer.Add(self.documents_panel, 1, wx.EXPAND)
         self.content_sizer.Add(self.printers_panel, 1, wx.EXPAND)
+        self.content_sizer.Add(self.print_queue_panel, 1, wx.EXPAND)
         
         self.content_panel.SetSizer(self.content_sizer)
         
@@ -467,6 +475,7 @@ class MainScreen(wx.Frame):
         # Mostra o painel correto
         self.documents_panel.Show()
         self.printers_panel.Hide()
+        self.print_queue_panel.Hide()
         
         # Carrega os documentos
         self.load_documents()
@@ -486,10 +495,31 @@ class MainScreen(wx.Frame):
         # Mostra o painel correto
         self.documents_panel.Hide()
         self.printers_panel.Show()
+        self.print_queue_panel.Hide()
         
         # Atualiza a lista de impressoras
         if hasattr(self, 'printer_list'):
             self.printer_list.load_printers()
+        
+        # Atualiza o layout
+        self.content_panel.Layout()
+    
+    def on_show_print_queue(self, event=None):
+        """Mostra o painel da fila de impressão"""
+        # Destaca o botão selecionado
+        for button in self.menu_buttons:
+            button.SetBackgroundColour(wx.Colour(25, 25, 25))
+        
+        self.menu_buttons[2].SetBackgroundColour(wx.Colour(35, 35, 35))
+        self.selected_menu = self.menu_buttons[2]
+        
+        # Mostra o painel correto
+        self.documents_panel.Hide()
+        self.printers_panel.Hide()
+        self.print_queue_panel.Show()
+        
+        # Atualiza a fila de impressão
+        self.print_queue_panel.load_jobs()
         
         # Atualiza o layout
         self.content_panel.Layout()
@@ -556,63 +586,18 @@ class MainScreen(wx.Frame):
         Args:
             document: Documento a ser impresso
         """
-        # Verifica se temos impressoras carregadas
-        if not self.printers:
-            try:
-                # Tenta carregar as impressoras do sistema
-                from src.utils.printer_utils import PrinterUtils
-                system_printers = PrinterUtils.get_system_printers()
-                
-                if not system_printers:
-                    # Se não houver impressoras do sistema, tenta carregar do config
-                    self.printers = [Printer(printer_data) for printer_data in self.config.get_printers()]
-                else:
-                    # Converte impressoras do sistema para nosso modelo
-                    self.printers = [Printer({
-                        "id": p.get("id"),
-                        "name": p.get("name"),
-                        "system_name": p.get("system_name", p.get("name")),
-                        "mac_address": p.get("mac_address", "")
-                    }) for p in system_printers]
-                    
-            except Exception as e:
-                logger.error(f"Erro ao carregar impressoras: {str(e)}")
-                wx.MessageBox("Não foi possível carregar a lista de impressoras. " + 
-                            "Por favor, atualize as impressoras primeiro.",
-                            "Erro", wx.OK | wx.ICON_ERROR)
-                return
+        # Utiliza o novo sistema de impressão
+        from src.ui.print_dialog import select_printer_and_print
         
-        if not self.printers:
-            wx.MessageBox("Nenhuma impressora disponível.",
-                        "Informação", wx.OK | wx.ICON_INFORMATION)
-            return
-        
-        # Cria a caixa de diálogo para escolher impressora
-        choices = [printer.name for printer in self.printers]
-        
-        dialog = wx.SingleChoiceDialog(
-            self,
-            "Escolha a impressora para enviar o documento:",
-            "Imprimir Documento",
-            choices
-        )
-        
-        if dialog.ShowModal() == wx.ID_OK:
-            selected_index = dialog.GetSelection()
-            printer = self.printers[selected_index]
-            
-            try:
-                # Imprime diretamente usando PrinterUtils
-                from src.utils.printer_utils import PrinterUtils
-                PrinterUtils.print_file(document.path, getattr(printer, 'system_name', printer.name))
-                wx.MessageBox(f"Documento '{document.name}' enviado para '{printer.name}'.",
-                            "Impressão", wx.OK | wx.ICON_INFORMATION)
-            except Exception as e:
-                logger.error(f"Erro ao imprimir documento: {str(e)}")
-                wx.MessageBox(f"Erro ao imprimir documento: {str(e)}",
-                            "Erro", wx.OK | wx.ICON_ERROR)
-        
-        dialog.Destroy()
+        try:
+            # Chama o diálogo de seleção de impressora e impressão
+            if select_printer_and_print(self, document, self.config):
+                # Após impressão bem-sucedida, mostra a fila de impressão
+                self.on_show_print_queue()
+        except Exception as e:
+            logger.error(f"Erro ao imprimir documento: {str(e)}")
+            wx.MessageBox(f"Erro ao imprimir documento: {str(e)}",
+                         "Erro", wx.OK | wx.ICON_ERROR)
     
     def on_delete_document(self, document):
         """

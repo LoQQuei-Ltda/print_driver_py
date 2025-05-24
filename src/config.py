@@ -27,6 +27,7 @@ class AppConfig:
         self.config_file = os.path.join(data_dir, "config", "config.json")
         self.pdf_dir = os.path.join(data_dir, "pdfs")
         self.temp_dir = os.path.join(data_dir, "temp")
+        self.system = platform.system()
 
         # Valores padrão
         self.default_config = {
@@ -38,7 +39,10 @@ class AppConfig:
                 "email": "",
                 "token": "",
                 "remember_me": False
-            }
+            },
+            "printers": [],
+            "print_jobs": [],
+            "print_history": []
         }
 
         # Carrega configurações ou cria se não existir
@@ -219,3 +223,178 @@ class AppConfig:
         """
         self.config["printers"] = printers
         self._save_config(self.config)
+    
+    def get_print_jobs(self):
+        """
+        Obtém a lista de trabalhos de impressão ativos
+        
+        Returns:
+            list: Lista de trabalhos de impressão
+        """
+        return self.config.get("print_jobs", [])
+    
+    def set_print_jobs(self, jobs):
+        """
+        Define a lista de trabalhos de impressão
+        
+        Args:
+            jobs (list): Lista de trabalhos de impressão
+        """
+        self.config["print_jobs"] = jobs
+        self._save_config(self.config)
+    
+    def add_print_job(self, job_data):
+        """
+        Adiciona um trabalho de impressão à lista
+        
+        Args:
+            job_data (dict): Dados do trabalho de impressão
+            
+        Returns:
+            bool: True se adicionado com sucesso
+        """
+        try:
+            jobs = self.get_print_jobs()
+            
+            # Verifica se o trabalho já existe
+            for i, job in enumerate(jobs):
+                if job.get("job_id") == job_data.get("job_id"):
+                    # Atualiza o trabalho existente
+                    jobs[i] = job_data
+                    self.set_print_jobs(jobs)
+                    return True
+            
+            # Adiciona novo trabalho
+            jobs.append(job_data)
+            self.set_print_jobs(jobs)
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao adicionar trabalho de impressão: {str(e)}")
+            return False
+    
+    def update_print_job(self, job_id, updates):
+        """
+        Atualiza um trabalho de impressão existente
+        
+        Args:
+            job_id (str): ID do trabalho
+            updates (dict): Atualizações a serem aplicadas
+            
+        Returns:
+            bool: True se atualizado com sucesso
+        """
+        try:
+            jobs = self.get_print_jobs()
+            
+            for i, job in enumerate(jobs):
+                if job.get("job_id") == job_id:
+                    # Atualiza apenas os campos fornecidos
+                    for key, value in updates.items():
+                        job[key] = value
+                    
+                    jobs[i] = job
+                    self.set_print_jobs(jobs)
+                    return True
+            
+            return False  # Trabalho não encontrado
+        except Exception as e:
+            logger.error(f"Erro ao atualizar trabalho de impressão: {str(e)}")
+            return False
+    
+    def remove_print_job(self, job_id):
+        """
+        Remove um trabalho de impressão da lista
+        
+        Args:
+            job_id (str): ID do trabalho
+            
+        Returns:
+            bool: True se removido com sucesso
+        """
+        try:
+            jobs = self.get_print_jobs()
+            
+            for i, job in enumerate(jobs):
+                if job.get("job_id") == job_id:
+                    # Remove o trabalho
+                    job_data = jobs.pop(i)
+                    
+                    # Adiciona ao histórico se estiver completo ou falhou
+                    status = job_data.get("status")
+                    if status in ["completed", "failed", "canceled"]:
+                        self.add_to_print_history(job_data)
+                    
+                    self.set_print_jobs(jobs)
+                    return True
+            
+            return False  # Trabalho não encontrado
+        except Exception as e:
+            logger.error(f"Erro ao remover trabalho de impressão: {str(e)}")
+            return False
+    
+    def get_print_history(self):
+        """
+        Obtém o histórico de trabalhos de impressão
+        
+        Returns:
+            list: Histórico de trabalhos de impressão
+        """
+        return self.config.get("print_history", [])
+    
+    def set_print_history(self, history):
+        """
+        Define o histórico de trabalhos de impressão
+        
+        Args:
+            history (list): Histórico de trabalhos de impressão
+        """
+        self.config["print_history"] = history
+        self._save_config(self.config)
+    
+    def add_to_print_history(self, job_data):
+        """
+        Adiciona um trabalho ao histórico de impressão
+        
+        Args:
+            job_data (dict): Dados do trabalho de impressão
+            
+        Returns:
+            bool: True se adicionado com sucesso
+        """
+        try:
+            history = self.get_print_history()
+            
+            # Verifica se o trabalho já existe no histórico
+            for i, job in enumerate(history):
+                if job.get("job_id") == job_data.get("job_id"):
+                    # Atualiza o trabalho existente
+                    history[i] = job_data
+                    self.set_print_history(history)
+                    return True
+            
+            # Adiciona novo trabalho ao histórico
+            history.append(job_data)
+            
+            # Limita o tamanho do histórico (mantém os 100 mais recentes)
+            if len(history) > 100:
+                history = history[-100:]
+                
+            self.set_print_history(history)
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao adicionar trabalho ao histórico: {str(e)}")
+            return False
+    
+    def clear_print_history(self):
+        """
+        Limpa o histórico de trabalhos de impressão
+        
+        Returns:
+            bool: True se limpo com sucesso
+        """
+        try:
+            self.set_print_history([])
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao limpar histórico de impressão: {str(e)}")
+            return False

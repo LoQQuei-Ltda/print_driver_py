@@ -11,6 +11,7 @@ import wx
 import datetime
 from src.api.client import APIError
 from src.utils.resource_manager import ResourceManager
+from src.ui.print_dialog import select_printer_and_print
 
 logger = logging.getLogger("PrintManager.UI.DocumentList")
 
