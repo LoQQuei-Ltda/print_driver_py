@@ -46,19 +46,17 @@ class RoundedButton(wx.Button):
         self.Refresh()
     
     def on_paint(self, event):
-        """Redesenha o botão com cantos arredondados"""
-        # Usamos BufferedPaintDC para evitar flicker
+        """Redesenha o botão com cantos arredondados sem borda branca"""
         dc = wx.BufferedPaintDC(self)
         dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
         dc.Clear()
         
         rect = self.GetClientRect()
         
-        # Desenha o fundo com cantos arredondados
+        # Desenha o fundo com cantos arredondados - removida a borda branca
         dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
-        dc.SetPen(wx.Pen(self.GetBackgroundColour(), 1))
+        dc.SetPen(wx.Pen(self.GetBackgroundColour(), 1))  # Mesma cor que o fundo
         
-        # Raio para cantos arredondados - aumentado para ser mais perceptível
         radius = 8
         dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, radius)
         

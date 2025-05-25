@@ -158,15 +158,17 @@ class DocumentCardPanel(wx.Panel):
         self.Bind(wx.EVT_SIZE, self._on_size)
         
         # Força o layout inicial e depois ajusta o nome
-        self.Layout()
-        self._safe_call_later(100, self._adjust_document_name)
+        self._adjust_document_name()
+        wx.CallLater(100, self._adjust_document_name)
     
     def _on_size(self, event):
         """Manipula eventos de redimensionamento"""
         if not self._is_destroyed:
-            self._safe_call_later(50, self._adjust_document_name)
+            # Chama imediatamente E agenda para depois garantir que seja aplicado
+            self._adjust_document_name()
+            wx.CallLater(50, self._adjust_document_name)
         event.Skip()
-    
+
     def _adjust_document_name(self):
         """Ajusta o nome do documento baseado no tamanho disponível"""
         if self._is_destroyed or not self.doc_name_widget:
@@ -176,7 +178,11 @@ class DocumentCardPanel(wx.Panel):
             # Calcula a largura disponível
             total_width = self.GetSize().width
             if total_width <= 0:
-                return
+                # Tenta obter tamanho do parent se o próprio widget ainda não tem tamanho definido
+                if self.GetParent():
+                    total_width = self.GetParent().GetSize().width - 40  # 40px para margens
+                if total_width <= 0:
+                    total_width = 400  # Valor padrão se ainda não conseguir determinar
                 
             # Subtrai: ícone (52px) + botões (200px) + margens (40px)
             available_width = max(150, total_width - 292)
@@ -473,6 +479,12 @@ class DocumentListPanel(wx.ScrolledWindow):
             self.content_panel.Layout()
             self.Layout()
             
+            for card in self.document_cards:
+                if hasattr(card, '_adjust_document_name'):
+                    card._adjust_document_name()
+            
+            wx.CallLater(100, self._force_adjust_all_cards)
+            
             self.FitInside()
             self.Refresh()
 
@@ -486,3 +498,9 @@ class DocumentListPanel(wx.ScrolledWindow):
             
             self.content_panel.Layout()
             self.Layout()
+            
+    def _force_adjust_all_cards(self):
+        """Força o ajuste de nomes em todos os cards após o layout estar completo"""
+        for card in self.document_cards:
+            if hasattr(card, '_adjust_document_name') and not getattr(card, '_is_destroyed', False):
+                card._adjust_document_name()

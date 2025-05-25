@@ -64,9 +64,9 @@ class DocumentsPanel(wx.ScrolledWindow):
         
         # Eventos de hover para o botão
         def on_refresh_enter(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(80, 80, 80))
+            self.refresh_button.SetBackgroundColour(wx.Colour(70, 70, 70))
             self.refresh_button.Refresh()
-        
+
         def on_refresh_leave(evt):
             self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
             self.refresh_button.Refresh()
@@ -180,7 +180,7 @@ class MainScreen(wx.Frame):
             style=wx.DEFAULT_FRAME_STYLE
         )
         
-        self.SetMinSize((800, 600))
+        self.SetMinSize((850, 600))
 
         self.auth_manager = auth_manager
         self.theme_manager = theme_manager
@@ -338,18 +338,26 @@ class MainScreen(wx.Frame):
                     # Garantir que o item selecionado mantenha a cor correta
                     change_hover_color(panel, wx.Colour(35, 35, 35))
             
+            # Função para propagação de clique - NOVO
+            def on_click(evt, handler=item["handler"]):
+                handler(evt)
+            
             # Bind eventos no painel principal
             item_panel.Bind(wx.EVT_ENTER_WINDOW, on_enter)
             item_panel.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
-            item_panel.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            item_panel.Bind(wx.EVT_LEFT_DOWN, on_click)
             
-            # Bind eventos nos elementos filhos (ícone e texto)
+            # Bind eventos nos elementos filhos (ícone e texto) - MODIFICADO
             if icon_bitmap:
-                icon_bitmap.Bind(wx.EVT_MOTION, lambda evt: on_enter(evt))
-                icon_bitmap.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+                # Propaga os mesmos eventos para o ícone
+                icon_bitmap.Bind(wx.EVT_ENTER_WINDOW, lambda evt, p=item_panel: on_enter(evt, p))
+                icon_bitmap.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, p=item_panel: on_leave(evt, p))
+                icon_bitmap.Bind(wx.EVT_LEFT_DOWN, on_click)
             
-            item_text.Bind(wx.EVT_MOTION, lambda evt: on_enter(evt))
-            item_text.Bind(wx.EVT_LEFT_DOWN, item["handler"])
+            # Propaga os mesmos eventos para o texto
+            item_text.Bind(wx.EVT_ENTER_WINDOW, lambda evt, p=item_panel: on_enter(evt, p))
+            item_text.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, p=item_panel: on_leave(evt, p))
+            item_text.Bind(wx.EVT_LEFT_DOWN, on_click)
             
             sidebar_sizer.Add(item_panel, 0, wx.EXPAND | wx.TOP, 5)
             self.menu_buttons.append(item_panel)
