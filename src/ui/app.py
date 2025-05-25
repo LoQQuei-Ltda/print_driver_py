@@ -15,6 +15,7 @@ from src.ui.login_screen import LoginScreen
 from src.ui.main_screen import MainScreen
 from src.virtual_printer.monitor import VirtualPrinterManager
 from src.utils.print_system import PrintSystem, PrintQueueManager
+from src.api.server import start_server
 
 logger = logging.getLogger("PrintManagementSystem.UI.App")
 
@@ -38,6 +39,7 @@ class PrintManagementApp(wx.App):
         self.theme_manager = None
         self.scheduler = None
         self.virtual_printer_manager = None
+        self.api_server = None
         
         # Flag para controlar se estamos em segundo plano
         self.running_in_background = False
@@ -133,6 +135,9 @@ class PrintManagementApp(wx.App):
             # Inicializa o sistema de sincronização de impressão
             self._init_print_sync()
             
+            # Inicializa o servidor API local
+            self._init_api_server()
+            
             # Configura o agendador de tarefas
             from src.utils import TaskScheduler
             from src.tasks import update_printers_task, update_application_task
@@ -203,6 +208,27 @@ class PrintManagementApp(wx.App):
             logger.error(f"Erro ao inicializar aplicação: {str(e)}", exc_info=True)
             wx.MessageBox(f"Erro ao inicializar aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
             return False
+
+    def _init_api_server(self):
+        """Inicializa o servidor API local"""
+        try:
+            # Adiciona valor padrão para api_port na configuração se não existir
+            if "api_port" not in self.config.default_config:
+                self.config.default_config["api_port"] = 50000
+            
+            # Obtém porta inicial da configuração ou usa o padrão
+            initial_port = self.config.get("api_port", 50000)
+            
+            # Inicia o servidor API
+            self.api_server = start_server(self.config, initial_port)
+            
+            if self.api_server:
+                logger.info(f"Servidor API iniciado com sucesso na porta {self.api_server.port}")
+            else:
+                logger.error("Falha ao iniciar servidor API")
+                
+        except Exception as e:
+            logger.error(f"Erro ao inicializar servidor API: {e}")
 
     def _init_print_sync(self):
         """Inicializa o sistema de sincronização de impressão"""
@@ -406,6 +432,10 @@ class PrintManagementApp(wx.App):
             # Para o sistema de impressora virtual (mas não remove a impressora)
             if self.virtual_printer_manager:
                 self.virtual_printer_manager.stop()
+            
+            # Para o servidor API
+            if self.api_server:
+                self.api_server.stop()
             
             logger.info("Aplicação encerrada")
             

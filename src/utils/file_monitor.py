@@ -146,15 +146,44 @@ class FileMonitor:
         with self.lock:
             if self._add_document_internal(filepath):
                 document = self.documents.get(filepath)
+                auto_print_enabled = self.config.get("auto_print", False)
 
-                if document and self.config.get("auto_print", False):
+                if document and auto_print_enabled:
                     self._process_auto_print(document)
+                elif document and not auto_print_enabled:
+                    # Se auto-impressão não estiver ativada, mostra a tela de documentos
+                    self._show_documents_screen()
             
-                if self.on_documents_changed:
-                    self.on_documents_changed(list(self.documents.values()))
-
-
-                
+    def _show_documents_screen(self):
+        """Mostra a tela de documentos quando auto-impressão não está ativa"""
+        import wx
+        
+        def show_documents():
+            try:
+                # Obtém todas as janelas abertas
+                for window in wx.GetTopLevelWindows():
+                    # Verifica se é a janela principal (MainScreen)
+                    if hasattr(window, 'on_show_documents'):
+                        # Mostra a janela se estiver oculta
+                        if not window.IsShown():
+                            window.Show(True)
+                        
+                        # Se estiver minimizada, restaura
+                        if window.IsIconized():
+                            window.Iconize(False)
+                        
+                        # Traz para frente
+                        window.Raise()
+                        
+                        # Muda para a tela de documentos
+                        window.on_show_documents()
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Erro ao mostrar tela de documentos: {str(e)}")
+        
+        # Executa na thread principal da UI
+        wx.CallAfter(show_documents)
     
     def process_existing_documents(self):
         """Processa todos os documentos existentes para auto-impressão"""

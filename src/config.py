@@ -33,6 +33,7 @@ class AppConfig:
         self.default_config = {
             "theme": self._get_system_theme(),
             "api_url": "https://api.loqquei.com.br/api/v1",
+            "api_port": 50000,
             "auto_print": False,
             "default_printer": "",
             "user": {
