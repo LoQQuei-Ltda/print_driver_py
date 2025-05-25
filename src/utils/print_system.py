@@ -991,6 +991,11 @@ class PrintQueueManager:
                         job_info.completed_pages = result.get("successful_pages", 0)
                         logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
                         
+                        # Extrai o ID do documento do caminho (se existir)
+                        document_id = None
+                        if hasattr(job_info, 'document_id'):
+                            document_id = job_info.document_id
+                        
                         # Tenta excluir o arquivo após impressão bem-sucedida
                         try:
                             if os.path.exists(job_info.document_path):
@@ -998,6 +1003,16 @@ class PrintQueueManager:
                                 logger.info(f"Arquivo removido: {job_info.document_path}")
                         except Exception as e:
                             logger.error(f"Erro ao remover arquivo: {e}")
+                        
+                        # Inicia sincronização com o servidor
+                        try:
+                            from src.utils.print_sync_manager import PrintSyncManager
+                            sync_manager = PrintSyncManager.get_instance()
+                            if sync_manager:
+                                sync_manager.sync_print_jobs()
+                        except Exception as e:
+                            logger.error(f"Erro ao iniciar sincronização: {e}")
+                            
                     else:
                         job_info.status = "failed"
                         job_info.total_pages = result.get("total_pages", 0)

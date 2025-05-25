@@ -319,6 +319,34 @@ class APIClient:
                 return []
             # Propaga outros erros
             raise
+        
+    def sync_print_job(self, date, file_id, asset_id, pages):
+        """
+        Sincroniza um trabalho de impressão com o servidor
+        
+        Args:
+            date (str): Data da impressão (formato ISO)
+            file_id (str): ID do arquivo/trabalho
+            asset_id (str): ID do asset (documento)
+            pages (int): Número de páginas impressas
+            
+        Returns:
+            dict: Resposta do servidor
+        """
+        try:
+            data = {
+                "date": date,
+                "fileId": file_id,
+                "assetId": asset_id,
+                "pages": pages
+            }
+            
+            result = self._make_request("POST", "/desktop/printedByUser", data)
+            logger.info(f"Trabalho de impressão sincronizado: {file_id}")
+            return result
+        except APIError as e:
+            logger.error(f"Erro ao sincronizar trabalho de impressão: {str(e)}")
+            raise
     
 class APIError(Exception):
     """Exceção para erros na API"""

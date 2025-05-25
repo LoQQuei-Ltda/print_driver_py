@@ -130,6 +130,9 @@ class PrintManagementApp(wx.App):
             # Inicializa sistema de impressora virtual
             self._init_virtual_printer()
             
+            # Inicializa o sistema de sincronização de impressão
+            self._init_print_sync()
+            
             # Configura o agendador de tarefas
             from src.utils import TaskScheduler
             from src.tasks import update_printers_task, update_application_task
@@ -153,6 +156,14 @@ class PrintManagementApp(wx.App):
                 "validate_user",
                 lambda: self._validate_user_task(self.api_client, self),
                 60,  # 1 minuto
+                args=()
+            )
+            
+            # Adiciona tarefa de sincronização de impressão a cada 5 minutos
+            self.scheduler.add_task(
+                "sync_print_jobs",
+                self._sync_print_jobs_task,
+                300,  # 5 minutos
                 args=()
             )
 
@@ -192,6 +203,37 @@ class PrintManagementApp(wx.App):
             logger.error(f"Erro ao inicializar aplicação: {str(e)}", exc_info=True)
             wx.MessageBox(f"Erro ao inicializar aplicação: {str(e)}", "Erro", wx.OK | wx.ICON_ERROR)
             return False
+
+    def _init_print_sync(self):
+        """Inicializa o sistema de sincronização de impressão"""
+        try:
+            from src.utils.print_sync_manager import PrintSyncManager
+            
+            # Obtém a instância do gerenciador
+            sync_manager = PrintSyncManager.get_instance()
+            
+            # Inicializa o gerenciador
+            sync_manager.initialize(self.config, self.api_client)
+            
+            # Executa uma sincronização inicial
+            sync_manager.sync_print_jobs()
+            
+            logger.info("Sistema de sincronização de impressão inicializado")
+        except Exception as e:
+            logger.error(f"Erro ao inicializar sistema de sincronização: {str(e)}")
+
+    def _sync_print_jobs_task(self):
+        """Tarefa de sincronização de trabalhos de impressão"""
+        try:
+            from src.utils.print_sync_manager import PrintSyncManager
+            
+            # Obtém a instância do gerenciador
+            sync_manager = PrintSyncManager.get_instance()
+            
+            # Executa a sincronização
+            sync_manager.sync_print_jobs()
+        except Exception as e:
+            logger.error(f"Erro na tarefa de sincronização: {str(e)}")
     
     def _init_virtual_printer(self):
         """Inicializa o sistema de impressora virtual"""

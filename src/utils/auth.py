@@ -82,6 +82,19 @@ class AuthManager:
             bool: True se o logout foi bem-sucedido
         """
         try:
+            # Sincroniza os trabalhos de impressão antes de fazer logout
+            try:
+                from src.utils.print_sync_manager import PrintSyncManager
+                sync_manager = PrintSyncManager.get_instance()
+                if sync_manager and hasattr(sync_manager, 'sync_and_wait'):
+                    logger.info("Sincronizando trabalhos de impressão antes do logout...")
+                    sync_manager.sync_and_wait(timeout=30)
+                    logger.info("Sincronização concluída")
+            except Exception as e:
+                logger.error(f"Erro ao sincronizar trabalhos antes do logout: {str(e)}")
+                return False
+            
+            # Continua com o processo de logout
             self.current_user = None
             self.api_client.set_token(None)
             self.config.clear_user()
