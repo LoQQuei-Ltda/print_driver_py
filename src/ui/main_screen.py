@@ -283,7 +283,8 @@ class MainScreen(wx.Frame):
         menu_items = [
             {"label": "Documentos", "icon": ResourceManager.get_image_path("document.png"), "handler": self.on_show_documents},
             {"label": "Impressoras", "icon": ResourceManager.get_image_path("system.png"), "handler": self.on_show_printers},
-            {"label": "Fila de Impressão", "icon": ResourceManager.get_image_path("printer.png"), "handler": self.on_show_print_queue}
+            {"label": "Fila de Impressão", "icon": ResourceManager.get_image_path("printer.png"), "handler": self.on_show_print_queue},
+            {"label": "Auto-Impressão", "icon": ResourceManager.get_image_path("printer.png"), "handler": self.on_show_auto_print}
         ]
         
         # Criar os botões do menu
@@ -450,9 +451,55 @@ class MainScreen(wx.Frame):
         
         self.main_panel.SetSizer(main_sizer)
         
+        # Cria o painel de auto-impressão (inicialmente oculto)
+        from src.ui.auto_print_config import AutoPrintConfigPanel
+        self.auto_print_panel = AutoPrintConfigPanel(self.content_panel, self.config, self.theme_manager)
+        self.auto_print_panel.Hide()
+
+        # Adiciona ao layout de conteúdo
+        self.content_sizer.Add(self.auto_print_panel, 1, wx.EXPAND)
+
         # Carrega lista de documentos
         self.load_documents()
     
+    def on_show_auto_print(self, event=None):
+        """Mostra o painel de configuração de auto-impressão"""
+        # Destaca o botão selecionado
+        for button in self.menu_buttons:
+            button.SetBackgroundColour(wx.Colour(25, 25, 25))
+        
+        self.menu_buttons[3].SetBackgroundColour(wx.Colour(35, 35, 35))
+        self.selected_menu = self.menu_buttons[3]
+        
+        # Mostra o painel correto
+        self.documents_panel.Hide()
+        self.printers_panel.Hide()
+        self.print_queue_panel.Hide()
+        self.auto_print_panel.Show()
+        
+        # Atualiza o layout
+        self.content_panel.Layout()
+
+    def _update_auto_print_status(self):
+        """Atualiza o indicador visual de auto-impressão"""
+        auto_print_enabled = self.config.get("auto_print", False)
+        
+        # Atualiza a tooltip do botão
+        status_text = "Auto-impressão ativada" if auto_print_enabled else "Auto-impressão desativada"
+        
+        # Verifica se o menu foi inicializado
+        if hasattr(self, 'menu_buttons') and len(self.menu_buttons) > 3:
+            self.menu_buttons[3].SetToolTip(status_text)
+            
+            # Altera a cor do texto do botão se estiver ativo
+            for child in self.menu_buttons[3].GetChildren():
+                if isinstance(child, wx.StaticText):
+                    if auto_print_enabled:
+                        child.SetForegroundColour(wx.Colour(255, 90, 36))  # Cor de destaque (laranja)
+                    else:
+                        child.SetForegroundColour(wx.WHITE)
+                    child.Refresh()
+                    
     def _setup_taskbar_icon(self):
         """Configura o ícone da bandeja do sistema usando a classe corrigida"""
         try:
@@ -476,6 +523,7 @@ class MainScreen(wx.Frame):
         self.documents_panel.Show()
         self.printers_panel.Hide()
         self.print_queue_panel.Hide()
+        self.auto_print_panel.Hide()
         
         # Carrega os documentos
         self.load_documents()
@@ -496,6 +544,7 @@ class MainScreen(wx.Frame):
         self.documents_panel.Hide()
         self.printers_panel.Show()
         self.print_queue_panel.Hide()
+        self.auto_print_panel.Hide()
         
         # Atualiza a lista de impressoras
         if hasattr(self, 'printer_list'):
@@ -517,6 +566,7 @@ class MainScreen(wx.Frame):
         self.documents_panel.Hide()
         self.printers_panel.Hide()
         self.print_queue_panel.Show()
+        self.auto_print_panel.Hide()
         
         # Atualiza a fila de impressão
         self.print_queue_panel.load_jobs()
