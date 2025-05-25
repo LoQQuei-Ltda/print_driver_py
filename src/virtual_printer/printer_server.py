@@ -420,20 +420,7 @@ class PrinterServer:
             return None
     
     def _decode_with_multiple_encodings(self, data):
-        """Tenta decodificar dados com múltiplos encodings"""
-        encodings = [
-            'utf-8',           # UTF-8 (padrão)
-            'utf-16',          # UTF-16 (Windows Unicode)
-            'utf-16-le',       # UTF-16 Little Endian
-            'utf-16-be',       # UTF-16 Big Endian
-            'latin1',          # ISO-8859-1 (Western Europe)
-            'cp1252',          # Windows-1252 (Western Europe)
-            'cp1251',          # Windows-1251 (Cyrillic)
-            'cp1250',          # Windows-1250 (Central Europe)
-            'iso-8859-15',     # ISO-8859-15 (Western Europe with Euro)
-            'ascii',           # ASCII básico
-        ]
-        
+        """Tenta decodificar dados com múltiplos encodings - Versão melhorada"""
         # Se os dados são muito pequenos, tenta como string
         if len(data) < 20:
             try:
@@ -441,17 +428,57 @@ class PrinterServer:
             except:
                 return str(data)
         
+        # Lista expandida de encodings
+        encodings = [
+            'utf-8',           # UTF-8 (padrão)
+            'utf-8-sig',       # UTF-8 com BOM
+            'utf-16',          # UTF-16 (Windows Unicode)
+            'utf-16-le',       # UTF-16 Little Endian
+            'utf-16-be',       # UTF-16 Big Endian
+            'cp1252',          # Windows-1252 (Western Europe)
+            'latin1',          # ISO-8859-1 (Western Europe)
+            'cp850',           # DOS Western Europe
+            'cp437',           # DOS US
+            'cp1251',          # Windows-1251 (Cyrillic)
+            'cp1250',          # Windows-1250 (Central Europe)
+            'cp1253',          # Windows-1253 (Greek)
+            'cp1254',          # Windows-1254 (Turkish)
+            'cp1255',          # Windows-1255 (Hebrew)
+            'cp1256',          # Windows-1256 (Arabic)
+            'cp1257',          # Windows-1257 (Baltic)
+            'cp1258',          # Windows-1258 (Vietnamese)
+            'iso-8859-2',      # ISO-8859-2 (Central/Eastern Europe)
+            'iso-8859-3',      # ISO-8859-3 (South European)
+            'iso-8859-4',      # ISO-8859-4 (North European)
+            'iso-8859-5',      # ISO-8859-5 (Cyrillic)
+            'iso-8859-6',      # ISO-8859-6 (Arabic)
+            'iso-8859-7',      # ISO-8859-7 (Greek)
+            'iso-8859-8',      # ISO-8859-8 (Hebrew)
+            'iso-8859-9',      # ISO-8859-9 (Turkish)
+            'iso-8859-10',     # ISO-8859-10 (Nordic)
+            'iso-8859-11',     # ISO-8859-11 (Thai)
+            'iso-8859-13',     # ISO-8859-13 (Baltic)
+            'iso-8859-14',     # ISO-8859-14 (Celtic)
+            'iso-8859-15',     # ISO-8859-15 (Western Europe with Euro)
+            'iso-8859-16',     # ISO-8859-16 (South-Eastern Europe)
+            'koi8-r',          # KOI8-R (Russian)
+            'koi8-u',          # KOI8-U (Ukrainian)
+            'mac-roman',       # MacRoman
+            'mac-cyrillic',    # MacCyrillic
+            'ascii',           # ASCII básico (fallback)
+        ]
+        
         # Detecta BOM (Byte Order Mark) para UTF
         if data.startswith(b'\xff\xfe'):
             # UTF-16 LE BOM
             try:
-                return data[2:].decode('utf-16-le', errors='replace')
+                return data.decode('utf-16-le', errors='replace')
             except:
                 pass
         elif data.startswith(b'\xfe\xff'):
             # UTF-16 BE BOM
             try:
-                return data[2:].decode('utf-16-be', errors='replace')
+                return data.decode('utf-16-be', errors='replace')
             except:
                 pass
         elif data.startswith(b'\xef\xbb\xbf'):
@@ -461,20 +488,171 @@ class PrinterServer:
             except:
                 pass
         
-        # Tenta cada encoding
+        # Estratégia 1: Tentativa estrita com cada encoding
+        best_encoding = None
+        best_score = -1
+        
         for encoding in encodings:
             try:
                 decoded = data.decode(encoding, errors='strict')
-                # Verifica se a decodificação faz sentido (não há muitos caracteres de controle)
-                if self._is_reasonable_text(decoded):
-                    logger.debug(f"Decodificado com sucesso usando {encoding}")
-                    return decoded
+                
+                # Avalia a qualidade da decodificação
+                score = self._evaluate_text_quality(decoded)
+                
+                if score > best_score:
+                    best_score = score
+                    best_encoding = encoding
+                    
+                    # Se a pontuação é muito alta, usamos imediatamente
+                    if score > 0.95:
+                        logger.debug(f"Decodificação de alta qualidade com {encoding} (score: {score:.2f})")
+                        return decoded
             except (UnicodeDecodeError, LookupError):
                 continue
         
-        # Se nada funcionou, usa UTF-8 com substituição de erros
-        logger.warning("Nenhum encoding funcionou perfeitamente, usando UTF-8 com substituições")
+        # Estratégia 2: Se encontramos um encoding com boa pontuação, use-o
+        if best_encoding and best_score > 0.75:
+            logger.debug(f"Usando encoding {best_encoding} com score {best_score:.2f}")
+            return data.decode(best_encoding, errors='replace')
+        
+        # Estratégia 3: Análise de frequência de bytes para detectar encoding
+        # Muitos PDFs e PS usam encoding específico para caracteres não-ASCII
+        if self._is_likely_pdf_or_ps(data):
+            encodings_to_try = ['cp1252', 'latin1', 'utf-8']
+            for enc in encodings_to_try:
+                try:
+                    decoded = data.decode(enc, errors='replace')
+                    if '�' not in decoded[:1000]:  # Verifica se não há caracteres de substituição no início
+                        logger.debug(f"Decodificado como possível PDF/PS usando {enc}")
+                        return decoded
+                except:
+                    continue
+        
+        # Estratégia 4: Tenta decodificar blocos de texto separadamente
+        # Isso ajuda quando o documento tem mistura de encodings
+        try:
+            segments = []
+            i = 0
+            while i < len(data):
+                # Tenta diferentes tamanhos de bloco e encodings
+                best_segment = None
+                best_segment_score = -1
+                
+                for block_size in [100, 200, 500]:
+                    if i + block_size > len(data):
+                        block_size = len(data) - i
+                    
+                    block = data[i:i+block_size]
+                    
+                    for enc in ['utf-8', 'cp1252', 'latin1']:
+                        try:
+                            decoded_block = block.decode(enc, errors='replace')
+                            score = self._evaluate_text_quality(decoded_block)
+                            
+                            if score > best_segment_score:
+                                best_segment_score = score
+                                best_segment = decoded_block
+                        except:
+                            continue
+                
+                if best_segment:
+                    segments.append(best_segment)
+                    i += block_size
+                else:
+                    # Se nenhum bloco for decodificado bem, avance um byte
+                    i += 1
+            
+            if segments:
+                result = ''.join(segments)
+                return result
+        except:
+            pass
+        
+        # Fallback final: UTF-8 com substituição de erros
+        logger.warning("Todas as estratégias de decodificação falharam, usando UTF-8 com substituições")
         return data.decode('utf-8', errors='replace')
+
+    def _evaluate_text_quality(self, text):
+        """Avalia a qualidade de um texto decodificado com pontuação de 0 a 1"""
+        if not text:
+            return 0
+        
+        # Inicializa contadores
+        total_chars = len(text)
+        printable_chars = 0
+        alpha_chars = 0
+        digit_chars = 0
+        punct_chars = 0
+        whitespace_chars = 0
+        control_chars = 0
+        replacement_chars = 0
+        
+        import string
+        
+        # Conta diferentes tipos de caracteres
+        for c in text:
+            if c in string.printable:
+                printable_chars += 1
+                
+            if c.isalpha():
+                alpha_chars += 1
+            elif c.isdigit():
+                digit_chars += 1
+            elif c in string.punctuation:
+                punct_chars += 1
+            elif c.isspace():
+                whitespace_chars += 1
+            elif ord(c) < 32 and c not in '\t\n\r':
+                control_chars += 1
+            
+            if c == '�':
+                replacement_chars += 1
+        
+        # Calcula proporções
+        control_ratio = control_chars / total_chars if total_chars > 0 else 1
+        replacement_ratio = replacement_chars / total_chars if total_chars > 0 else 1
+        printable_ratio = printable_chars / total_chars if total_chars > 0 else 0
+        text_ratio = (alpha_chars + digit_chars + punct_chars + whitespace_chars) / total_chars if total_chars > 0 else 0
+        
+        # Penaliza fortemente os caracteres de substituição
+        score = 1.0
+        score -= replacement_ratio * 2  # Penaliza caracteres de substituição
+        score -= control_ratio          # Penaliza caracteres de controle
+        score += printable_ratio * 0.3  # Bonifica caracteres imprimíveis
+        score += text_ratio * 0.7       # Bonifica texto real
+        
+        # Ajusta para 0-1
+        score = max(0, min(1, score))
+        
+        return score
+
+    def _is_likely_pdf_or_ps(self, data):
+        """Verifica se os dados parecem ser um PDF ou PostScript"""
+        # Verifica assinaturas comuns
+        if len(data) < 10:
+            return False
+        
+        # Assinaturas comuns
+        signatures = [
+            b'%PDF-',          # PDF
+            b'%!PS-Adobe-',    # PostScript
+            b'%!PS',           # PostScript simplificado
+            b'@PJL',           # HP Printer Job Language
+            b'\x1B%-12345X',   # HP PCL
+        ]
+        
+        # Verifica o início dos dados
+        for sig in signatures:
+            if data.startswith(sig):
+                return True
+        
+        # Busca assinaturas em qualquer lugar nos primeiros bytes
+        first_1k = data[:1024] if len(data) > 1024 else data
+        for sig in signatures:
+            if sig in first_1k:
+                return True
+        
+        return False
     
     def _is_reasonable_text(self, text):
         """Verifica se o texto decodificado é razoável"""
@@ -488,62 +666,68 @@ class PrinterServer:
         return (control_chars / len(text)) < 0.05
     
     def _clean_filename(self, filename):
-        """Limpa e normaliza o nome do arquivo mantendo caracteres especiais permitidos"""
+        """Limpa e normaliza o nome do arquivo mantendo caracteres especiais - Versão melhorada"""
         if not filename:
             return None
         
         # Remove espaços extras
         filename = filename.strip()
         
-        # Normaliza caracteres Unicode (mantém acentos e caracteres especiais)
+        # Normaliza caracteres Unicode (forma NFC - composta)
+        import unicodedata
         filename = unicodedata.normalize('NFC', filename)
         
-        # Caracteres permitidos: letras (incluindo acentuadas), números, espaços e símbolos especiais
-        # Baseado na lista fornecida: "áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ!#$%&'()-@^_`{}~,;=+[]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻"
-        allowed_chars = (
-            'abcdefghijklmnopqrstuvwxyz'
-            'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-            '0123456789'
-            'áàâãäéèêëíìîïóòôõöúùûüçñ'
-            'ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ'
-            '!#$%&\'()-@^_`{}~,;=+[]'
-            'ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻'
-            ' .'  # espaço e ponto
-        )
+        # Caracteres problemáticos em sistemas de arquivo
+        # Apenas os caracteres realmente impossíveis de usar em qualquer sistema
+        problematic_chars = '<>:"|?*\\/\x00'
         
-        # Remove apenas caracteres realmente problemáticos para sistemas de arquivo
-        # Mantém todos os caracteres da lista fornecida
-        problematic_chars = '<>:"|?*\\/\x00'  # Caracteres que causam problemas em sistemas de arquivo
+        # Substitui caracteres problemáticos por aproximações seguras em vez de removê-los
+        replacements = {
+            '<': '＜',  # Versão de largura total
+            '>': '＞',  # Versão de largura total
+            ':': '：',  # Versão de largura total
+            '"': '＂',  # Versão de largura total
+            '|': '｜',  # Versão de largura total
+            '?': '？',  # Versão de largura total
+            '*': '＊',  # Versão de largura total
+            '\\': '＼', # Versão de largura total
+            '/': '／',  # Versão de largura total
+            '\x00': '',  # Nulo não tem substituto
+        }
         
-        cleaned = ''.join(c for c in filename if c not in problematic_chars)
+        # Aplica substituições
+        for char, replacement in replacements.items():
+            filename = filename.replace(char, replacement)
         
         # Remove múltiplos espaços
-        cleaned = re.sub(r'\s+', ' ', cleaned)
+        import re
+        filename = re.sub(r'\s+', ' ', filename)
         
         # Remove espaços no início e fim
-        cleaned = cleaned.strip()
+        filename = filename.strip()
         
         # Se ficou vazio, retorna None
-        if not cleaned:
+        if not filename:
             return None
         
         # Limita o tamanho (sistemas de arquivo têm limites)
         max_length = 200  # Deixa espaço para extensão e sufixos
-        if len(cleaned) > max_length:
+        if len(filename) > max_length:
             # Tenta preservar a extensão
-            if '.' in cleaned:
-                name_part, ext_part = cleaned.rsplit('.', 1)
+            if '.' in filename:
+                name_part, ext_part = filename.rsplit('.', 1)
                 available_length = max_length - len(ext_part) - 1  # -1 para o ponto
-                cleaned = name_part[:available_length] + '.' + ext_part
+                filename = name_part[:available_length] + '.' + ext_part
             else:
-                cleaned = cleaned[:max_length]
+                filename = filename[:max_length]
         
-        return cleaned
+        return filename
+
     
     def _extract_pdf_filename(self, data):
-        """Extrai o nome do arquivo diretamente de dados PDF"""
+        """Extrai o nome do arquivo diretamente de dados PDF - Versão melhorada"""
         try:
-            # Primeiro, tenta decodificar como texto
+            # Primeiro, tenta decodificar como texto com métodos melhorados
             pdf_text = self._decode_with_multiple_encodings(data)
             
             # Padrões para metadados PDF
@@ -554,6 +738,9 @@ class PrinterServer:
                 r'/Filename\s*\(([^)]+)\)',
                 r'/DocumentName\s*\(([^)]+)\)',
                 r'/Subject\s*\(([^)]+)\)',
+                
+                # Padrões com escape
+                r'/Title\s*\(([^)\\]+(?:\\.[^)\\]*)*)\)',
                 
                 # Padrões com hex encoding
                 r'/Title\s*<([0-9A-Fa-f]+)>',
@@ -570,38 +757,70 @@ class PrinterServer:
                 r'/Producer\s*\(([^)]+)\)',
             ]
             
+            import re
+            
             for pattern in title_patterns:
                 matches = re.findall(pattern, pdf_text, re.IGNORECASE | re.DOTALL)
                 if matches:
                     for match in matches:
                         title = match.strip()
                         
-                        # Se é hex string, converte
+                        # Se é hex string, converte - algoritmo melhorado
                         if re.match(r'^[0-9A-Fa-f]+$', title) and len(title) % 2 == 0:
                             try:
-                                # Tenta UTF-16 BE primeiro (comum em PDFs)
-                                if title.upper().startswith('FEFF'):
+                                # Tenta diferentes interpretações da string hex
+                                decoded_versions = []
+                                
+                                # UTF-16BE (comum em PDFs)
+                                try:
                                     hex_bytes = bytes.fromhex(title)
-                                    title = hex_bytes[2:].decode('utf-16-be', errors='ignore')
-                                else:
+                                    if title.upper().startswith('FEFF'):
+                                        # BOM UTF-16BE
+                                        decoded = hex_bytes[2:].decode('utf-16-be', errors='replace')
+                                    else:
+                                        decoded = hex_bytes.decode('utf-16-be', errors='replace')
+                                    if decoded and not all(c == '�' for c in decoded):
+                                        decoded_versions.append(decoded)
+                                except:
+                                    pass
+                                    
+                                # UTF-8
+                                try:
                                     hex_bytes = bytes.fromhex(title)
-                                    title = hex_bytes.decode('utf-16-be', errors='ignore')
-                                    if not title or len(title) < 3:
-                                        title = hex_bytes.decode('utf-8', errors='ignore')
+                                    decoded = hex_bytes.decode('utf-8', errors='replace')
+                                    if decoded and not all(c == '�' for c in decoded):
+                                        decoded_versions.append(decoded)
+                                except:
+                                    pass
+                                    
+                                # CP1252/Latin1 (comum em documentos antigos)
+                                try:
+                                    hex_bytes = bytes.fromhex(title)
+                                    decoded = hex_bytes.decode('cp1252', errors='replace')
+                                    if decoded and not all(c == '�' for c in decoded):
+                                        decoded_versions.append(decoded)
+                                except:
+                                    pass
+                                
+                                # Escolhe o melhor resultado
+                                if decoded_versions:
+                                    # Ordena por qualidade da decodificação
+                                    decoded_versions.sort(key=lambda x: self._evaluate_text_quality(x), reverse=True)
+                                    title = decoded_versions[0]
                             except:
                                 continue
                         
-                        # Remove caracteres de escape
-                        title = title.replace('\\(', '(').replace('\\)', ')').replace('\\\\', '\\')
+                        # Remove caracteres de escape de forma robusta
+                        title = re.sub(r'\\(.)', r'\1', title)
                         
                         # Se parece um nome de arquivo válido
                         if title and len(title) > 2 and not title.isspace():
-                            print(f"Nome extraído do PDF (padrão {pattern}): {title}")
                             logger.info(f"Nome extraído do PDF (padrão {pattern}): {title}")
                             return title
-            
+                
             # Busca por nomes de arquivo com extensões conhecidas em qualquer lugar do PDF
-            file_extensions = ['.pdf', '.txt', '.doc', '.xls', '.xlsx', '.docx', '.pptx', '.ppt', '.rtf', '.odt', '.ods']
+            file_extensions = ['.pdf', '.txt', '.doc', '.xls', '.xlsx', '.docx', '.pptx', '.ppt', '.rtf', '.odt', '.ods',
+                            '.jpg', '.jpeg', '.png', '.gif', '.csv', '.xml', '.html', '.zip']
             for ext in file_extensions:
                 # Padrão mais abrangente que captura nomes com caracteres especiais
                 pattern = r'([^\\/\s:"\'<>|*?]{3,}' + re.escape(ext) + r')'
@@ -620,16 +839,38 @@ class PrinterServer:
             return None
 
     def _extract_from_header(self, ps_text):
-        """Extrai o nome do arquivo do cabeçalho PS usando múltiplos métodos melhorados"""
+        """Extrai o nome do arquivo do cabeçalho PS usando múltiplos métodos - Versão melhorada"""
         # Verifica se há cabeçalho antes do PostScript
-        header_text = ps_text.split('%!PS-', 1)[0] if '%!PS-' in ps_text else ps_text[:3000]  # Aumentado ainda mais
+        header_text = ps_text.split('%!PS-', 1)[0] if '%!PS-' in ps_text else ps_text[:4000]
         
         logger.debug("Analisando cabeçalho do trabalho...")
         logger.debug(f"Primeiros 500 caracteres do cabeçalho: {header_text[:500]}")
         
         filename = None
         
-        # ----- PADRÕES MELHORADOS PARA MICROSOFT OFFICE -----
+        import re
+        
+        # Função interna para limpar nomes extraídos
+        def clean_extracted_name(value):
+            if not value:
+                return None
+                
+            # Remove caracteres de controle e espaços extras
+            value = re.sub(r'[\x00-\x1F\x7F]', '', value).strip()
+            
+            # Remove aspas se existirem
+            if value.startswith('"') and value.endswith('"'):
+                value = value[1:-1]
+                
+            # Se for um caminho, extrair apenas o nome do arquivo
+            if '\\' in value or '/' in value:
+                extracted_name = re.split(r'[/\\]', value)[-1]
+            else:
+                extracted_name = value
+                
+            return extracted_name
+        
+        # ----- PADRÕES MELHORADOS PARA IMPRESSÃO -----
         ms_office_patterns = [
             ('@PJL SET JOBNAME="', '"'),
             ('@PJL JOB NAME="', '"'),
@@ -646,6 +887,7 @@ class PrinterServer:
             ('%%For: ', '\n'),
         ]
         
+        # Primeiro tenta padrões de delimitadores
         for start_pattern, end_pattern in ms_office_patterns:
             if start_pattern in header_text:
                 logger.debug(f"Padrão encontrado: {start_pattern}")
@@ -663,11 +905,7 @@ class PrinterServer:
                     value = header_text[start_idx:end_idx].strip()
                     logger.debug(f"Valor extraído: {value}")
                     
-                    # Se for um caminho, extrair apenas o nome do arquivo
-                    if '\\' in value or '/' in value:
-                        extracted_name = os.path.basename(value)
-                    else:
-                        extracted_name = value
+                    extracted_name = clean_extracted_name(value)
                     
                     # Verifica se parece ser um nome de arquivo válido
                     if extracted_name and len(extracted_name) > 2:
@@ -677,64 +915,57 @@ class PrinterServer:
                             logger.info(f"Nome de arquivo extraído (padrão {start_pattern}): {filename}")
                             break
         
-        # ----- PADRÕES REGEX MELHORADOS -----
+        # Se não encontrou com os padrões de delimitadores, tenta regex mais abrangentes
         if not filename:
             logger.debug("Tentando padrões regex melhorados...")
             
             regex_patterns = [
-                # PostScript DSC comments
+                # PostScript DSC comments - padrões melhorados
                 r'%%Title:\s*(.+?)(?:\n|\r|$)',
                 r'%%DocumentName:\s*(.+?)(?:\n|\r|$)',
                 r'%%For:\s*(.+?)(?:\n|\r|$)',
                 
-                # PJL patterns sem aspas
-                r'@PJL\s+SET\s+JOBNAME\s*=\s*([^\s\n\r]+)',
-                r'@PJL\s+JOB\s+NAME\s*=\s*([^\s\n\r]+)',
-                r'@PJL\s+SET\s+DOCNAME\s*=\s*([^\s\n\r]+)',
+                # PJL patterns sem aspas - mais abrangentes
+                r'@PJL\s+SET\s+JOBNAME\s*=\s*([^\s\n\r"]+)',
+                r'@PJL\s+JOB\s+NAME\s*=\s*([^\s\n\r"]+)',
+                r'@PJL\s+SET\s+DOCNAME\s*=\s*([^\s\n\r"]+)',
+                
+                # PJL patterns com aspas - busca mais robusta
+                r'@PJL[^\n\r"]*"([^"]+)"',
                 
                 # PostScript title/name
-                r'/Title\s*\(([^)]+)\)',
-                r'/DocumentName\s*\(([^)]+)\)',
-                r'/Creator\s*\(([^)]+)\)',
+                r'/Title\s*\(([^)]+(?:\\\)[^)]*)*)\)',  # Lida com parênteses escapados
+                r'/DocumentName\s*\(([^)]+(?:\\\)[^)]*)*)\)',
+                r'/Creator\s*\(([^)]+(?:\\\)[^)]*)*)\)',
                 
-                # Caminhos de arquivo em qualquer lugar
-                r'[\\/]([^\\/\s"\'<>|*?:]{3,}\.[a-zA-Z]{2,4})(?=[\s\n\r"\'<>|*?:]|$)',
+                # Caminhos de arquivo em qualquer lugar - mais abrangentes
+                r'[\\/]([^\\/\s"\'<>|*?:]{3,}\.[a-zA-Z0-9]{2,6})(?=[\s\n\r"\'<>|*?:]|$)',
                 
                 # Nomes que parecem arquivos (com pelo menos uma extensão comum)
-                r'\b([a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]]{3,}\.[a-zA-Z]{2,4})\b',
+                r'\b([a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]]{3,}\.[a-zA-Z0-9]{2,6})\b',
             ]
             
             for pattern in regex_patterns:
                 matches = re.findall(pattern, ps_text, re.MULTILINE | re.UNICODE | re.IGNORECASE)
                 if matches:
                     for match in matches:
-                        value = match.strip()
+                        extracted_name = clean_extracted_name(match)
                         
-                        # Remove aspas se existirem
-                        if value.startswith('"') and value.endswith('"'):
-                            value = value[1:-1]
-                        
-                        logger.debug(f"Regex match encontrado: {value}")
-                        
-                        # Se for um caminho, extrair apenas o nome do arquivo
-                        if '\\' in value or '/' in value:
-                            extracted_name = os.path.basename(value)
-                        else:
-                            extracted_name = value
+                        logger.debug(f"Regex match encontrado: {extracted_name}")
                         
                         # Verifica se é um nome válido
                         if extracted_name and len(extracted_name) > 2:
                             # Filtra nomes que são claramente inválidos
                             invalid_names = ['microsoft', 'windows', 'system', 'temp', 'tmp', 'default']
-                            if extracted_name.lower() not in invalid_names:
+                            if not any(invalid.lower() in extracted_name.lower() for invalid in invalid_names):
                                 filename = extracted_name
                                 logger.info(f"Nome de arquivo extraído por regex: {filename}")
                                 break
-                
-                if filename:
-                    break
+                    
+                    if filename:
+                        break
         
-        # ----- BUSCA POR QUALQUER EXTENSÃO CONHECIDA -----
+        # Se ainda não encontrou, tenta buscar extensões conhecidas
         if not filename:
             logger.debug("Buscando por extensões conhecidas...")
             
@@ -756,14 +987,15 @@ class PrinterServer:
                     # Filtra e ordena por qualidade
                     valid_matches = []
                     for match in matches:
-                        if len(match) > len(ext) + 1 and not match.startswith('.'):
+                        extracted_name = clean_extracted_name(match)
+                        if extracted_name and len(extracted_name) > len(ext) + 1 and not extracted_name.startswith('.'):
                             # Pontuação: prefer nomes mais longos e com caracteres "normais"
-                            score = len(match)
-                            if any(c.isalpha() for c in match):
+                            score = len(extracted_name)
+                            if any(c.isalpha() for c in extracted_name):
                                 score += 10
-                            if any(c.isdigit() for c in match):
+                            if any(c.isdigit() for c in extracted_name):
                                 score += 5
-                            valid_matches.append((score, match))
+                            valid_matches.append((score, extracted_name))
                     
                     if valid_matches:
                         # Pega o match com maior pontuação
@@ -772,28 +1004,37 @@ class PrinterServer:
                         logger.info(f"Nome de arquivo extraído por extensão ({ext}): {filename}")
                         break
         
-        # ----- BUSCA FINAL POR QUALQUER SEQUÊNCIA QUE PAREÇA NOME DE ARQUIVO -----
+        # Tentativa final para nomes sem extensão mas que parecem válidos
         if not filename:
             logger.debug("Tentativa final: busca por qualquer nome aparente...")
             
-            # Busca por sequências que parecem nomes de arquivo
-            # Aceita letras, números, espaços, e caracteres especiais da lista
-            pattern = r'\b([a-zA-ZÀ-ÿ0-9][a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻]{2,}\.[a-zA-Z]{2,4})\b'
-            matches = re.findall(pattern, ps_text, re.UNICODE)
+            # Busca por sequências que parecem nomes de documento
+            patterns = [
+                # Padrões comuns de nomeação de documentos
+                r'(?:Documento|Document|Arquivo|File|Relatório|Report|Planilha|Spreadsheet|Apresentação|Presentation|Fatura|Invoice|Recibo|Receipt|Contrato|Contract)[\s_-]*([a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻]{3,})',
+                
+                # Nomes sem extensão mas com caracteres válidos
+                r'\b([a-zA-ZÀ-ÿ][a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻]{5,})\b',
+            ]
             
-            if matches:
-                # Filtra matches muito genéricos
+            for pattern in patterns:
+                matches = re.findall(pattern, ps_text, re.UNICODE | re.IGNORECASE)
                 filtered_matches = []
+                
                 for match in matches:
-                    match = match.strip()
-                    # Evita nomes muito genéricos ou muito curtos
-                    if len(match) > 6 and not any(generic in match.lower() for generic in 
-                                                  ['default', 'temp', 'tmp', 'unnamed', 'document', 'file']):
-                        filtered_matches.append(match)
+                    extracted_name = clean_extracted_name(match)
+                    if extracted_name and len(extracted_name) > 5:
+                        # Filtra nomes muito genéricos ou muito curtos
+                        if not any(generic in extracted_name.lower() for generic in 
+                                ['default', 'temp', 'tmp', 'unnamed', 'document', 'file']):
+                            filtered_matches.append(extracted_name)
                 
                 if filtered_matches:
-                    filename = filtered_matches[0]  # Pega o primeiro válido
-                    logger.info(f"Nome de arquivo da busca final: {filename}")
+                    # Usa o nome mais longo
+                    filtered_matches.sort(key=len, reverse=True)
+                    filename = filtered_matches[0]
+                    logger.info(f"Nome extraído da busca final: {filename}")
+                    break
         
         return filename
     
