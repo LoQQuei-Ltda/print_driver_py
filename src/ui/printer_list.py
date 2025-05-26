@@ -16,7 +16,6 @@ from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
 
-    
 class PrinterCardPanel(wx.Panel):
     """Painel de card para exibir uma impressora"""
     
@@ -61,6 +60,8 @@ class PrinterCardPanel(wx.Panel):
                 bitmap=wx.Bitmap(printer_icon_path),
                 size=(32, 32)
             )
+            # Adiciona eventos de hover e clique ao ícone
+            self._add_child_events(printer_icon)
             main_sizer.Add(printer_icon, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
         
         # Painel de informações (centro)
@@ -72,6 +73,8 @@ class PrinterCardPanel(wx.Panel):
         printer_name = wx.StaticText(info_panel, label=self.printer.name)
         printer_name.SetForegroundColour(wx.WHITE)
         printer_name.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        # Adiciona eventos de hover e clique ao nome
+        self._add_child_events(printer_name)
         info_sizer.Add(printer_name, 0, wx.BOTTOM, 5)
         
         # Detalhes da impressora
@@ -88,6 +91,8 @@ class PrinterCardPanel(wx.Panel):
         details1 = wx.StaticText(info_panel, label=details_line1 or "Impressora local")
         details1.SetForegroundColour(wx.Colour(180, 180, 180))
         details1.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        # Adiciona eventos de hover e clique aos detalhes
+        self._add_child_events(details1)
         info_sizer.Add(details1, 0, wx.BOTTOM, 3)
         
         # Linha 2: Modelo e localização
@@ -104,8 +109,12 @@ class PrinterCardPanel(wx.Panel):
             details2 = wx.StaticText(info_panel, label=details_line2)
             details2.SetForegroundColour(wx.Colour(180, 180, 180))
             details2.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+            # Adiciona eventos de hover e clique aos detalhes
+            self._add_child_events(details2)
             info_sizer.Add(details2, 0)
         
+        # Adiciona eventos ao painel de informações
+        self._add_child_events(info_panel)
         info_panel.SetSizer(info_sizer)
         main_sizer.Add(info_panel, 1, wx.EXPAND | wx.ALL, 10)
         
@@ -136,6 +145,8 @@ class PrinterCardPanel(wx.Panel):
             dc.DrawCircle(10, 10, 6)
         
         status_panel.Bind(wx.EVT_PAINT, on_status_paint)
+        # Adiciona eventos ao painel de status
+        self._add_child_events(status_panel)
         main_sizer.Add(status_panel, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 15)
         
         # Se tem callback de seleção, adiciona um texto de dica
@@ -143,22 +154,69 @@ class PrinterCardPanel(wx.Panel):
             tip_text = wx.StaticText(self, label="Clique para detalhes")
             tip_text.SetForegroundColour(wx.Colour(180, 180, 180))
             # Adicionar os eventos de hover e clique ao texto de dica
-            tip_text.Bind(wx.EVT_LEFT_DOWN, self.on_click)
-            tip_text.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_enter(evt))
-            tip_text.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_leave(evt))
+            self._add_child_events(tip_text)
             main_sizer.Add(tip_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         
         self.SetSizer(main_sizer)
     
+    def _add_child_events(self, widget):
+        """
+        Adiciona eventos de hover e clique a um widget filho
+        
+        Args:
+            widget: Widget ao qual adicionar eventos
+        """
+        if self.on_select:
+            widget.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+        
+        widget.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
+        widget.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
+        
+        # Adicionar recursivamente a todos os filhos
+        for child in widget.GetChildren():
+            self._add_child_events(child)
+    
+    def _update_hover_state(self, is_hover):
+        """
+        Atualiza o estado de hover para todos os elementos do card
+        
+        Args:
+            is_hover: True se estiver em estado de hover, False caso contrário
+        """
+        self.hover = is_hover
+        
+        # Atualiza a cor de fundo de todos os painéis filhos
+        bg_color = wx.Colour(45, 45, 45) if is_hover else wx.Colour(35, 35, 35)
+        self.SetBackgroundColour(bg_color)
+        
+        # Atualiza a cor de todos os painéis filhos
+        for child in self.GetChildren():
+            if isinstance(child, wx.Panel):
+                child.SetBackgroundColour(bg_color)
+        
+        self.Refresh()
+    
     def on_enter(self, event):
         """Manipula o evento de mouse sobre o card"""
-        self.hover = True
-        self.Refresh()
+        # Captura o mouse para evitar problemas com leave/enter entre filhos
+        if not self.hover:
+            self._update_hover_state(True)
+            
+            # Propaga o evento
+            event.Skip()
     
     def on_leave(self, event):
         """Manipula o evento de mouse saindo do card"""
-        self.hover = False
-        self.Refresh()
+        # Verifica se o mouse ainda está dentro do card (pode estar em um filho)
+        screen_pos = wx.GetMousePosition()
+        client_pos = self.ScreenToClient(screen_pos)
+        
+        # Se o mouse saiu realmente do card (e não apenas entrou em um filho)
+        if not self.GetClientRect().Contains(client_pos):
+            self._update_hover_state(False)
+        
+        # Propaga o evento
+        event.Skip()
     
     def on_click(self, event):
         """Manipula o clique no card"""

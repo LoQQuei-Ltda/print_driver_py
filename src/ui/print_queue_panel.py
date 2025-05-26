@@ -125,7 +125,7 @@ class PrintQueuePanel(wx.Panel):
         if hasattr(self.job_list, 'GetMainWindow'):
             main_window = self.job_list.GetMainWindow()
             if main_window:
-                main_window.SetBackgroundColour(self.colors["panel_bg"])
+                main_window.SetBackgroundColour(self.colors["card_bg"])
         
         # Adiciona colunas
         self.job_list.InsertColumn(0, "ID", width=80)
