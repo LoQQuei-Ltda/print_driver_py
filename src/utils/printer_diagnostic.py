@@ -13,6 +13,7 @@ import subprocess
 import socket
 import tempfile
 import threading
+import platform
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrinterDiagnostic")
 
@@ -30,6 +31,7 @@ class PrinterDiagnostic:
         self.printer = printer
         self.callback = callback
         self.results = {}
+        self.system = platform.system()
         
     def run_diagnostics(self):
         """
@@ -359,9 +361,11 @@ class PrinterDiagnostic:
             if sys.platform.startswith("win"):
                 # Windows
                 cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             else:
                 # Linux/macOS
                 cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
+                flags = 0
             
             # Executa o comando
             result = subprocess.run(
@@ -369,7 +373,7 @@ class PrinterDiagnostic:
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE,
                 timeout=timeout + 1,
-                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                creationflags=flags
             )
             
             # Retorna True se o comando foi bem-sucedido

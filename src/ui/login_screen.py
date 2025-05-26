@@ -271,8 +271,8 @@ class LoginScreen(wx.Frame):
         self.password_input.Bind(wx.EVT_TEXT_ENTER, self.on_login)
         
         # Preencher com os valores padrão para testes
-        self.email_input.SetValue("eduardo.sirino@loqquei.com.br")
-        self.password_input.SetValue("EdusEdus@747466")
+        # self.email_input.SetValue("eduardo.sirino@loqquei.com.br")
+        # self.password_input.SetValue("EdusEdus@747466")
     
     def _scale_bitmap(self, bitmap, width, height):
         """Redimensiona um bitmap para o tamanho especificado"""

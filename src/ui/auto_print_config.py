@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Painel de configuração de auto-impressão
+Painel de configuração de auto-impressão com layout corrigido - Dropdowns nativos
 """
 
 import wx
@@ -12,221 +12,24 @@ from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.AutoPrintConfig")
 
-class CustomDropdown(wx.Panel):
-    """Dropdown completamente customizado com cores escuras"""
+class StyledChoice(wx.Choice):
+    """wx.Choice com estilização customizada para tema escuro"""
     
-    def __init__(self, parent, choices, colors, size=(-1, 35)):
-        super().__init__(parent, size=size)
+    def __init__(self, parent, choices, colors, size=(250, 35)):
+        super().__init__(parent, choices=choices, size=size, style=wx.BORDER_NONE)
         
-        self.choices = choices
-        self.colors = colors
-        self.selected_index = 0
-        self.selected_text = choices[0] if choices else ""
-        self.expanded = False
-        self.dropdown_popup = None
-        
-        # Configura o painel principal
+        # Aplica cores para tema escuro
         self.SetBackgroundColour(wx.Colour(45, 45, 45))
-        self.SetMinSize(size)
+        self.SetForegroundColour(colors["text_color"])
         
-        # Layout
-        self.sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-        # Texto selecionado
-        self.text_label = wx.StaticText(self, label=self.selected_text)
-        self.text_label.SetForegroundColour(colors["text_color"])
-        self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-        
-        # Seta dropdown
-        self.arrow_label = wx.StaticText(self, label=" ▼")
-        self.arrow_label.SetForegroundColour(colors["text_secondary"])
-        self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-        
-        # Layout
-        self.sizer.Add(self.text_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-        self.sizer.Add(self.arrow_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
-        self.SetSizer(self.sizer)
-        
-        # Eventos
-        self.Bind(wx.EVT_LEFT_DOWN, self.on_click)
-        self.text_label.Bind(wx.EVT_LEFT_DOWN, self.on_click)
-        self.arrow_label.Bind(wx.EVT_LEFT_DOWN, self.on_click)
-        
-        # Hover effects
-        self.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
-        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
-        self.text_label.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
-        self.text_label.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
-        self.arrow_label.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
-        self.arrow_label.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
-        
-        # Paint event para borda
-        self.Bind(wx.EVT_PAINT, self.on_paint)
-        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
-    
-    def on_paint(self, event):
-        """Desenha borda arredondada"""
-        dc = wx.BufferedPaintDC(self)
-        dc.Clear()
-        
-        rect = self.GetClientRect()
-        
-        # Fundo
-        dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
-        dc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))
-        dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, 4)
-    
-    def on_enter(self, event):
-        """Hover effect"""
-        self.SetBackgroundColour(wx.Colour(55, 55, 55))
-        self.text_label.SetBackgroundColour(wx.Colour(55, 55, 55))
-        self.arrow_label.SetBackgroundColour(wx.Colour(55, 55, 55))
-        self.Refresh()
-    
-    def on_leave(self, event):
-        """Remove hover effect"""
-        if not self.expanded:
-            self.SetBackgroundColour(wx.Colour(45, 45, 45))
-            self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-            self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-            self.Refresh()
-    
-    def on_click(self, event):
-        """Abre/fecha dropdown"""
-        if self.expanded:
-            self.hide_dropdown()
-        else:
-            self.show_dropdown()
-    
-    def show_dropdown(self):
-        """Mostra lista dropdown"""
-        if self.expanded or not self.choices:
-            return
-            
-        self.expanded = True
-        self.arrow_label.SetLabel(" ▲")
-        
-        # Posição do popup
-        pos = self.ClientToScreen((0, self.GetSize().height))
-        size = (self.GetSize().width, min(len(self.choices) * 25 + 4, 200))
-        
-        # Cria popup
-        self.dropdown_popup = wx.PopupWindow(self, flags=wx.BORDER_NONE)
-        self.dropdown_popup.SetSize(size)
-        self.dropdown_popup.SetPosition(pos)
-        self.dropdown_popup.SetBackgroundColour(wx.Colour(40, 40, 40))
-        
-        # Lista de opções
-        list_panel = wx.Panel(self.dropdown_popup)
-        list_panel.SetBackgroundColour(wx.Colour(40, 40, 40))
-        list_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Adiciona cada opção
-        self.option_labels = []
-        for i, choice in enumerate(self.choices):
-            option = wx.Panel(list_panel, size=(-1, 25))
-            option.SetBackgroundColour(wx.Colour(50, 50, 50) if i == self.selected_index else wx.Colour(40, 40, 40))
-            
-            option_sizer = wx.BoxSizer(wx.HORIZONTAL)
-            option_label = wx.StaticText(option, label=choice)
-            option_label.SetForegroundColour(self.colors["text_color"])
-            option_label.SetBackgroundColour(option.GetBackgroundColour())
-            
-            option_sizer.Add(option_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
-            option.SetSizer(option_sizer)
-            
-            # Eventos
-            option.choice_index = i
-            option.Bind(wx.EVT_LEFT_DOWN, self.on_option_click)
-            option_label.Bind(wx.EVT_LEFT_DOWN, self.on_option_click)
-            option.Bind(wx.EVT_ENTER_WINDOW, lambda evt, opt=option, lbl=option_label: self.on_option_hover(evt, opt, lbl))
-            option.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, opt=option, lbl=option_label, idx=i: self.on_option_leave(evt, opt, lbl, idx))
-            option_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt, opt=option, lbl=option_label: self.on_option_hover(evt, opt, lbl))
-            option_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, opt=option, lbl=option_label, idx=i: self.on_option_leave(evt, opt, lbl, idx))
-            
-            list_sizer.Add(option, 0, wx.EXPAND | wx.ALL, 1)
-            self.option_labels.append((option, option_label))
-        
-        list_panel.SetSizer(list_sizer)
-        
-        # Sizer do popup
-        popup_sizer = wx.BoxSizer(wx.VERTICAL)
-        popup_sizer.Add(list_panel, 1, wx.EXPAND)
-        self.dropdown_popup.SetSizer(popup_sizer)
-        
-        # Mostra popup
-        self.dropdown_popup.Show()
-        
-        # Captura cliques fora para fechar
-        self.dropdown_popup.Bind(wx.EVT_KILL_FOCUS, self.on_lose_focus)
-    
-    def on_option_hover(self, event, option, label):
-        """Hover na opção"""
-        option.SetBackgroundColour(wx.Colour(60, 60, 60))
-        label.SetBackgroundColour(wx.Colour(60, 60, 60))
-        option.Refresh()
-    
-    def on_option_leave(self, event, option, label, index):
-        """Remove hover da opção"""
-        bg_color = wx.Colour(50, 50, 50) if index == self.selected_index else wx.Colour(40, 40, 40)
-        option.SetBackgroundColour(bg_color)
-        label.SetBackgroundColour(bg_color)
-        option.Refresh()
-    
-    def on_option_click(self, event):
-        """Seleciona opção"""
-        option = event.GetEventObject()
-        if hasattr(option, 'choice_index'):
-            index = option.choice_index
-        else:
-            # Se clicou no label, pega o painel pai
-            index = option.GetParent().choice_index
-        
-        self.SetSelection(index)
-        self.hide_dropdown()
-    
-    def on_lose_focus(self, event):
-        """Fecha dropdown quando perde foco"""
-        self.hide_dropdown()
-    
-    def hide_dropdown(self):
-        """Esconde dropdown"""
-        if not self.expanded:
-            return
-            
-        self.expanded = False
-        self.arrow_label.SetLabel(" ▼")
-        
-        if self.dropdown_popup:
-            self.dropdown_popup.Destroy()
-            self.dropdown_popup = None
-        
-        # Restaura cor normal
-        self.SetBackgroundColour(wx.Colour(45, 45, 45))
-        self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-        self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
-        self.Refresh()
-    
-    def SetSelection(self, index):
-        """Define seleção"""
-        if 0 <= index < len(self.choices):
-            self.selected_index = index
-            self.selected_text = self.choices[index]
-            self.text_label.SetLabel(self.selected_text)
-            self.Refresh()
-    
-    def GetSelection(self):
-        """Retorna índice selecionado"""
-        return self.selected_index
-    
-    def GetStringSelection(self):
-        """Retorna texto selecionado"""
-        return self.selected_text
+        # Define fonte
+        font = wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.SetFont(font)
 
 class CustomSpinCtrl(wx.Panel):
     """SpinCtrl completamente customizado"""
     
-    def __init__(self, parent, min_val, max_val, initial, colors, size=(-1, 35)):
+    def __init__(self, parent, min_val, max_val, initial, colors, size=(250, 35)):
         super().__init__(parent, size=size)
         
         self.min_val = min_val
@@ -248,56 +51,13 @@ class CustomSpinCtrl(wx.Panel):
         # Painel de botões
         btn_panel = wx.Panel(self, size=(20, -1))
         btn_panel.SetBackgroundColour(wx.Colour(45, 45, 45))
-        btn_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Botão up
-        self.btn_up = wx.Panel(btn_panel, size=(20, 17))
-        self.btn_up.SetBackgroundColour(wx.Colour(60, 60, 60))
-        up_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        up_label = wx.StaticText(self.btn_up, label="▲")
-        up_label.SetForegroundColour(colors["text_color"])
-        up_label.SetBackgroundColour(wx.Colour(60, 60, 60))
-        up_label.SetFont(wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        up_sizer.Add(up_label, 0, wx.ALIGN_CENTER)
-        self.btn_up.SetSizer(up_sizer)
-        
-        # Botão down
-        self.btn_down = wx.Panel(btn_panel, size=(20, 17))
-        self.btn_down.SetBackgroundColour(wx.Colour(60, 60, 60))
-        down_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        down_label = wx.StaticText(self.btn_down, label="▼")
-        down_label.SetForegroundColour(colors["text_color"])
-        down_label.SetBackgroundColour(wx.Colour(60, 60, 60))
-        down_label.SetFont(wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        down_sizer.Add(down_label, 0, wx.ALIGN_CENTER)
-        self.btn_down.SetSizer(down_sizer)
-        
-        btn_sizer.Add(self.btn_up, 0, wx.EXPAND)
-        btn_sizer.Add(self.btn_down, 0, wx.EXPAND | wx.TOP, 1)
-        btn_panel.SetSizer(btn_sizer)
-        
+                
         # Layout principal
         main_sizer.Add(self.text_ctrl, 1, wx.EXPAND | wx.ALL, 2)
         main_sizer.Add(btn_panel, 0, wx.EXPAND | wx.RIGHT, 2)
         self.SetSizer(main_sizer)
         
-        # Eventos
-        self.btn_up.Bind(wx.EVT_LEFT_DOWN, self.on_increment)
-        up_label.Bind(wx.EVT_LEFT_DOWN, self.on_increment)
-        self.btn_down.Bind(wx.EVT_LEFT_DOWN, self.on_decrement)
-        down_label.Bind(wx.EVT_LEFT_DOWN, self.on_decrement)
         self.text_ctrl.Bind(wx.EVT_TEXT, self.on_text_change)
-        
-        # Hover effects
-        self.btn_up.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, True))
-        self.btn_up.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, False))
-        up_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, True))
-        up_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, False))
-        
-        self.btn_down.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, True))
-        self.btn_down.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, False))
-        down_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, True))
-        down_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, False))
         
         # Paint event
         self.Bind(wx.EVT_PAINT, self.on_paint)
@@ -312,23 +72,6 @@ class CustomSpinCtrl(wx.Panel):
         dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
         dc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))
         dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, 4)
-    
-    def on_btn_hover(self, btn, label, hover):
-        """Efeito hover nos botões"""
-        color = wx.Colour(80, 80, 80) if hover else wx.Colour(60, 60, 60)
-        btn.SetBackgroundColour(color)
-        label.SetBackgroundColour(color)
-        btn.Refresh()
-    
-    def on_increment(self, event):
-        """Incrementa valor"""
-        new_val = min(self.current_val + 1, self.max_val)
-        self.SetValue(new_val)
-    
-    def on_decrement(self, event):
-        """Decrementa valor"""
-        new_val = max(self.current_val - 1, self.min_val)
-        self.SetValue(new_val)
     
     def on_text_change(self, event):
         """Valida entrada de texto"""
@@ -388,6 +131,11 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         self.default_printer = self.config.get("default_printer", "")
         self.auto_print_options = self.config.get("auto_print_options", {})
         
+        # Container principal para o conteúdo
+        self.main_sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.main_sizer)
+        
+        # Inicializa a UI
         self._init_ui()
         
         # Carrega os valores salvos
@@ -404,7 +152,8 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
     
     def _init_ui(self):
         """Inicializa a interface do usuário"""
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        # Limpa o sizer principal
+        self.main_sizer.Clear(True)
         
         # Painel de cabeçalho com título
         header_panel = wx.Panel(self)
@@ -445,6 +194,18 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         action_panel.SetBackgroundColour(self.colors["bg_color"])
         action_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
+        # Botão para atualizar impressoras
+        self.update_printers_button = create_styled_button(
+            action_panel,
+            "Atualizar Impressoras",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (180, 36)
+        )
+        self.update_printers_button.Bind(wx.EVT_BUTTON, self.on_update_printers)
+        action_sizer.Add(self.update_printers_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        
         # Botão para salvar
         self.save_button = create_styled_button(
             action_panel,
@@ -461,13 +222,11 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         action_panel.SetSizer(action_sizer)
         
         # Adiciona todos os componentes ao layout principal
-        main_sizer.Add(header_panel, 0, wx.EXPAND | wx.BOTTOM, 20)
-        main_sizer.Add(description_panel, 0, wx.EXPAND | wx.LEFT, 20)
-        main_sizer.Add(activation_panel, 0, wx.EXPAND | wx.ALL, 10)
-        main_sizer.Add(settings_panel, 1, wx.EXPAND | wx.ALL, 10)
-        main_sizer.Add(action_panel, 0, wx.EXPAND | wx.ALL, 10)
-        
-        self.SetSizer(main_sizer)
+        self.main_sizer.Add(header_panel, 0, wx.EXPAND | wx.BOTTOM, 20)
+        self.main_sizer.Add(description_panel, 0, wx.EXPAND | wx.LEFT, 20)
+        self.main_sizer.Add(activation_panel, 0, wx.EXPAND | wx.ALL, 10)
+        self.main_sizer.Add(settings_panel, 0, wx.EXPAND | wx.ALL, 10)
+        self.main_sizer.Add(action_panel, 0, wx.EXPAND | wx.ALL, 10)
     
     def _create_activation_card(self):
         """Cria o card de ativação da auto-impressão"""
@@ -581,6 +340,9 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         config_sizer = wx.FlexGridSizer(rows=0, cols=2, vgap=15, hgap=20)
         config_sizer.AddGrowableCol(1, 1)
         
+        # Largura fixa para todos os controles
+        dropdown_width = 250
+        
         # Impressora padrão
         printer_label = wx.StaticText(config_panel, label="Impressora padrão:")
         printer_label.SetForegroundColour(self.colors["text_color"])
@@ -588,8 +350,13 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         # Obtém lista de impressoras
         printers = self.config.get_printers()
         printer_names = [p.get('name', '') for p in printers] if printers else []
+        
+        # Se não tiver impressoras, adiciona uma mensagem
+        if not printer_names:
+            printer_names = ["Nenhuma impressora encontrada"]
 
-        self.printer_choice = CustomDropdown(config_panel, printer_names, self.colors)
+        # Dropdown nativo com estilização
+        self.printer_choice = StyledChoice(config_panel, printer_names, self.colors, (dropdown_width, 35))
         if printer_names:
             # Seleciona a impressora padrão se existir
             default_idx = 0
@@ -607,7 +374,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         color_label.SetForegroundColour(self.colors["text_color"])
 
         color_choices = ["Automático", "Colorido", "Preto e branco"]
-        self.color_choice = CustomDropdown(config_panel, color_choices, self.colors)
+        self.color_choice = StyledChoice(config_panel, color_choices, self.colors, (dropdown_width, 35))
         self.color_choice.SetSelection(0)  # Automático
 
         config_sizer.Add(color_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
@@ -618,7 +385,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         duplex_label.SetForegroundColour(self.colors["text_color"])
 
         duplex_choices = ["Somente frente", "Frente e verso (borda longa)", "Frente e verso (borda curta)"]
-        self.duplex_choice = CustomDropdown(config_panel, duplex_choices, self.colors)
+        self.duplex_choice = StyledChoice(config_panel, duplex_choices, self.colors, (dropdown_width, 35))
         self.duplex_choice.SetSelection(0)  # Somente frente
 
         config_sizer.Add(duplex_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
@@ -629,7 +396,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         quality_label.SetForegroundColour(self.colors["text_color"])
 
         quality_choices = ["Rascunho", "Normal", "Alta"]
-        self.quality_choice = CustomDropdown(config_panel, quality_choices, self.colors)
+        self.quality_choice = StyledChoice(config_panel, quality_choices, self.colors, (dropdown_width, 35))
         self.quality_choice.SetSelection(1)  # Normal
 
         config_sizer.Add(quality_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
@@ -640,7 +407,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         orientation_label.SetForegroundColour(self.colors["text_color"])
 
         orientation_choices = ["Retrato", "Paisagem"]
-        self.orientation_choice = CustomDropdown(config_panel, orientation_choices, self.colors)
+        self.orientation_choice = StyledChoice(config_panel, orientation_choices, self.colors, (dropdown_width, 35))
         self.orientation_choice.SetSelection(0)  # Retrato
 
         config_sizer.Add(orientation_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
@@ -650,7 +417,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         copies_label = wx.StaticText(config_panel, label="Número de cópias:")
         copies_label.SetForegroundColour(self.colors["text_color"])
 
-        self.copies_spin = CustomSpinCtrl(config_panel, 1, 99, 1, self.colors)
+        self.copies_spin = CustomSpinCtrl(config_panel, 1, 99, 1, self.colors, (dropdown_width, 25))
 
         config_sizer.Add(copies_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.copies_spin, 0, wx.EXPAND)
@@ -740,72 +507,135 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
             copies = self.auto_print_options.get("copies", 1)
             self.copies_spin.SetValue(copies)
     
-    def on_save(self, event):
-        """Salva as configurações"""
-        # Obtém os valores atuais
-        auto_print_enabled = self.auto_print_checkbox.GetValue()
+    def on_update_printers(self, event):
+        """Atualiza a lista de impressoras disponíveis"""
+        try:
+            # Mostra diálogo de progresso
+            busy = wx.BusyInfo("Atualizando impressoras, aguarde...", parent=self)
+            
+            # Verifica se há uma instância do PrinterListPanel para usar seu método
+            app = wx.GetApp()
+            if hasattr(app, 'main_screen') and hasattr(app.main_screen, 'printer_list'):
+                printer_list = app.main_screen.printer_list
+                printer_list.on_update_printers()
+            else:
+                # Tenta usar diretamente o API client
+                from src.utils.printer_discovery import PrinterDiscovery
+                from src.models.printer import Printer
+                
+                discovery = PrinterDiscovery()
+                discovered_printers = discovery.discover_printers()
+                
+                if discovered_printers:
+                    # Converte para o formato esperado
+                    printer_dicts = []
+                    for printer_data in discovered_printers:
+                        try:
+                            # Cria objeto Printer e converte para dicionário
+                            printer = Printer(printer_data)
+                            printer_dict = printer.to_dict()
+                            printer_dicts.append(printer_dict)
+                        except Exception as e:
+                            logger.error(f"Erro ao processar impressora: {str(e)}")
+                    
+                    # Salva as impressoras no config
+                    self.config.set_printers(printer_dicts)
+                else:
+                    # Remove o diálogo de progresso
+                    del busy
+                    
+                    wx.MessageBox("Nenhuma impressora encontrada na rede. Verifique sua conexão.", 
+                               "Aviso", wx.OK | wx.ICON_WARNING)
+                    return
+            
+            # Salva as configurações atuais antes de recriar a UI
+            self._save_current_values()
+            
+            # Remove o diálogo de progresso
+            del busy
+            
+            # Recria toda a UI para garantir que os dropdowns sejam atualizados
+            self._init_ui()
+            self._load_saved_values()
+            
+            # Atualiza o layout
+            self.Layout()
+            self.FitInside()
+            
+            wx.MessageBox("Lista de impressoras atualizada com sucesso!", 
+                       "Informação", wx.OK | wx.ICON_INFORMATION)
+            
+        except Exception as e:
+            logger.error(f"Erro ao atualizar impressoras: {str(e)}")
+            wx.MessageBox(f"Erro ao atualizar impressoras: {str(e)}", 
+                       "Erro", wx.OK | wx.ICON_ERROR)
+    
+    def _save_current_values(self):
+        """Salva os valores atuais nas variáveis de instância"""
+        self.auto_print_enabled = self.auto_print_checkbox.GetValue()
         
-        # Obtém a impressora selecionada
+        # Salva a impressora selecionada
         printer_index = self.printer_choice.GetSelection()
         printers = self.config.get_printers()
         
-        if printer_index == wx.NOT_FOUND or not printers:
+        if printer_index != wx.NOT_FOUND and printers and printer_index < len(printers):
+            selected_printer = printers[printer_index]
+            self.default_printer = selected_printer.get('name', '')
+        
+        # Salva as opções de impressão
+        # Modo de cor
+        color_idx = self.color_choice.GetSelection()
+        if color_idx == 1:  # Colorido
+            self.auto_print_options["color_mode"] = "color"
+        elif color_idx == 2:  # Preto e branco
+            self.auto_print_options["color_mode"] = "monochrome"
+        else:  # Automático
+            self.auto_print_options["color_mode"] = "auto"
+        
+        # Duplex
+        duplex_idx = self.duplex_choice.GetSelection()
+        if duplex_idx == 1:  # Borda longa
+            self.auto_print_options["duplex"] = "two-sided-long-edge"
+        elif duplex_idx == 2:  # Borda curta
+            self.auto_print_options["duplex"] = "two-sided-short-edge"
+        else:  # Simples
+            self.auto_print_options["duplex"] = "one-sided"
+        
+        # Qualidade
+        quality_idx = self.quality_choice.GetSelection()
+        if quality_idx == 0:  # Rascunho
+            self.auto_print_options["quality"] = 3
+        elif quality_idx == 2:  # Alta
+            self.auto_print_options["quality"] = 5
+        else:  # Normal
+            self.auto_print_options["quality"] = 4
+        
+        # Orientação
+        orientation_idx = self.orientation_choice.GetSelection()
+        self.auto_print_options["orientation"] = "landscape" if orientation_idx == 1 else "portrait"
+        
+        # Cópias
+        self.auto_print_options["copies"] = self.copies_spin.GetValue()
+    
+    def on_save(self, event):
+        """Salva as configurações"""
+        # Salva os valores nas variáveis de instância
+        self._save_current_values()
+        
+        # Verifica se há impressoras
+        printers = self.config.get_printers()
+        if not printers and self.auto_print_enabled:
             wx.MessageBox(
-                "Selecione uma impressora válida para a auto-impressão.",
+                "Não há impressoras disponíveis. A auto-impressão não funcionará sem impressoras configuradas.",
                 "Aviso",
                 wx.OK | wx.ICON_WARNING
             )
             return
         
-        selected_printer = printers[printer_index]
-        default_printer = selected_printer.get('name', '')
-        
-        # Constrói as opções de impressão
-        options = {}
-        
-        # Modo de cor
-        color_idx = self.color_choice.GetSelection()
-        if color_idx == 1:  # Colorido
-            options["color_mode"] = "color"
-        elif color_idx == 2:  # Preto e branco
-            options["color_mode"] = "monochrome"
-        else:  # Automático
-            options["color_mode"] = "auto"
-        
-        # Duplex
-        duplex_idx = self.duplex_choice.GetSelection()
-        if duplex_idx == 1:  # Borda longa
-            options["duplex"] = "two-sided-long-edge"
-        elif duplex_idx == 2:  # Borda curta
-            options["duplex"] = "two-sided-short-edge"
-        else:  # Simples
-            options["duplex"] = "one-sided"
-        
-        # Qualidade
-        quality_idx = self.quality_choice.GetSelection()
-        if quality_idx == 0:  # Rascunho
-            options["quality"] = 3
-        elif quality_idx == 2:  # Alta
-            options["quality"] = 5
-        else:  # Normal
-            options["quality"] = 4
-        
-        # Orientação
-        orientation_idx = self.orientation_choice.GetSelection()
-        options["orientation"] = "landscape" if orientation_idx == 1 else "portrait"
-        
-        # Cópias
-        options["copies"] = self.copies_spin.GetValue()
-        
         # Salva na configuração
-        self.config.set("auto_print", auto_print_enabled)
-        self.config.set("default_printer", default_printer)
-        self.config.set("auto_print_options", options)
-        
-        # Atualiza os valores locais
-        self.auto_print_enabled = auto_print_enabled
-        self.default_printer = default_printer
-        self.auto_print_options = options
+        self.config.set("auto_print", self.auto_print_enabled)
+        self.config.set("default_printer", self.default_printer)
+        self.config.set("auto_print_options", self.auto_print_options)
         
         # Notifica o usuário
         wx.MessageBox(
@@ -821,7 +651,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         try:
             app = wx.GetApp()
             if hasattr(app, 'main_screen') and hasattr(app.main_screen, 'file_monitor'):
-                app.main_screen.file_monitor.set_auto_print(auto_print_enabled)
-                logger.info(f"Auto-impressão {'ativada' if auto_print_enabled else 'desativada'}")
+                app.main_screen.file_monitor.set_auto_print(self.auto_print_enabled)
+                logger.info(f"Auto-impressão {'ativada' if self.auto_print_enabled else 'desativada'}")
         except Exception as e:
             logger.error(f"Erro ao atualizar status de auto-impressão: {e}")

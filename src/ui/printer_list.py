@@ -1752,12 +1752,32 @@ class PrinterListPanel(wx.ScrolledWindow):
             server_printers = self.api_client.get_printers()
             logger.info(f"Obtidas {len(server_printers)} impressoras do servidor")
             
-            # Se não houver impressoras, mostra mensagem
+            # Se não houver impressoras, tenta descoberta local
             if not server_printers:
-                wx.MessageBox("Nenhuma impressora retornada pelo servidor", 
-                            "Aviso", wx.OK | wx.ICON_WARNING)
-                return
+                logger.warning("Nenhuma impressora retornada pelo servidor, tentando descoberta local")
                 
+                try:
+                    from src.utils.printer_discovery import PrinterDiscovery
+                    discovery = PrinterDiscovery()
+                    local_printers = discovery.discover_printers()
+                    
+                    if local_printers:
+                        logger.info(f"Descobertas {len(local_printers)} impressoras localmente")
+                        server_printers = local_printers
+                    else:
+                        wx.MessageBox("Não foi possível encontrar impressoras na rede. Verifique a conexão.", 
+                                     "Aviso", wx.OK | wx.ICON_WARNING)
+                        # Remove o indicador de progresso
+                        del busy
+                        return
+                except Exception as e:
+                    logger.error(f"Erro na descoberta local: {str(e)}")
+                    wx.MessageBox(f"Nenhuma impressora retornada pelo servidor e falha na descoberta local: {str(e)}", 
+                                 "Aviso", wx.OK | wx.ICON_WARNING)
+                    # Remove o indicador de progresso
+                    del busy
+                    return
+            
             # Inicializa a classe de descoberta
             try:
                 from src.utils.printer_discovery import PrinterDiscovery
@@ -1766,10 +1786,13 @@ class PrinterListPanel(wx.ScrolledWindow):
                 logger.error(f"Erro ao inicializar descoberta: {str(e)}")
                 wx.MessageBox(f"Erro ao inicializar módulo de descoberta: {str(e)}", 
                             "Erro", wx.OK | wx.ICON_ERROR)
+                del busy
                 return
                 
             # Para cada impressora do servidor, buscamos o IP pelo MAC
             updated_printers = []
+            discovery_attempts = 0
+            
             for server_printer in server_printers:
                 mac = server_printer.get("mac_address", "")
                 if not mac:
@@ -1778,6 +1801,13 @@ class PrinterListPanel(wx.ScrolledWindow):
                     continue
                     
                 logger.info(f"Buscando impressora com MAC: {mac}")
+                discovery_attempts += 1
+                
+                # Atualiza o indicador de progresso para indicar o progresso atual
+                if hasattr(busy, 'Destroy'):  # Verifica se o objeto ainda existe
+                    del busy
+                busy = wx.BusyInfo(f"Processando impressora {discovery_attempts}/{len(server_printers)}...", parent=self)
+                wx.GetApp().Yield()
                 
                 # Busca específica pelo MAC
                 printer_info = discovery.discover_printer_by_mac(mac)
@@ -1814,6 +1844,15 @@ class PrinterListPanel(wx.ScrolledWindow):
                     
                 # Adiciona a impressora à lista
                 updated_printers.append(server_printer)
+            
+            # Se não encontrou nenhuma impressora, verifica se o problema é que há impressoras locais não cadastradas no servidor
+            if not updated_printers:
+                logger.warning("Nenhuma impressora encontrada. Tentando descoberta completa na rede...")
+                
+                local_printers = discovery.discover_printers()
+                if local_printers:
+                    updated_printers = local_printers
+                    logger.info(f"Descobertas {len(local_printers)} impressoras localmente")
             
             # Sanitiza os dados antes de salvar
             printer_dicts = []
@@ -1864,9 +1903,14 @@ class PrinterListPanel(wx.ScrolledWindow):
             # Remove o indicador de progresso
             del busy
             
-            # Mostra mensagem de sucesso
-            wx.MessageBox(f"{len(printer_dicts)} impressoras atualizadas com sucesso!", 
-                        "Informação", wx.OK | wx.ICON_INFORMATION)
+            if printer_dicts:
+                # Mostra mensagem de sucesso
+                wx.MessageBox(f"{len(printer_dicts)} impressoras atualizadas com sucesso!", 
+                            "Informação", wx.OK | wx.ICON_INFORMATION)
+            else:
+                # Mostra mensagem de aviso se não encontrou impressoras
+                wx.MessageBox("Não foi possível encontrar impressoras na rede. Verifique a conexão e tente novamente.", 
+                            "Aviso", wx.OK | wx.ICON_WARNING)
         except Exception as e:
             logger.error(f"Erro ao atualizar impressoras: {str(e)}")
             wx.MessageBox(f"Erro ao atualizar impressoras: {str(e)}", 

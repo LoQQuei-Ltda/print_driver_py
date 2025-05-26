@@ -18,6 +18,7 @@ import threading
 import time
 import json
 from datetime import datetime
+import platform
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrinterDiscovery")
 
@@ -41,6 +42,7 @@ class PrinterDiscovery:
     def __init__(self):
         """Inicializa o descobridor de impressoras"""
         self.printers = []
+        self.system = platform.system()
     
     def normalize_mac(self, mac):
         """Normaliza o formato do MAC para comparação"""
@@ -638,7 +640,7 @@ class PrinterDiscovery:
         Args:
             ip: Endereço IP
             timeout: Tempo limite em segundos
-        
+            
         Returns:
             bool: True se o ping foi bem-sucedido
         """
@@ -647,23 +649,26 @@ class PrinterDiscovery:
             if sys.platform.startswith("win"):
                 # Windows
                 cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
             else:
                 # Linux/macOS
                 cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
+                flags = 0
             
             # Executa o comando
             result = subprocess.run(
                 cmd, 
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE,
-                timeout=timeout + 1, 
-                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                timeout=timeout + 1,
+                creationflags=flags
             )
             
             # Retorna True se o comando foi bem-sucedido
             return result.returncode == 0
             
         except Exception as e:
+            logger.warning(f"Erro ao executar ping para {ip}: {str(e)}")
             return False
         
     def _create_printer_info(self, ip, mac):

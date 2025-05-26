@@ -22,15 +22,54 @@ def setup_logging():
     
     log_file = os.path.join(log_dir, "app.log")
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    return logging.getLogger("PrintManagementSystem")
+    # Remove handlers existentes para evitar duplicação
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Configura o logger com encoding UTF-8 explícito
+    try:
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # Formato mais detalhado
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Configura o logger raiz
+        root_logger.setLevel(logging.INFO)
+        root_logger.addHandler(file_handler)
+        root_logger.addHandler(console_handler)
+        
+        logger = logging.getLogger("PrintManagementSystem")
+        
+        # Teste inicial para verificar se o logging está funcionando
+        logger.info(f"Sistema de logs configurado com sucesso")
+        logger.info(f"Arquivo de log: {log_file}")
+        logger.info(f"Diretório de logs existe: {os.path.exists(log_dir)}")
+        logger.info(f"Arquivo de log existe: {os.path.exists(log_file)}")
+        
+        # Force flush para garantir que seja escrito
+        file_handler.flush()
+        
+        return logger
+        
+    except Exception as e:
+        print(f"ERRO ao configurar logging: {e}")
+        # Fallback para logging básico
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        return logging.getLogger("PrintManagementSystem")
 
 def setup_user_data_dir():
     """Configura o diretório de dados do usuário"""
