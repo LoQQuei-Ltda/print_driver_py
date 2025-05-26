@@ -1,5 +1,5 @@
-; Script para o Inno Setup - VERSÃO CORRIGIDA (Instalação Admin, Execução User)
-#define MyAppName "Sistema de Gerenciamento de Impressão"
+; Script para o Inno Setup - VERSÃO SIMPLIFICADA
+#define MyAppName "Gerenciamento de Impressão - LoQQUEI"
 #define MyAppVersion "2.0.0"
 #define MyAppPublisher "LoQQuei"
 #define MyAppURL "https://loqquei.com.br"
@@ -24,8 +24,7 @@ LZMANumFastBytes=273
 WizardStyle=modern
 SetupLogging=yes
 
-; MUDANÇA CRÍTICA: Instalação requer admin, mas execução não
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={autopf}\LoQQuei\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 AlwaysRestart=no
@@ -48,15 +47,13 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 Name: "startup"; Description: "Iniciar automaticamente com o Windows"; GroupDescription: "Configurações adicionais:"
 
 [Files]
-; Executável principal (OBRIGATÓRIO - falha se não existir)
+; SOLUÇÃO: Executável principal SEM verificação prévia - OBRIGATÓRIO
 Source: "build\exe\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+
 ; Recursos - INCLUÍDOS EXPLICITAMENTE
-Source: "build\exe\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-; Adiciona arquivos de recursos alternativos se existirem
-Source: "src\ui\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "build\exe\resources\*"; DestDir: "{app}\resources"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Dirs]
-; MUDANÇA CRÍTICA: Cria diretórios com permissões para usuários comuns
 Name: "{app}"; Permissions: users-modify
 Name: "{app}\logs"; Permissions: users-modify
 Name: "{app}\config"; Permissions: users-modify
@@ -77,10 +74,6 @@ Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\{#MyAppName}"; Fil
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: startup
 
 [Registry]
-; MUDANÇA CRÍTICA: Remove registro que pode causar problemas de permissão
-; Comentado o registro automático - será tratado pela aplicação se necessário
-; Root: HKCU; Subkey: "SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startup
-
 ; Registra configurações na área do usuário (não requer admin)
 Root: HKCU; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "InstallPath"; ValueData: "{app}"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "SOFTWARE\{#MyAppPublisher}\{#MyAppName}"; ValueType: string; ValueName: "Version"; ValueData: "{#MyAppVersion}"; Flags: uninsdeletekey
@@ -94,24 +87,6 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 Filename: "{cmd}"; Parameters: "/C taskkill /F /IM {#MyAppExeName}"; Flags: runhidden
 
 [Code]
-// Função para verificar se o executável foi criado corretamente
-function InitializeSetup(): Boolean;
-var
-  ExePath: String;
-begin
-  Result := True;
-  ExePath := ExpandConstant('{#SourcePath}\build\exe\{#MyAppExeName}');
-  
-  if not FileExists(ExePath) then
-  begin
-    MsgBox('ERRO: O executável não foi encontrado em:' + #13#10 + 
-           ExePath + #13#10#13#10 +
-           'Execute o script build_installer.py primeiro para criar o executável.', 
-           mbError, MB_OK);
-    Result := False;
-  end;
-end;
-
 // Verifica se a aplicação está em execução
 function IsAppRunning(): Boolean;
 var
@@ -146,7 +121,6 @@ begin
   StopApplication();
 end;
 
-// MUDANÇA CRÍTICA: Configura permissões após instalação
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;

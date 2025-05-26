@@ -160,7 +160,7 @@ all_hiddenimports = [
     # Módulos principais
     'wx', 'wx._core', 'wx._adv', 'wx._html', 'wx._xml',
     'requests', 'pypdf', 'appdirs', 'yaml', 'watchdog',
-    'watchdog.observers', 'watchdog.events', 'flask',
+    'watchdog.observers', 'watchdog.events', 'flask', 'flask_cors',
     
     # pyipp e suas dependências
     'pyipp', 'pyipp.client', 'pyipp.enums', 'pyipp.exceptions',
@@ -267,6 +267,7 @@ install_requires = [
     "pyipp>=0.11.0",
     "aiohttp>=3.8.0",
     "flask>=3.1.1",
+    'flask_cors>=6.0.0',
     "pyinstaller>=5.0.0",
 ]
 
