@@ -190,7 +190,7 @@ class PrinterDiscovery:
     
     async def _scan_printer_ports(self, ip):
         """
-        Verifica as portas de impressora em um único IP
+        Verifica as portas de impressora em um único IP de forma mais robusta
         
         Args:
             ip: Endereço IP a verificar
@@ -198,50 +198,102 @@ class PrinterDiscovery:
         Returns:
             dict: Informações da impressora, ou None
         """
-        open_ports = []
-        
         try:
-            # Verifica cada uma das portas comuns
-            for port in COMMON_PRINTER_PORTS:
-                if self._is_port_open(ip, port):
-                    open_ports.append(port)
+            # Primeiro verifica se o host responde
+            if not self._ping_host(ip, 0.5):
+                return None
             
-            # Se tiver alguma porta aberta que seja comum para impressoras
-            if open_ports:
-                mac = self._get_mac_for_ip(ip)
-                
-                # Determina o melhor URI para a impressora
-                uri = None
-                for port in open_ports:
-                    if port == 631:
-                        uri = f"ipp://{ip}/ipp/print"
-                        break
-                    elif port == 9100:
-                        uri = f"socket://{ip}:9100"
-                        break
-                    elif port == 80:
-                        uri = f"http://{ip}"
-                        break
-                    elif port == 443:
-                        uri = f"https://{ip}"
-                        break
-                
-                # Presume que é uma impressora se alguma porta comum estiver aberta
-                printer_info = {
-                    "ip": ip,
-                    "mac_address": mac,
-                    "ports": open_ports,
-                    "uri": uri,
-                    "name": f"Impressora {ip}"  # Adiciona um nome padrão baseado no IP
-                }
-                
-                logger.info(f"Encontrada impressora com IP: {ip}, MAC: {mac}, Portas: {open_ports}")
-                return printer_info
+            open_ports = []
             
-            return None
+            # Verifica as portas em paralelo com timeout menor
+            def check_port(port):
+                return port if self._is_port_open(ip, port, 0.3) else None
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(check_port, port): port for port in COMMON_PRINTER_PORTS}
+                
+                for future in concurrent.futures.as_completed(futures, timeout=3):
+                    try:
+                        result = future.result()
+                        if result:
+                            open_ports.append(result)
+                    except:
+                        continue
+            
+            # Se não tem portas abertas, não é uma impressora
+            if not open_ports:
+                return None
+            
+            # Verifica se realmente parece ser uma impressora
+            printer_indicators = 0
+            
+            # Portas típicas de impressoras aumentam a pontuação
+            if 631 in open_ports:  # IPP
+                printer_indicators += 3
+            if 9100 in open_ports:  # AppSocket/JetDirect
+                printer_indicators += 3
+            if 515 in open_ports:  # LPD
+                printer_indicators += 2
+            
+            # Se tem porta 80/443 mas nenhuma outra, pode não ser impressora
+            if open_ports == [80] or open_ports == [443] or open_ports == [80, 443]:
+                # Tenta verificar se responde a requisições HTTP típicas de impressora
+                try:
+                    import urllib.request
+                    import urllib.error
+                    
+                    url = f"http://{ip}" if 80 in open_ports else f"https://{ip}"
+                    req = urllib.request.Request(url)
+                    req.add_header('User-Agent', 'PrinterDiscovery/1.0')
+                    
+                    with urllib.request.urlopen(req, timeout=2) as response:
+                        content = response.read().decode('utf-8', errors='ignore').lower()
+                        
+                        # Procura por indicadores de impressora no conteúdo
+                        printer_keywords = ['printer', 'print', 'toner', 'cartridge', 'samsung', 'hp', 'canon', 'epson', 'brother', 'lexmark']
+                        for keyword in printer_keywords:
+                            if keyword in content:
+                                printer_indicators += 1
+                                break
+                except:
+                    pass
+            
+            # Se não tem indicadores suficientes, provavelmente não é impressora
+            if printer_indicators == 0 and not (631 in open_ports or 9100 in open_ports):
+                return None
+            
+            # Obtém MAC address
+            mac = self._get_mac_for_ip(ip)
+            
+            # Determina o melhor URI
+            uri = None
+            if 631 in open_ports:
+                uri = f"ipp://{ip}/ipp/print"
+            elif 9100 in open_ports:
+                uri = f"socket://{ip}:9100"
+            elif 515 in open_ports:
+                uri = f"lpd://{ip}/queue"
+            elif 80 in open_ports:
+                uri = f"http://{ip}"
+            elif 443 in open_ports:
+                uri = f"https://{ip}"
+            
+            printer_info = {
+                "ip": ip,
+                "mac_address": mac,
+                "ports": open_ports,
+                "uri": uri,
+                "name": f"Impressora {ip}",
+                "is_online": True
+            }
+            
+            logger.info(f"Impressora encontrada: {ip} (MAC: {mac}, Portas: {open_ports})")
+            return printer_info
+            
         except Exception as e:
-            logger.error(f"Erro ao verificar portas para IP {ip}: {str(e)}")
+            logger.error(f"Erro ao verificar IP {ip}: {e}")
             return None
+
     
     async def _get_printer_attributes(self, ip, port=631):
         """
@@ -462,9 +514,9 @@ class PrinterDiscovery:
         
         return result
     
-    def _is_port_open(self, ip, port, timeout=TIMEOUT_SCAN):
+    def _is_port_open(self, ip, port, timeout=0.5):
         """
-        Verifica se uma porta está aberta
+        Verifica se uma porta está aberta de forma mais robusta
         
         Args:
             ip: Endereço IP
@@ -475,63 +527,163 @@ class PrinterDiscovery:
             bool: True se a porta estiver aberta
         """
         try:
+            # Primeiro tenta com timeout mais rápido
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
             result = sock.connect_ex((ip, port))
             sock.close()
+            
+            if result == 0:
+                return True
+                
+            # Se falhou, tenta novamente com timeout maior
+            time.sleep(0.1)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout * 2)
+            result = sock.connect_ex((ip, port))
+            sock.close()
+            
             return result == 0
-        except:
+            
+        except Exception as e:
+            logger.debug(f"Erro ao verificar porta {port} em {ip}: {e}")
             return False
+
     
     def _get_local_ip(self):
         """
-        Obtém o endereço IP local da máquina
+        Obtém o endereço IP local da máquina de forma mais robusta
         
         Returns:
             str: Endereço IP local
         """
         try:
-            # Cria um socket e conecta a um servidor externo
+            # Método 1: Conectar a um servidor externo
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(2)
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
-            return local_ip
-        except:
-            # Fallback para localhost
-            return "127.0.0.1"
+            
+            # Valida se o IP obtido é válido
+            if local_ip and not local_ip.startswith('127.'):
+                return local_ip
+        except Exception as e:
+            logger.warning(f"Método 1 falhou: {e}")
+        
+        try:
+            # Método 2: Usando hostname
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            if local_ip and not local_ip.startswith('127.'):
+                return local_ip
+        except Exception as e:
+            logger.warning(f"Método 2 falhou: {e}")
+        
+        try:
+            # Método 3: Listar todas as interfaces de rede
+            import netifaces
+            for interface in netifaces.interfaces():
+                try:
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        for addr_info in addrs[netifaces.AF_INET]:
+                            ip = addr_info.get('addr')
+                            if ip and not ip.startswith('127.') and not ip.startswith('169.254'):
+                                return ip
+                except:
+                    continue
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"Método 3 falhou: {e}")
+        
+        try:
+            # Método 4: Parsing de ifconfig/ipconfig
+            if sys.platform.startswith('win'):
+                result = subprocess.run(['ipconfig'], capture_output=True, text=True, timeout=5, 
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+                output = result.stdout
+                # Procura por IPv4 Address
+                ip_pattern = re.compile(r'IPv4 Address[.\s]*:\s*(\d+\.\d+\.\d+\.\d+)')
+            else:
+                result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=5)
+                output = result.stdout
+                # Procura por inet addr
+                ip_pattern = re.compile(r'inet (?:addr:)?(\d+\.\d+\.\d+\.\d+)')
+            
+            for match in ip_pattern.finditer(output):
+                ip = match.group(1)
+                if not ip.startswith('127.') and not ip.startswith('169.254'):
+                    return ip
+                    
+        except Exception as e:
+            logger.warning(f"Método 4 falhou: {e}")
+        
+        # Fallback final
+        logger.warning("Usando fallback 192.168.1.100")
+        return "192.168.1.100"
+
     
     def _get_network_from_ip(self, ip):
         """
-        Determina a rede a partir do IP local
+        Determina múltiplas redes a partir do IP local de forma mais robusta
         
         Args:
             ip: Endereço IP
             
         Returns:
-            list: Lista de redes
+            list: Lista de redes para escanear
         """
         networks = []
         
-        # Primeiro, tenta a subnet /24 do IP atual
         try:
+            # Rede principal baseada no IP atual
             parts = ip.split('.')
-            network = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-            networks.append(ipaddress.IPv4Network(network))
-            logger.info(f"Usando rede: {network}")
-        except:
-            pass
+            if len(parts) == 4:
+                # Tenta /24 primeiro
+                network_24 = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+                networks.append(ipaddress.IPv4Network(network_24))
+                logger.info(f"Adicionada rede principal: {network_24}")
+                
+                # Se for uma rede classe A ou B, adiciona subredes menores
+                if parts[0] in ['10']:
+                    # Rede classe A - adiciona algumas subredes /16
+                    for i in range(0, 256, 64):
+                        subnet = f"10.{i}.0.0/16"
+                        try:
+                            networks.append(ipaddress.IPv4Network(subnet))
+                        except:
+                            pass
+                elif parts[0] == '172' and int(parts[1]) >= 16 and int(parts[1]) <= 31:
+                    # Rede classe B
+                    subnet = f"172.{parts[1]}.0.0/16"
+                    try:
+                        networks.append(ipaddress.IPv4Network(subnet))
+                    except:
+                        pass
+        except Exception as e:
+            logger.warning(f"Erro ao processar IP {ip}: {e}")
         
-        # Se não tiver nenhuma rede, use redes padrão comuns
-        if not networks:
-            fallback_networks = ["192.168.1.0/24", "192.168.0.0/24", "10.0.0.0/24"]
-            for net in fallback_networks:
-                try:
-                    networks.append(ipaddress.IPv4Network(net))
-                    logger.info(f"Usando rede padrão: {net}")
-                except:
-                    pass
-                    
+        # Adiciona redes comuns sempre
+        common_networks = [
+            "192.168.1.0/24",
+            "192.168.0.0/24", 
+            "192.168.2.0/24",
+            "10.0.0.0/24",
+            "10.0.1.0/24",
+            "172.16.0.0/24"
+        ]
+        
+        for net_str in common_networks:
+            try:
+                net = ipaddress.IPv4Network(net_str)
+                if net not in networks:
+                    networks.append(net)
+                    logger.info(f"Adicionada rede comum: {net_str}")
+            except:
+                pass
+        
         return networks
     
     def _get_common_ips(self, subnet):
@@ -576,66 +728,92 @@ class PrinterDiscovery:
     
     def _get_mac_for_ip(self, ip):
         """
-        Tenta obter o MAC de um endereço IP usando ARP
+        Tenta obter o MAC de um endereço IP de forma mais robusta
         
         Args:
             ip: Endereço IP
             
         Returns:
-            str: Endereço MAC ou "desconhecido"
+            str: Endereço MAC normalizado ou "desconhecido"
         """
+        # Primeiro faz ping para garantir que o IP está na tabela ARP
+        self._ping_host(ip, 1)
+        time.sleep(0.2)  # Pequena pausa para atualizar ARP
+        
         try:
-            if sys.platform.startswith(('linux', 'darwin')):
-                cmd = ['arp', '-n', ip]
-            else:  # Windows
-                cmd = ['arp', '-a', ip]
+            system_name = platform.system().lower()
+            
+            if system_name == "windows":
+                cmd = ['arp', '-a']
+            else:
+                cmd = ['arp', '-a']  # Funciona tanto no Linux quanto no macOS
+            
+            # Tenta múltiplas vezes
+            for attempt in range(3):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                        creationflags=subprocess.CREATE_NO_WINDOW if system_name == "windows" else 0
+                    )
+                    
+                    if result.returncode == 0:
+                        output = result.stdout
+                        
+                        # Múltiplos padrões de regex para diferentes formatos
+                        mac_patterns = [
+                            rf'{re.escape(ip)}\s+([0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}})',
+                            rf'({re.escape(ip)}).*?([0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}})',
+                            rf'([0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}[:-][0-9A-Fa-f]{{2}}).*?{re.escape(ip)}'
+                        ]
+                        
+                        # Procura em cada linha que contém o IP
+                        for line in output.split('\n'):
+                            if ip in line:
+                                for pattern in mac_patterns:
+                                    match = re.search(pattern, line, re.IGNORECASE)
+                                    if match:
+                                        mac = match.group(-1)  # Pega o último grupo (o MAC)
+                                        return self.normalize_mac(mac)
+                    
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"Timeout ao executar ARP (tentativa {attempt + 1})")
+                    continue
+                except Exception as e:
+                    logger.debug(f"Erro na tentativa {attempt + 1} de ARP: {e}")
+                    continue
+        
+        except Exception as e:
+            logger.warning(f"Erro ao obter MAC para {ip}: {e}")
+        
+        # Se chegou aqui, tenta método alternativo no Windows
+        if platform.system().lower() == "windows":
+            try:
+                cmd = ['nbtstat', '-A', ip]
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
                 
-            output = subprocess.check_output(cmd, universal_newlines=True, timeout=1)
-            
-            # Procura pelo MAC usando regex
-            mac_pattern = re.compile(r'([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})')
-            mac_match = mac_pattern.search(output)
-            
-            if mac_match:
-                return mac_match.group(1)
-                
-            # Padrão alternativo para Windows (espaços)
-            mac_pattern2 = re.compile(r'([0-9A-Fa-f]{2}[-\s][0-9A-Fa-f]{2}[-\s][0-9A-Fa-f]{2}[-\s][0-9A-Fa-f]{2}[-\s][0-9A-Fa-f]{2}[-\s][0-9A-Fa-f]{2})')
-            mac_match2 = mac_pattern2.search(output)
-            
-            if mac_match2:
-                return mac_match2.group(1).replace(' ', '-')
-        except:
-            pass
-            
-        # Se não encontrou o MAC, tenta um ping para atualizar a tabela ARP
-        try:
-            if sys.platform.startswith(('linux', 'darwin')):
-                cmd = ['ping', '-c', '1', '-W', '1', ip]
-            else:  # Windows
-                cmd = ['ping', '-n', '1', '-w', '1000', ip]
-                
-            subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
-            
-            # Tenta novamente após o ping
-            if sys.platform.startswith(('linux', 'darwin')):
-                cmd = ['arp', '-n', ip]
-            else:  # Windows
-                cmd = ['arp', '-a', ip]
-                
-            output = subprocess.check_output(cmd, universal_newlines=True, timeout=1)
-            
-            mac_match = re.search(r'([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})', output)
-            if mac_match:
-                return mac_match.group(1)
-        except:
-            pass
+                if result.returncode == 0:
+                    # Procura por MAC address na saída do nbtstat
+                    mac_match = re.search(r'([0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2})', result.stdout)
+                    if mac_match:
+                        return self.normalize_mac(mac_match.group(1))
+            except:
+                pass
         
         return "desconhecido"
+
     
     def _ping_host(self, ip, timeout=1):
         """
-        Faz ping em um host
+        Faz ping em um host de forma mais robusta
         
         Args:
             ip: Endereço IP
@@ -645,31 +823,44 @@ class PrinterDiscovery:
             bool: True se o ping foi bem-sucedido
         """
         try:
-            # Comando de ping depende do sistema operacional
-            if sys.platform.startswith("win"):
-                # Windows
+            system_name = platform.system().lower()
+            
+            if system_name == "windows":
                 cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
-                flags = subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            else:
-                # Linux/macOS
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            elif system_name == "darwin":  # macOS
+                cmd = ["ping", "-c", "1", "-W", str(int(timeout * 1000)), ip]
+                creation_flags = 0
+            else:  # Linux e outros Unix
                 cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
-                flags = 0
+                creation_flags = 0
             
-            # Executa o comando
-            result = subprocess.run(
-                cmd, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
-                timeout=timeout + 1,
-                creationflags=flags
-            )
+            # Tenta três vezes com timeouts crescentes
+            for attempt in range(3):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=timeout + attempt,
+                        creationflags=creation_flags
+                    )
+                    
+                    if result.returncode == 0:
+                        return True
+                        
+                except subprocess.TimeoutExpired:
+                    continue
+                except Exception as e:
+                    logger.debug(f"Tentativa {attempt + 1} falhou para {ip}: {e}")
+                    continue
             
-            # Retorna True se o comando foi bem-sucedido
-            return result.returncode == 0
+            return False
             
         except Exception as e:
-            logger.warning(f"Erro ao executar ping para {ip}: {str(e)}")
+            logger.warning(f"Erro ao executar ping para {ip}: {e}")
             return False
+
         
     def _create_printer_info(self, ip, mac):
         """
@@ -820,7 +1011,7 @@ class PrinterDiscovery:
 
     def _run_nmap_scan(self, subnet):
         """
-        Executa nmap para descobrir impressoras na rede (se disponível)
+        Executa nmap de forma mais robusta
         
         Args:
             subnet: Subnet a escanear
@@ -831,98 +1022,153 @@ class PrinterDiscovery:
         printers = []
         
         try:
-            # Verifica se o nmap está instalado
+            # Verifica se nmap está disponível
             try:
-                subprocess.check_output(["nmap", "--version"], stderr=subprocess.STDOUT)
+                result = subprocess.run(
+                    ["nmap", "--version"], 
+                    capture_output=True, 
+                    timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0
+                )
+                if result.returncode != 0:
+                    return []
             except:
-                logger.info("nmap não encontrado, usando escaneamento manual")
+                logger.info("nmap não encontrado ou não funcional")
                 return []
+            
+            logger.info(f"Escaneando {subnet} com nmap...")
+            
+            # Comando nmap otimizado para descoberta rápida
+            cmd = [
+                "nmap", 
+                "-p", "631,9100,515,80,443",  # Portas de impressora
+                "-T4",  # Timing template agressivo mas não muito
+                "--open",  # Só portas abertas
+                "-n",  # Não resolve DNS
+                "--host-timeout", "30s",  # Timeout por host
+                "--max-retries", "1",  # Só uma tentativa
+                str(subnet)
+            ]
+            
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,  # Timeout total
+                    creationflags=subprocess.CREATE_NO_WINDOW if platform.system().lower() == "windows" else 0
+                )
                 
-            # Define parâmetros do nmap
-            logger.info(f"Escaneamento rápido de {subnet} com nmap...")
-            cmd = ["nmap", "-p", "631,9100", "-T5", "--open", "-n", "--max-retries", "1", str(subnet)]
+                if result.returncode != 0:
+                    logger.warning(f"nmap retornou código {result.returncode}")
+                    return []
+                    
+                output = result.stdout
+                
+            except subprocess.TimeoutExpired:
+                logger.warning("nmap timeout - rede muito grande ou lenta")
+                return []
+            except Exception as e:
+                logger.error(f"Erro ao executar nmap: {e}")
+                return []
             
-            # Executa nmap
-            output = subprocess.check_output(cmd, universal_newlines=True)
+            # Processa saída do nmap
+            current_ip = None
+            current_ports = []
             
-            # Processa a saída do nmap
-            ip_pattern = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
-            unique_ips = set()
+            for line in output.split('\n'):
+                line = line.strip()
+                
+                # Linha com IP
+                if line.startswith('Nmap scan report for'):
+                    # Processa IP anterior se existe
+                    if current_ip and current_ports:
+                        printer = self._process_nmap_result(current_ip, current_ports)
+                        if printer:
+                            printers.append(printer)
+                    
+                    # Extrai novo IP
+                    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+                    current_ip = ip_match.group(1) if ip_match else None
+                    current_ports = []
+                    
+                # Linha com porta aberta
+                elif current_ip and '/tcp' in line and 'open' in line:
+                    port_match = re.search(r'(\d+)/tcp', line)
+                    if port_match:
+                        current_ports.append(int(port_match.group(1)))
             
-            for line in output.splitlines():
-                if "Nmap scan report for" in line:
-                    ip_match = ip_pattern.search(line)
-                    if ip_match:
-                        ip = ip_match.group(1)
-                        unique_ips.add(ip)
+            # Processa último IP
+            if current_ip and current_ports:
+                printer = self._process_nmap_result(current_ip, current_ports)
+                if printer:
+                    printers.append(printer)
             
-            # Para cada IP encontrado, obtém o MAC e adiciona à lista
-            for ip in unique_ips:
-                try:
-                    mac = self._get_mac_for_ip(ip)
-                    
-                    # Determina a melhor porta e URI para a impressora
-                    uri = None
-                    ports = []
-                    
-                    # Verifica cada porta comum
-                    for port in COMMON_PRINTER_PORTS:
-                        if self._is_port_open(ip, port):
-                            ports.append(port)
-                    
-                    # Se nenhuma porta estiver aberta, pula
-                    if not ports:
-                        logger.warning(f"IP {ip} sem portas abertas, pulando")
-                        continue
-                    
-                    # Determina o URI
-                    if 631 in ports:
-                        uri = f"ipp://{ip}/ipp/print"
-                    elif 9100 in ports:
-                        uri = f"socket://{ip}:9100"
-                    elif 80 in ports:
-                        uri = f"http://{ip}"
-                    elif 443 in ports:
-                        uri = f"https://{ip}"
-                    
-                    # Cria um objeto de impressora com os dados coletados
-                    printer_info = {
-                        "ip": ip, 
-                        "mac_address": mac,
-                        "name": f"Impressora {ip}",
-                        "ports": ports,
-                        "uri": uri,
-                        "is_online": True,
-                        "is_ready": True  # Assumimos que está pronta inicialmente
-                    }
-                    
-                    # Tenta obter detalhes adicionais da impressora
-                    try:
-                        if 631 in ports:
-                            logger.info(f"Tentando obter detalhes da impressora {ip}")
-                            loop = asyncio.new_event_loop()
-                            asyncio.set_event_loop(loop)
-                            details = loop.run_until_complete(self._get_printer_attributes(ip))
-                            loop.close()
-                            
-                            if details:
-                                # Atualiza as informações com os detalhes obtidos
-                                for key, value in details.items():
-                                    if key not in printer_info or not printer_info[key]:
-                                        printer_info[key] = value
-                                
-                                # Garante que o IP está definido
-                                printer_info["ip"] = ip
-                                logger.info(f"Detalhes obtidos para {ip}: {details.get('printer-make-and-model', 'Desconhecido')}")
-                    except Exception as e:
-                        logger.error(f"Erro ao obter detalhes da impressora {ip}: {str(e)}")
-                    
-                    logger.info(f"Impressora encontrada via nmap: {ip} (MAC: {mac}, Portas: {ports})")
-                    printers.append(printer_info)
-                except Exception as e:
-                    logger.error(f"Erro ao processar impressora {ip}: {str(e)}")
-            
+            logger.info(f"nmap encontrou {len(printers)} impressoras em {subnet}")
             return printers
+            
         except Exception as e:
-            logger.error(f"Erro no nmap: {str(e)}")
+            logger.error(f"Erro no escaneamento nmap: {e}")
             return []
+
+    def _process_nmap_result(self, ip, ports):
+        """
+        Processa resultado individual do nmap
+        
+        Args:
+            ip: IP encontrado
+            ports: Lista de portas abertas
+            
+        Returns:
+            dict: Informações da impressora ou None
+        """
+        try:
+            # Verifica se tem portas típicas de impressora
+            printer_ports = [p for p in ports if p in COMMON_PRINTER_PORTS]
+            
+            if not printer_ports:
+                return None
+            
+            # Obtém MAC
+            mac = self._get_mac_for_ip(ip)
+            
+            # Determina URI
+            uri = None
+            if 631 in printer_ports:
+                uri = f"ipp://{ip}/ipp/print"
+            elif 9100 in printer_ports:
+                uri = f"socket://{ip}:9100"
+            elif 515 in printer_ports:
+                uri = f"lpd://{ip}/queue"
+            
+            printer_info = {
+                "ip": ip,
+                "mac_address": mac,
+                "ports": printer_ports,
+                "uri": uri,
+                "name": f"Impressora {ip}",
+                "is_online": True
+            }
+            
+            # Tenta obter detalhes adicionais se tem IPP
+            if 631 in printer_ports:
+                try:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    details = loop.run_until_complete(self._get_printer_attributes(ip))
+                    loop.close()
+                    
+                    if details and isinstance(details, dict):
+                        # Merge dos detalhes
+                        for key, value in details.items():
+                            if value and (key not in printer_info or not printer_info[key]):
+                                printer_info[key] = value
+                                
+                except Exception as e:
+                    logger.debug(f"Não foi possível obter detalhes IPP para {ip}: {e}")
+            
+            return printer_info
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar resultado nmap para {ip}: {e}")
+            return None

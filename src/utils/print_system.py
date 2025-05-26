@@ -3,6 +3,7 @@
 
 """
 Sistema de impressão IPP para arquivos PDF integrado ao sistema de gerenciamento
+VERSÃO FINAL - IGUAL AO CÓDIGO DE TESTE QUE FUNCIONA
 """
 
 import os
@@ -14,6 +15,7 @@ import subprocess
 import threading
 import logging
 import queue
+import socket
 from typing import Dict, Optional, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -24,6 +26,14 @@ import shutil
 import wx
 import json
 from datetime import datetime
+from urllib3.exceptions import InsecureRequestWarning
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import struct
+import ssl
+import requests
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
 
@@ -97,12 +107,22 @@ class PopplerManager:
             possible_paths = [
                 os.path.join(os.getcwd(), "poppler", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "bin"),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "Library", "bin"),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "library", "bin"),
+                r"C:\Program Files\poppler\Library\bin",
                 r"C:\Program Files\poppler\library\bin",
+                r"C:\Program Files\poppler\bin",
+                r"C:\Program Files (x86)\poppler\Library\bin",
+                r"C:\Program Files (x86)\poppler\library\bin",
+                r"C:\Program Files (x86)\poppler\bin",
+                r"C:\poppler\Library\bin",
                 r"C:\poppler\library\bin",
+                r"C:\poppler\bin",
             ]
             
             for path in possible_paths:
                 if os.path.exists(os.path.join(path, "pdftoppm.exe")):
+                    logger.info(f"Poppler encontrado em: {path}")
                     return path
             
             return None
@@ -212,6 +232,41 @@ class IPPTag:
     LANGUAGE = 0x48
     MIMETYPE = 0x49
 
+IPP_STATUS_CODES = {
+    0x0000: "successful-ok",
+    0x0001: "successful-ok-ignored-or-substituted-attributes",
+    0x0002: "successful-ok-conflicting-attributes",
+    0x0400: "client-error-bad-request",
+    0x0401: "client-error-forbidden",
+    0x0402: "client-error-not-authenticated",
+    0x0403: "client-error-not-authorized",
+    0x0404: "client-error-not-possible",
+    0x0405: "client-error-timeout",
+    0x0406: "client-error-not-found",
+    0x0407: "client-error-gone",
+    0x0408: "client-error-request-entity-too-large",
+    0x0409: "client-error-request-value-too-long",
+    0x040A: "client-error-document-format-not-supported",
+    0x040B: "client-error-attributes-or-values-not-supported",
+    0x040C: "client-error-uri-scheme-not-supported",
+    0x040D: "client-error-charset-not-supported",
+    0x040E: "client-error-conflicting-attributes",
+    0x040F: "client-error-compression-not-supported",
+    0x0410: "client-error-compression-error",
+    0x0411: "client-error-document-format-error",
+    0x0412: "client-error-document-access-error",
+    0x0500: "server-error-internal-error",
+    0x0501: "server-error-operation-not-supported",
+    0x0502: "server-error-service-unavailable",
+    0x0503: "server-error-version-not-supported",
+    0x0504: "server-error-device-error",
+    0x0505: "server-error-temporary-error",
+    0x0506: "server-error-not-accepting-jobs",
+    0x0507: "server-error-busy",
+    0x0508: "server-error-job-canceled",
+    0x0509: "server-error-multiple-document-jobs-not-supported",
+}
+
 class ColorMode(Enum):
     AUTO = "auto"
     COLORIDO = "color"
@@ -289,7 +344,7 @@ class PrintJobInfo:
         }
 
 class IPPEncoder:
-    """Codificador para protocolo IPP"""
+    """Codificador para protocolo IPP - IGUAL AO CÓDIGO DE TESTE"""
     
     @staticmethod
     def encode_string(tag: int, name: str, value: str) -> bytes:
@@ -321,7 +376,7 @@ class IPPEncoder:
         return IPPEncoder.encode_integer(IPPTag.ENUM, name, value)
 
 class IPPPrinter:
-    """Classe principal para impressão de arquivos PDF via IPP"""
+    """Classe principal para impressão de arquivos PDF via IPP - IGUAL AO CÓDIGO DE TESTE"""
     
     def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False):
         # Verifica dependências
@@ -331,6 +386,23 @@ class IPPPrinter:
         # Importa após verificação
         global requests
         import requests
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        # Configuração de retry para requisições HTTP
+        retry_strategy = Retry(
+            total=3,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "POST"],
+            backoff_factor=1
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        # Usa a sessão configurada
+        self.session = session
         
         self.printer_ip = printer_ip
         self.port = port
@@ -338,20 +410,132 @@ class IPPPrinter:
         self.protocol = "https" if use_https else "http"
         self.base_url = f"{self.protocol}://{printer_ip}:{port}"
         self.request_id = 1
+        self.discovered_endpoints = []
+        
+        # Se não especificou HTTPS, detecta automaticamente
+        if not use_https:
+            self._auto_detect_https()
+        
+        logger.info(f"Protocolo final: {self.protocol} - {self.base_url}")
+        
+        # Descobre endpoints disponíveis
+        self.discovered_endpoints = self._discover_printer_endpoints()
+    
+    def _discover_printer_endpoints(self):
+        """Descobre os endpoints disponíveis na impressora"""
+        logger.info(f"Descobrindo endpoints para a impressora {self.printer_ip}")
+        
+        # Primeiro tenta o caminho padrão para HP, Brother, Epson, etc.
+        base_endpoints = [
+            "/ipp/print", 
+            "/ipp/printer", 
+            "/ipp", 
+            "/printers/ipp", 
+            "/printers",
+            "/printer",
+            "/ipp/port1",    # Comum em impressoras Brother
+            "/Printer",      # Algumas HP e Xerox
+            ""               # Fallback para raiz
+        ]
+        
+        # Tenta encontrar o endpoint correto
+        working_endpoints = []
+        
+        for endpoint in base_endpoints:
+            url = f"{self.base_url}{endpoint}"
+            try:
+                logger.info(f"Testando endpoint: {url}")
+                response = requests.get(
+                    url,
+                    timeout=5,
+                    verify=False,
+                    allow_redirects=False
+                )
+                
+                status = response.status_code
+                logger.info(f"Endpoint {endpoint} retornou HTTP {status}")
+                
+                # Considera os seguintes códigos como potencialmente válidos
+                if status in [200, 400, 401, 403, 404, 405, 426]:
+                    working_endpoints.append({
+                        "endpoint": endpoint,
+                        "status": status,
+                        "url": url
+                    })
+                    
+                    # Se receber 426, precisa mudar para HTTPS
+                    if status == 426 and not self.use_https:
+                        logger.info(f"Endpoint {endpoint} requer HTTPS")
+                        self.use_https = True
+                        self.protocol = "https"
+                        self.base_url = f"https://{self.printer_ip}:{self.port}"
+                        # Recomeça a descoberta com HTTPS
+                        return self._discover_printer_endpoints()
+                        
+            except requests.exceptions.ConnectionError as e:
+                if ("10054" in str(e) or "Connection aborted" in str(e)) and not self.use_https:
+                    logger.info(f"Conexão abortada ao testar {endpoint}, tentando com HTTPS")
+                    self.use_https = True
+                    self.protocol = "https"
+                    self.base_url = f"https://{self.printer_ip}:{self.port}"
+                    # Recomeça a descoberta com HTTPS
+                    return self._discover_printer_endpoints()
+                else:
+                    logger.info(f"Erro de conexão ao testar {endpoint}: {e}")
+            except Exception as e:
+                logger.info(f"Erro ao testar {endpoint}: {e}")
+        
+        # Ordena por status HTTP para priorizar endpoints que retornaram 200
+        working_endpoints.sort(key=lambda x: x["status"])
+        
+        if working_endpoints:
+            logger.info(f"Endpoints encontrados: {[e['endpoint'] for e in working_endpoints]}")
+            return working_endpoints
+        else:
+            logger.warning("Nenhum endpoint encontrado!")
+            return [{"endpoint": "", "status": 0, "url": self.base_url}] 
+        
+    def _auto_detect_https(self):
+        """Detecta automaticamente se precisa de HTTPS"""
+        # Testa HTTP primeiro
+        try:
+            response = requests.get(
+                f"http://{self.printer_ip}:{self.port}/ipp/print",
+                timeout=3,
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # Se recebeu 426 (Upgrade Required), usa HTTPS
+            if response.status_code == 426:
+                logger.info("HTTP retornou 426 (Upgrade Required), forçando HTTPS")
+                self.use_https = True
+                self.protocol = "https"
+                self.base_url = f"https://{self.printer_ip}:{self.port}"
+                return True
+                
+        except requests.exceptions.ConnectionError as e:
+            # Connection Reset indica que precisa de HTTPS
+            if "10054" in str(e) or "Connection aborted" in str(e):
+                logger.info("HTTP deu Connection Reset, forçando HTTPS")
+                self.use_https = True
+                self.protocol = "https"
+                self.base_url = f"https://{self.printer_ip}:{self.port}"
+                return True
+        except Exception as e:
+            # Se deu erro, tenta HTTPS
+            logger.info(f"Erro em HTTP: {e}, forçando HTTPS")
+            self.use_https = True
+            self.protocol = "https"
+            self.base_url = f"https://{self.printer_ip}:{self.port}"
+            return True
+        
+        return False
         
     def print_file(self, file_path: str, options: PrintOptions, 
-                   job_name: Optional[str] = None, progress_callback=None) -> Tuple[bool, Dict]:
-        """Imprime um arquivo PDF com fallback automático para JPG
+               job_name: Optional[str] = None, progress_callback=None) -> Tuple[bool, Dict]:
+        """Imprime um arquivo PDF com fallback automático para JPG e discovery de endpoints"""
         
-        Args:
-            file_path: Caminho do arquivo PDF
-            options: Opções de impressão
-            job_name: Nome do trabalho de impressão
-            progress_callback: Callback para atualização de progresso
-            
-        Returns:
-            Tuple[bool, Dict]: Sucesso e informações detalhadas do trabalho
-        """
         if not os.path.exists(file_path):
             logger.error(f"Erro: Arquivo não encontrado: {file_path}")
             return False, {"error": "Arquivo não encontrado"}
@@ -384,45 +568,70 @@ class IPPPrinter:
         if progress_callback:
             progress_callback("Tentativa 1: Enviando como PDF...")
             
-        pdf_result = self._print_as_pdf(pdf_data, job_name, options)
-        if pdf_result[0]:
+        if self._print_as_pdf(pdf_data, job_name, options):
             logger.info("Impressão PDF enviada com sucesso!")
             if progress_callback:
                 progress_callback("Impressão PDF enviada com sucesso!")
-            return True, pdf_result[1]
+            return True, {"method": "pdf"}
         
         # Segunda tentativa: converter para JPG e enviar
         logger.info("Tentativa 2: Convertendo para JPG e enviando")
         if progress_callback:
             progress_callback("Tentativa 2: Convertendo para JPG e enviando...")
-            
-        jpg_result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback)
-        if jpg_result[0]:
+        
+        success, result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback)
+        
+        if success:
             logger.info("Impressão JPG enviada com sucesso!")
             if progress_callback:
                 progress_callback("Impressão JPG enviada com sucesso!")
-            return True, jpg_result[1]
+            return True, result
         
         logger.error("Ambas as tentativas falharam")
         if progress_callback:
             progress_callback("Falha: Ambas as tentativas de impressão falharam")
-        return False, {"error": "Ambas as tentativas de impressão falharam", 
-                     "pdf_error": pdf_result[1].get("error", ""),
-                     "jpg_error": jpg_result[1].get("error", "")}
+        
+        # Adicione informações de diagnóstico ao resultado
+        error_info = result.copy() if isinstance(result, dict) else {}
+        error_info.update({
+            "error": "Ambas as tentativas de impressão falharam",
+            "printer_ip": self.printer_ip,
+            "protocol": self.protocol,
+            "endpoints_tested": [
+                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp/print",
+                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp",
+                f"{self.protocol}://{self.printer_ip}:{self.port}/printers/ipp",
+                f"{self.protocol}://{self.printer_ip}:{self.port}/printers",
+                f"{self.protocol}://{self.printer_ip}:{self.port}"
+            ]
+        })
+        
+        return False, error_info
+
     
-    def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> Tuple[bool, Dict]:
-        """Tenta imprimir como PDF"""
+    def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
+        """Tenta imprimir como PDF com URIs corretos"""
         
-        endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
-        result_info = {"method": "pdf"}
+        # Descobre endpoints disponíveis na impressora
+        if not self.discovered_endpoints:
+            self.discovered_endpoints = self._discover_printer_endpoints()
         
-        for endpoint in endpoints:
-            url = f"{self.base_url}{endpoint}"
-            logger.info(f"Testando endpoint: {url}")
+        # Tenta cada endpoint descoberto
+        for endpoint_info in self.discovered_endpoints:
+            endpoint = endpoint_info["endpoint"]
+            url = endpoint_info["url"]
+            
+            logger.info(f"Tentando imprimir PDF em: {url} (protocolo: {self.protocol})")
+            
+            # Cria URI IPP correto
+            if self.use_https:
+                printer_uri = url.replace("https://", "ipps://", 1)
+            else:
+                printer_uri = url.replace("http://", "ipp://", 1)
             
             # Atributos IPP para PDF
             attributes = {
-                "printer-uri": url,
+                "printer-uri": printer_uri,
                 "requesting-user-name": os.getenv("USER", "usuario"),
                 "job-name": job_name,
                 "document-name": job_name,
@@ -442,13 +651,42 @@ class IPPPrinter:
                 attributes["sides"] = options.duplex.value
                 
             # Constrói e envia requisição IPP
-            ipp_result = self._send_ipp_request(url, attributes, pdf_data)
-            if ipp_result[0]:
-                result_info.update(ipp_result[1])
-                return True, result_info
+            if self._send_ipp_request(url, attributes, pdf_data):
+                return True
         
-        result_info["error"] = "Falha ao imprimir arquivo PDF em todos os endpoints"
-        return False, result_info
+        # Se todos os endpoints falharam, tenta diretamente com o endpoint raiz
+        # (algumas impressoras precisam de uma URI específica não descoberta automaticamente)
+        for uri_suffix in ["", "/ipp/print", "/ipp/port1", "/printer"]:
+            printer_uri = f"{'ipps' if self.use_https else 'ipp'}://{self.printer_ip}:{self.port}{uri_suffix}"
+            url = f"{self.protocol}://{self.printer_ip}:{self.port}{uri_suffix}"
+            
+            logger.info(f"Tentativa de fallback: {url} com printer-uri={printer_uri}")
+            
+            attributes = {
+                "printer-uri": printer_uri,
+                "requesting-user-name": os.getenv("USER", "usuario"),
+                "job-name": job_name,
+                "document-name": job_name,
+                "document-format": "application/pdf",
+                "ipp-attribute-fidelity": False,
+                "job-priority": 50,
+                "copies": options.copies,
+                "orientation-requested": 3 if options.orientation == "portrait" else 4,
+                "print-quality": options.quality.value,
+                "media": options.paper_size,
+            }
+            
+            # Adiciona opções condicionais
+            if options.color_mode != ColorMode.AUTO:
+                attributes["print-color-mode"] = options.color_mode.value
+            if options.duplex != Duplex.SIMPLES:
+                attributes["sides"] = options.duplex.value
+                
+            if self._send_ipp_request(url, attributes, pdf_data):
+                return True
+        
+        return False
+
     
     def _create_temp_folder(self, base_name: str) -> str:
         """Cria uma pasta temporária para salvar as imagens convertidas"""
@@ -457,12 +695,10 @@ class IPPPrinter:
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
 
-    def _convert_and_print_as_jpg(self, pdf_path: str, job_name: str, options: PrintOptions, 
-                                progress_callback=None) -> Tuple[bool, Dict]:
-        """Converte PDF para JPG e tenta imprimir com sistema de retry"""
+    def _convert_and_print_as_jpg(self, pdf_path: str, job_name: str, options: PrintOptions, progress_callback=None) -> Tuple[bool, Dict]:
+        """Converte PDF para JPG e tenta imprimir - IGUAL AO CÓDIGO DE TESTE"""
         
         temp_folder = None
-        result_info = {"method": "jpg"}
         
         try:
             logger.info("Convertendo PDF para JPG...")
@@ -494,21 +730,15 @@ class IPPPrinter:
                 convert_kwargs['poppler_path'] = poppler_path
                 logger.info(f"Usando Poppler em: {poppler_path}")
             
-            if progress_callback:
-                progress_callback("Processando páginas...")
-                
             images = pdf2image.convert_from_path(**convert_kwargs)
             
             if not images:
                 logger.error("Falha na conversão PDF para JPG")
-                result_info["error"] = "Falha na conversão PDF para JPG"
-                return False, result_info
+                return False, {"error": "Falha na conversão PDF para JPG"}
             
-            total_pages = len(images)
-            logger.info(f"Convertido para {total_pages} página(s)")
-            
+            logger.info(f"Convertido para {len(images)} página(s)")
             if progress_callback:
-                progress_callback(f"Convertido para {total_pages} página(s)")
+                progress_callback(f"Convertido para {len(images)} página(s)")
             
             # Prepara todas as páginas para impressão
             page_jobs = []
@@ -550,45 +780,36 @@ class IPPPrinter:
                 # Obtém tamanho do arquivo salvo
                 file_size = len(jpg_data)
                 logger.info(f"Página {page_num} preparada: {image_filename} ({file_size:,} bytes)")
-                
-                if progress_callback and page_num % 5 == 0:
-                    progress_callback(f"Preparada página {page_num}/{total_pages}")
             
             logger.info(f"Imagens salvas em: {temp_folder}")
+            logger.info("Arquivos criados:")
+            for page_job in page_jobs:
+                logger.info(f"  - {os.path.basename(page_job.image_path)}")
             
-            # Processa as páginas com sistema de retry
-            process_result = self._process_pages_with_retry(page_jobs, options, progress_callback)
-            result_info.update(process_result[1])
-            result_info["temp_folder"] = temp_folder
-            result_info["total_pages"] = total_pages
-            
-            return process_result[0], result_info
+            # Processa as páginas com sistema de retry e discovery de endpoints
+            return self._process_pages_with_retry(page_jobs, options, progress_callback)
             
         except Exception as e:
             logger.error(f"Erro na conversão/preparação JPG: {e}")
             if temp_folder and os.path.exists(temp_folder):
                 logger.info(f"Imagens parciais mantidas em: {temp_folder}")
-                
-            result_info["error"] = f"Erro na conversão/preparação JPG: {e}"
-            result_info["temp_folder"] = temp_folder
-            return False, result_info
+            return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
+
     
-    def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions, 
-                                progress_callback=None) -> Tuple[bool, Dict]:
-        """Processa páginas com sistema de retry inteligente"""
+    def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions, progress_callback=None) -> bool:
+        """Processa páginas com sistema de retry inteligente e discovery de endpoints"""
         
-        endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+        # Descobre endpoints disponíveis
+        discovered_endpoints = self._discover_printer_endpoints()
+        
         successful_pages = []
         failed_pages = list(page_jobs)  # Copia inicial
         retry_delays = [2, 5, 10]  # Delays progressivos em segundos
-        result_info = {}
         
         # Primeira passada - tenta todas as páginas
-        total_pages = len(page_jobs)
-        logger.info(f"Processando {total_pages} página(s)...")
-        
+        logger.info(f"Processando {len(page_jobs)} página(s)...")
         if progress_callback:
-            progress_callback(f"Processando {total_pages} página(s)...")
+            progress_callback(f"Processando {len(page_jobs)} página(s)...")
         
         for attempt in range(max(p.max_attempts for p in page_jobs)):
             if not failed_pages:
@@ -599,16 +820,18 @@ class IPPPrinter:
             for page_job in failed_pages:
                 page_job.attempts += 1
                 
-                logger.info(f"Enviando página {page_job.page_num}/{total_pages} como JPG (tentativa {page_job.attempts}/{page_job.max_attempts})")
+                logger.info(f"Enviando página {page_job.page_num}/{len(page_jobs)} como JPG (tentativa {page_job.attempts}/{page_job.max_attempts})")
+                logger.info(f"Tamanho JPG página {page_job.page_num}: {len(page_job.jpg_data):,} bytes")
                 
                 if progress_callback:
-                    progress_callback(f"Enviando página {page_job.page_num}/{total_pages} (tentativa {page_job.attempts})")
+                    progress_callback(f"Enviando página {page_job.page_num}/{len(page_jobs)} (tentativa {page_job.attempts})")
                 
                 # Tenta enviar esta página
                 page_success = False
                 
-                for endpoint_idx, endpoint in enumerate(endpoints):
-                    url = f"{self.base_url}{endpoint}"
+                for endpoint_info in discovered_endpoints:
+                    endpoint = endpoint_info["endpoint"]
+                    url = endpoint_info["url"]
                     
                     # Atributos IPP para JPG
                     attributes = {
@@ -629,19 +852,18 @@ class IPPPrinter:
                     if options.color_mode != ColorMode.AUTO:
                         attributes["print-color-mode"] = options.color_mode.value
                     
-                    ipp_result = self._send_ipp_request(url, attributes, page_job.jpg_data)
-                    if ipp_result[0]:
+                    if self._send_ipp_request(url, attributes, page_job.jpg_data):
                         page_success = True
                         break
                     
                     # Se falhou no primeiro endpoint, aguarda um pouco antes do próximo
-                    if endpoint_idx == 0 and not page_success:
+                    if endpoint == discovered_endpoints[0]["endpoint"] and not page_success:
+                        logger.info("Aguardando 1s antes do próximo endpoint...")
                         time.sleep(1)
                 
                 if page_success:
                     logger.info(f"Página {page_job.page_num} enviada com sucesso")
                     successful_pages.append(page_job)
-                    
                     if progress_callback:
                         progress_callback(f"✓ Página {page_job.page_num} impressa com sucesso")
                 else:
@@ -652,14 +874,11 @@ class IPPPrinter:
                         # Aguarda antes da próxima tentativa
                         delay = retry_delays[min(page_job.attempts - 1, len(retry_delays) - 1)]
                         logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                        
                         if progress_callback:
                             progress_callback(f"Aguardando {delay}s antes de tentar página {page_job.page_num} novamente...")
-                            
                         time.sleep(delay)
                     else:
                         logger.error(f"Página {page_job.page_num} falhou após {page_job.max_attempts} tentativas")
-                        
                         if progress_callback:
                             progress_callback(f"✗ Página {page_job.page_num} falhou após {page_job.max_attempts} tentativas")
             
@@ -671,31 +890,61 @@ class IPPPrinter:
                 time.sleep(3)
         
         # Relatório final
+        total_pages = len(page_jobs)
         successful_count = len(successful_pages)
         failed_count = total_pages - successful_count
         
-        logger.info(f"Relatório de impressão:")
+        logger.info("Relatório de impressão:")
         logger.info(f"Páginas enviadas com sucesso: {successful_count}/{total_pages}")
         logger.info(f"Páginas que falharam: {failed_count}/{total_pages}")
         
-        # Constrói informações de resultado
-        result_info["successful_pages"] = successful_count
-        result_info["failed_pages"] = failed_count
-        result_info["total_pages"] = total_pages
-        
         if successful_pages:
-            result_info["successful_page_numbers"] = [p.page_num for p in successful_pages]
+            logger.info(f"Páginas bem-sucedidas: {', '.join(str(p.page_num) for p in successful_pages)}")
         
         remaining_failed = [p for p in page_jobs if p not in successful_pages]
         if remaining_failed:
-            result_info["failed_page_numbers"] = [p.page_num for p in remaining_failed]
-            result_info["error"] = f"Falha ao imprimir {failed_count} página(s)"
-            return False, result_info
+            logger.info(f"Páginas que falharam: {', '.join(str(p.page_num) for p in remaining_failed)}")
+            logger.info(f"Imagens mantidas em: {os.path.dirname(remaining_failed[0].image_path)}")
+            logger.info("Você pode tentar reimprimir manualmente as páginas que falharam")
         else:
-            return True, result_info
+            logger.info("Todas as páginas foram processadas com sucesso!")
+            temp_folder = os.path.dirname(page_jobs[0].image_path)
+            logger.info(f"Imagens temporárias mantidas em: {temp_folder}")
+            logger.info("Você pode remover a pasta manualmente após validar as impressões")
+        
+        # Cria um dicionário para retornar o resultado
+        result = {
+            "total_pages": total_pages,
+            "successful_pages": successful_count,
+            "failed_pages": failed_count,
+            "method": "jpg"
+        }
+        
+        # Retorna True apenas se TODAS as páginas foram impressas com sucesso
+        return successful_count == total_pages, result
+
 
     def _build_ipp_request(self, operation: int, attributes: Dict[str, Any]) -> bytes:
-        """Constrói uma requisição IPP completa"""
+        """Constrói uma requisição IPP completa com correção de URI"""
+        
+        # Corrige o formato do URI da impressora
+        if "printer-uri" in attributes:
+            printer_uri = attributes["printer-uri"]
+            
+            # Assegura que a URI tenha o formato correto
+            if not printer_uri.startswith("ipp://") and not printer_uri.startswith("ipps://"):
+                # Se for uma URL HTTP ou HTTPS, converte para IPP ou IPPS
+                if printer_uri.startswith("http://"):
+                    attributes["printer-uri"] = printer_uri.replace("http://", "ipp://", 1)
+                elif printer_uri.startswith("https://"):
+                    attributes["printer-uri"] = printer_uri.replace("https://", "ipps://", 1)
+                else:
+                    # Se não tem protocolo, adiciona o protocolo IPP apropriado
+                    protocol = "ipps" if self.use_https else "ipp"
+                    if printer_uri.startswith("/"):
+                        attributes["printer-uri"] = f"{protocol}://{self.printer_ip}:{self.port}{printer_uri}"
+                    else:
+                        attributes["printer-uri"] = f"{protocol}://{self.printer_ip}:{self.port}/{printer_uri}"
         
         # Cabeçalho IPP
         packet = struct.pack('>HHI', IPPVersion.IPP_1_1, operation, self.request_id)
@@ -706,9 +955,9 @@ class IPPPrinter:
         
         # Atributos obrigatórios primeiro
         packet += IPPEncoder.encode_string(IPPTag.CHARSET, 
-                                         "attributes-charset", "utf-8")
+                                        "attributes-charset", "utf-8")
         packet += IPPEncoder.encode_string(IPPTag.LANGUAGE, 
-                                         "attributes-natural-language", "en-us")
+                                        "attributes-natural-language", "en-us")
         
         # Adiciona outros atributos
         for name, value in attributes.items():
@@ -743,15 +992,20 @@ class IPPPrinter:
         packet += struct.pack('>B', IPPTag.END)
         
         return packet
-    
-    def _send_ipp_request(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> Tuple[bool, Dict]:
-        """Envia requisição IPP e verifica se teve sucesso"""
+
+    def _send_ipp_request(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Envia requisição IPP com correção de URI e retry inteligente"""
+        
+        # Corrige a URL para o protocolo correto
+        if self.use_https and url.startswith("http:"):
+            url = url.replace("http:", "https:", 1)
+        
+        # Armazena a URL original para diagnóstico
+        original_url = url
         
         # Constrói requisição IPP
         ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
         ipp_request += document_data
-        
-        result_info = {}
         
         try:
             headers = {
@@ -762,7 +1016,8 @@ class IPPPrinter:
                 'User-Agent': 'PDF-IPP/1.1'
             }
             
-            response = requests.post(
+            # Usa sessão configurada com retry
+            response = self.session.post(
                 url, 
                 data=ipp_request, 
                 headers=headers, 
@@ -771,68 +1026,151 @@ class IPPPrinter:
                 allow_redirects=False
             )
             
-            http_status = response.status_code
-            logger.info(f"HTTP Status: {http_status}")
-            result_info["http_status"] = http_status
+            logger.info(f"HTTP Status: {response.status_code}")
             
             # Verifica se HTTP foi 200
-            if http_status != 200:
-                result_info["error"] = f"HTTP status não é 200: {http_status}"
-                return False, result_info
+            if response.status_code != 200:
+                logger.error(f"HTTP não é 200: {response.status_code}")
+                
+                # Se recebeu 426, tenta automaticamente com HTTPS
+                if response.status_code == 426 and not self.use_https:
+                    logger.info("Recebeu HTTP 426, mudando para HTTPS e tentando novamente")
+                    self.use_https = True
+                    self.protocol = "https"
+                    self.base_url = f"https://{self.printer_ip}:{self.port}"
+                    https_url = url.replace("http:", "https:", 1)
+                    
+                    # Atualiza o URI da impressora no atributo
+                    if "printer-uri" in attributes:
+                        attributes["printer-uri"] = https_url
+                    
+                    # Constrói nova requisição com URI atualizado
+                    ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+                    ipp_request += document_data
+                    
+                    # Tenta novamente com HTTPS
+                    try:
+                        https_response = self.session.post(
+                            https_url, 
+                            data=ipp_request, 
+                            headers=headers, 
+                            timeout=30, 
+                            verify=False,
+                            allow_redirects=False
+                        )
+                        
+                        logger.info(f"HTTPS Status: {https_response.status_code}")
+                        
+                        if https_response.status_code == 200:
+                            # Sucesso com HTTPS
+                            return self._verify_ipp_response(https_response)
+                    except Exception as e:
+                        logger.error(f"Erro na segunda tentativa com HTTPS: {e}")
+                
+                return False
             
-            # Verifica status IPP na resposta
-            if len(response.content) >= 8:
-                version = struct.unpack('>H', response.content[0:2])[0]
-                status_code = struct.unpack('>H', response.content[2:4])[0]
-                request_id = struct.unpack('>I', response.content[4:8])[0]
-                
-                logger.info(f"IPP Version: {version >> 8}.{version & 0xFF}")
-                logger.info(f"IPP Status: 0x{status_code:04X}")
-                
-                result_info["ipp_version"] = f"{version >> 8}.{version & 0xFF}"
-                result_info["ipp_status"] = f"0x{status_code:04X}"
-                
-                # Trata códigos de status
-                if status_code == 0x0507:
-                    result_info["error"] = "Erro IPP 0x0507: client-error-document-format-error (formato não suportado)"
-                    return False, result_info
-                elif status_code == 0x040A:
-                    result_info["error"] = "Erro IPP 0x040A: client-error-gone (recurso não disponível)"
-                    return False, result_info
-                elif status_code == 0x0400:
-                    result_info["error"] = "Erro IPP 0x0400: client-error-bad-request (requisição inválida)"
-                    return False, result_info
-                elif status_code == 0x0001:  # Status esperado
-                    logger.info("Status IPP correto (0x0001)")
-                    
-                    job_id = self._extract_job_id_from_response(response.content)
-                    if job_id:
-                        logger.info(f"Job ID: {job_id}")
-                        result_info["job_id"] = job_id
-                    
-                    return True, result_info
-                elif status_code == 0x0000:  # Também aceitável
-                    logger.info("Status IPP alternativo (0x0000)")
-                    return True, result_info
-                else:
-                    result_info["error"] = f"Status IPP não reconhecido: 0x{status_code:04X}"
-                    return False, result_info
-            else:
-                result_info["error"] = "Resposta IPP inválida"
-                return False, result_info
+            # Verifica resposta IPP
+            return self._verify_ipp_response(response)
                 
         except requests.exceptions.Timeout:
             logger.error("Timeout")
-            result_info["error"] = "Timeout na comunicação com a impressora"
         except requests.exceptions.ConnectionError as e:
             logger.error(f"Conexão recusada: {e}")
-            result_info["error"] = f"Conexão recusada: {e}"
+            
+            # Se for Connection Reset e estamos usando HTTP, tenta HTTPS
+            if ("10054" in str(e) or "Connection aborted" in str(e)) and not self.use_https:
+                logger.info("Conexão abortada (10054), mudando para HTTPS e tentando novamente")
+                self.use_https = True
+                self.protocol = "https"
+                self.base_url = f"https://{self.printer_ip}:{self.port}"
+                https_url = url.replace("http:", "https:", 1)
+                
+                # Atualiza o URI da impressora no atributo
+                if "printer-uri" in attributes:
+                    attributes["printer-uri"] = https_url
+                
+                # Constrói nova requisição com URI atualizado
+                ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+                ipp_request += document_data
+                
+                # Tenta novamente com HTTPS
+                try:
+                    https_response = self.session.post(
+                        https_url, 
+                        data=ipp_request, 
+                        headers=headers, 
+                        timeout=30, 
+                        verify=False,
+                        allow_redirects=False
+                    )
+                    
+                    logger.info(f"HTTPS Status: {https_response.status_code}")
+                    
+                    if https_response.status_code == 200:
+                        # Sucesso com HTTPS
+                        return self._verify_ipp_response(https_response)
+                except Exception as e2:
+                    logger.error(f"Erro na segunda tentativa com HTTPS: {e2}")
         except Exception as e:
             logger.error(f"Erro: {e}")
-            result_info["error"] = f"Erro: {e}"
         
-        return False, result_info
+        return False
+
     
+    def _verify_ipp_response(self, response):
+        """Verifica se a resposta IPP é válida e trata códigos de status adequadamente"""
+        # Verifica status IPP na resposta
+        if len(response.content) >= 8:
+            version = struct.unpack('>H', response.content[0:2])[0]
+            status_code = struct.unpack('>H', response.content[2:4])[0]
+            request_id = struct.unpack('>I', response.content[4:8])[0]
+            
+            # Obtém nome do status se disponível
+            status_name = IPP_STATUS_CODES.get(status_code, "unknown")
+            
+            logger.info(f"IPP Version: {version >> 8}.{version & 0xFF}")
+            logger.info(f"IPP Status: 0x{status_code:04X} ({status_name})")
+            
+            # Status de sucesso
+            if status_code in [0x0000, 0x0001, 0x0002]:
+                logger.info(f"Status IPP de sucesso: 0x{status_code:04X} ({status_name})")
+                
+                job_id = self._extract_job_id_from_response(response.content)
+                if job_id:
+                    logger.info(f"Job ID: {job_id}")
+                
+                return True
+                
+            # Analisa erros específicos
+            elif status_code == 0x0400:  # bad-request
+                logger.error(f"Erro IPP 0x0400: client-error-bad-request (requisição inválida)")
+                return False
+            elif status_code == 0x0401:  # forbidden
+                logger.error(f"Erro IPP 0x0401: client-error-forbidden (acesso negado)")
+                return False
+            elif status_code == 0x0403 or status_code == 0x0402:  # not-authorized/not-authenticated
+                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (autenticação necessária)")
+                return False
+            elif status_code == 0x0406 or status_code == 0x0408:  # not-found/request-entity-too-large
+                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (endpoint incorreto ou dados muito grandes)")
+                # Estes erros indicam que precisamos tentar outro endpoint
+                return False
+            elif status_code == 0x040A:  # document-format-not-supported
+                logger.error(f"Erro IPP 0x040A: client-error-document-format-not-supported (formato não suportado)")
+                return False
+            elif status_code == 0x0507:  # document-format-error
+                logger.error(f"Erro IPP 0x0507: client-error-document-format-error (formato não suportado)")
+                return False
+            elif status_code >= 0x0500:  # server-error-*
+                logger.error(f"Erro IPP no servidor: 0x{status_code:04X} ({status_name})")
+                return False
+            else:
+                logger.error(f"Status IPP não reconhecido: 0x{status_code:04X} ({status_name})")
+                return False
+        else:
+            logger.error("Resposta IPP inválida ou muito curta")
+            return False
+
     def _extract_job_id_from_response(self, ipp_response: bytes) -> Optional[int]:
         """Extrai job-id de uma resposta IPP"""
         try:
@@ -850,6 +1188,7 @@ class IPPPrinter:
             
         return None
 
+# Mantém as classes de gerenciamento e diálogos inalteradas
 class PrintQueueManager:
     """Gerencia a fila de impressão"""
     
@@ -911,13 +1250,7 @@ class PrintQueueManager:
                 logger.info("Gerenciador de fila de impressão parado")
     
     def add_job(self, print_job_info, printer_instance, callback=None):
-        """Adiciona um trabalho à fila de impressão
-        
-        Args:
-            print_job_info: Informações do trabalho
-            printer_instance: Instância do IPPPrinter
-            callback: Função de retorno de chamada para notificação
-        """
+        """Adiciona um trabalho à fila de impressão"""
         self.start()  # Garante que o worker está rodando
         
         job_item = {
@@ -990,11 +1323,6 @@ class PrintQueueManager:
                         job_info.total_pages = result.get("total_pages", 0)
                         job_info.completed_pages = result.get("successful_pages", 0)
                         logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
-                        
-                        # Extrai o ID do documento do caminho (se existir)
-                        document_id = None
-                        if hasattr(job_info, 'document_id'):
-                            document_id = job_info.document_id
                         
                         # Tenta excluir o arquivo após impressão bem-sucedida
                         try:
@@ -1717,7 +2045,7 @@ class PrintSystem:
                 status="pending"
             )
             
-            # Cria instância da impressora
+            # Cria instância da impressora (detecta automaticamente HTTP/HTTPS)
             printer_ip = getattr(printer, 'ip', '')
             if not printer_ip:
                 wx.MessageBox(f"A impressora '{printer.name}' não possui um endereço IP configurado.",
@@ -1726,7 +2054,8 @@ class PrintSystem:
             
             printer_instance = IPPPrinter(
                 printer_ip=printer_ip,
-                port=631
+                port=631,
+                use_https=False  # Deixa detectar automaticamente
             )
             
             # Cria e exibe o diálogo de progresso
@@ -1816,6 +2145,63 @@ class PrintSystem:
             # Erro no trabalho
             error_message = data.get("error", "Erro desconhecido")
             dialog.set_error(f"Falha na impressão: {error_message}")
+    
+    def test_printer_connection(self, printer_ip: str, use_https: bool = False) -> Dict[str, Any]:
+        """Testa conexão com uma impressora (baseado no código de teste)"""
+        try:
+            test_printer = IPPPrinter(printer_ip, use_https=use_https)
+            
+            # Testa endpoints básicos
+            endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+            working_endpoints = []
+            
+            for endpoint in endpoints:
+                url = f"{test_printer.base_url}{endpoint}"
+                try:
+                    response = requests.get(
+                        url,
+                        timeout=10,
+                        verify=False,
+                        allow_redirects=False
+                    )
+                    if response.status_code in [200, 400, 401, 404, 405]:
+                        working_endpoints.append(endpoint)
+                except requests.exceptions.ConnectionError as e:
+                    # Tenta com HTTPS se falhar com HTTP
+                    if "10054" in str(e) or "Connection aborted" in str(e):
+                        if not test_printer.use_https:
+                            test_printer.use_https = True
+                            test_printer.protocol = "https"
+                            test_printer.base_url = f"https://{test_printer.printer_ip}:{test_printer.port}"
+                            https_url = url.replace("http:", "https:", 1)
+                            try:
+                                response = requests.get(
+                                    https_url,
+                                    timeout=10,
+                                    verify=False,
+                                    allow_redirects=False
+                                )
+                                if response.status_code in [200, 400, 401, 404, 405]:
+                                    working_endpoints.append(endpoint)
+                            except:
+                                pass
+                except:
+                    pass
+            
+            protocol = test_printer.protocol.upper()
+            
+            return {
+                "success": len(working_endpoints) > 0,
+                "protocol": protocol,
+                "working_endpoints": working_endpoints,
+                "base_url": test_printer.base_url
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
     
     def shutdown(self):
         """Desliga o sistema de impressão"""

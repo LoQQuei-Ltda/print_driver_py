@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+TESTE
 Sistema de impressão IPP para arquivos PDF
 Suporta impressão de arquivos .pdf com fallback automático para JPG
 Inclui sistema de retry para páginas que falharam
