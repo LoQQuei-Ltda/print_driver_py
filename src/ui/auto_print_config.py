@@ -349,41 +349,6 @@ class CustomSpinCtrl(wx.Panel):
             self.current_val = val
             self.text_ctrl.SetValue(str(val))
 
-def apply_dark_scrollbar_style(window):
-    """Aplica estilo escuro nas barras de scroll"""
-    try:
-        # Para Windows, tenta aplicar estilo escuro
-        if wx.Platform == '__WXMSW__':
-            import ctypes
-            from ctypes import wintypes
-            
-            # Obtém o handle da janela
-            hwnd = window.GetHandle()
-            
-            # Define cores escuras para scrollbar
-            # Cor de fundo da scrollbar
-            ctypes.windll.user32.SetClassLongPtrW(
-                hwnd, -10,  # GCL_HBRBACKGROUND
-                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)  # RGB em formato BGR
-            )
-            
-        # Força redesenho
-        window.Refresh()
-        
-    except Exception as e:
-        # Se falhar, continua sem erro
-        pass
-
-def create_styled_scrolled_window(parent, colors):
-    """Cria um ScrolledWindow com estilo escuro"""
-    scrolled = wx.ScrolledWindow(parent, style=wx.BORDER_NONE)
-    scrolled.SetBackgroundColour(colors["bg_color"])
-    
-    # Aplica estilo escuro na scrollbar
-    apply_dark_scrollbar_style(scrolled)
-    
-    return scrolled
-
 class AutoPrintConfigPanel(wx.ScrolledWindow):
     """Painel com rolagem para configurar a impressão automática"""
     
@@ -397,8 +362,6 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
             theme_manager: Gerenciador de temas (opcional)
         """
         super().__init__(parent, style=wx.BORDER_NONE)
-
-        apply_dark_scrollbar_style(self)
         
         self.config = config
         self.theme_manager = theme_manager

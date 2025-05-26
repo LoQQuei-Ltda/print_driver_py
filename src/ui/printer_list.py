@@ -16,20 +16,6 @@ from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
 
-def apply_dark_scrollbar_style(window):
-    """Aplica estilo escuro nas barras de scroll"""
-    try:
-        if wx.Platform == '__WXMSW__':
-            import ctypes
-            hwnd = window.GetHandle()
-            # Define cor escura para scrollbar
-            ctypes.windll.user32.SetClassLongPtrW(
-                hwnd, -10,
-                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)
-            )
-        window.Refresh()
-    except:
-        pass
     
 class PrinterCardPanel(wx.Panel):
     """Painel de card para exibir uma impressora"""
@@ -1501,8 +1487,6 @@ class PrinterListPanel(wx.ScrolledWindow):
             pos=wx.DefaultPosition,
             style=wx.TAB_TRAVERSAL
         )
-
-        apply_dark_scrollbar_style(self)
         
         self.theme_manager = theme_manager
         self.config = config

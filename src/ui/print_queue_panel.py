@@ -16,21 +16,6 @@ from src.utils.print_system import PrintQueueManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrintQueuePanel")
 
-def apply_dark_scrollbar_style(window):
-    """Aplica estilo escuro nas barras de scroll"""
-    try:
-        if wx.Platform == '__WXMSW__':
-            import ctypes
-            hwnd = window.GetHandle()
-            # Define cor escura para scrollbar
-            ctypes.windll.user32.SetClassLongPtrW(
-                hwnd, -10,
-                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)
-            )
-        window.Refresh()
-    except:
-        pass
-
 class PrintQueuePanel(wx.Panel):
     """Painel para exibir e gerenciar a fila de impressão"""
     
@@ -43,8 +28,6 @@ class PrintQueuePanel(wx.Panel):
             config: Configuração do sistema
         """
         super().__init__(parent, style=wx.TAB_TRAVERSAL)
-
-        apply_dark_scrollbar_style(self)
         
         self.config = config
         self.print_queue_manager = PrintQueueManager.get_instance()
