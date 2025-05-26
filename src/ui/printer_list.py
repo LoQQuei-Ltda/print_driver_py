@@ -142,6 +142,10 @@ class PrinterCardPanel(wx.Panel):
         if self.on_select:
             tip_text = wx.StaticText(self, label="Clique para detalhes")
             tip_text.SetForegroundColour(wx.Colour(180, 180, 180))
+            # Adicionar os eventos de hover e clique ao texto de dica
+            tip_text.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+            tip_text.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_enter(evt))
+            tip_text.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_leave(evt))
             main_sizer.Add(tip_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         
         self.SetSizer(main_sizer)
@@ -388,9 +392,15 @@ class PrinterDetailsDialog(wx.Dialog):
                     button.SetBackgroundColour(self.colors["card_bg"])
                     button.Refresh()
             
+            # Vincula eventos ao painel da tab
             tab_button.Bind(wx.EVT_LEFT_DOWN, on_tab_click)
             tab_button.Bind(wx.EVT_ENTER_WINDOW, on_tab_enter)
             tab_button.Bind(wx.EVT_LEAVE_WINDOW, on_tab_leave)
+            
+            # Vincula eventos ao texto da tab também
+            tab_text.Bind(wx.EVT_LEFT_DOWN, on_tab_click)
+            tab_text.Bind(wx.EVT_ENTER_WINDOW, on_tab_enter)
+            tab_text.Bind(wx.EVT_LEAVE_WINDOW, on_tab_leave)
             
             # Destaca a tab selecionada
             if i == 0:
