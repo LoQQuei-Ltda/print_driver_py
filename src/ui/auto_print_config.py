@@ -8,8 +8,381 @@ Painel de configuração de auto-impressão
 import wx
 import logging
 from src.utils.print_system import PrintOptions, ColorMode, Duplex, Quality
+from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.AutoPrintConfig")
+
+class CustomDropdown(wx.Panel):
+    """Dropdown completamente customizado com cores escuras"""
+    
+    def __init__(self, parent, choices, colors, size=(-1, 35)):
+        super().__init__(parent, size=size)
+        
+        self.choices = choices
+        self.colors = colors
+        self.selected_index = 0
+        self.selected_text = choices[0] if choices else ""
+        self.expanded = False
+        self.dropdown_popup = None
+        
+        # Configura o painel principal
+        self.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.SetMinSize(size)
+        
+        # Layout
+        self.sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Texto selecionado
+        self.text_label = wx.StaticText(self, label=self.selected_text)
+        self.text_label.SetForegroundColour(colors["text_color"])
+        self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+        
+        # Seta dropdown
+        self.arrow_label = wx.StaticText(self, label=" ▼")
+        self.arrow_label.SetForegroundColour(colors["text_secondary"])
+        self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+        
+        # Layout
+        self.sizer.Add(self.text_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+        self.sizer.Add(self.arrow_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        self.SetSizer(self.sizer)
+        
+        # Eventos
+        self.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+        self.text_label.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+        self.arrow_label.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+        
+        # Hover effects
+        self.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
+        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
+        self.text_label.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
+        self.text_label.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
+        self.arrow_label.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
+        self.arrow_label.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
+        
+        # Paint event para borda
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+    
+    def on_paint(self, event):
+        """Desenha borda arredondada"""
+        dc = wx.BufferedPaintDC(self)
+        dc.Clear()
+        
+        rect = self.GetClientRect()
+        
+        # Fundo
+        dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
+        dc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))
+        dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, 4)
+    
+    def on_enter(self, event):
+        """Hover effect"""
+        self.SetBackgroundColour(wx.Colour(55, 55, 55))
+        self.text_label.SetBackgroundColour(wx.Colour(55, 55, 55))
+        self.arrow_label.SetBackgroundColour(wx.Colour(55, 55, 55))
+        self.Refresh()
+    
+    def on_leave(self, event):
+        """Remove hover effect"""
+        if not self.expanded:
+            self.SetBackgroundColour(wx.Colour(45, 45, 45))
+            self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+            self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+            self.Refresh()
+    
+    def on_click(self, event):
+        """Abre/fecha dropdown"""
+        if self.expanded:
+            self.hide_dropdown()
+        else:
+            self.show_dropdown()
+    
+    def show_dropdown(self):
+        """Mostra lista dropdown"""
+        if self.expanded or not self.choices:
+            return
+            
+        self.expanded = True
+        self.arrow_label.SetLabel(" ▲")
+        
+        # Posição do popup
+        pos = self.ClientToScreen((0, self.GetSize().height))
+        size = (self.GetSize().width, min(len(self.choices) * 25 + 4, 200))
+        
+        # Cria popup
+        self.dropdown_popup = wx.PopupWindow(self, flags=wx.BORDER_NONE)
+        self.dropdown_popup.SetSize(size)
+        self.dropdown_popup.SetPosition(pos)
+        self.dropdown_popup.SetBackgroundColour(wx.Colour(40, 40, 40))
+        
+        # Lista de opções
+        list_panel = wx.Panel(self.dropdown_popup)
+        list_panel.SetBackgroundColour(wx.Colour(40, 40, 40))
+        list_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Adiciona cada opção
+        self.option_labels = []
+        for i, choice in enumerate(self.choices):
+            option = wx.Panel(list_panel, size=(-1, 25))
+            option.SetBackgroundColour(wx.Colour(50, 50, 50) if i == self.selected_index else wx.Colour(40, 40, 40))
+            
+            option_sizer = wx.BoxSizer(wx.HORIZONTAL)
+            option_label = wx.StaticText(option, label=choice)
+            option_label.SetForegroundColour(self.colors["text_color"])
+            option_label.SetBackgroundColour(option.GetBackgroundColour())
+            
+            option_sizer.Add(option_label, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+            option.SetSizer(option_sizer)
+            
+            # Eventos
+            option.choice_index = i
+            option.Bind(wx.EVT_LEFT_DOWN, self.on_option_click)
+            option_label.Bind(wx.EVT_LEFT_DOWN, self.on_option_click)
+            option.Bind(wx.EVT_ENTER_WINDOW, lambda evt, opt=option, lbl=option_label: self.on_option_hover(evt, opt, lbl))
+            option.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, opt=option, lbl=option_label, idx=i: self.on_option_leave(evt, opt, lbl, idx))
+            option_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt, opt=option, lbl=option_label: self.on_option_hover(evt, opt, lbl))
+            option_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, opt=option, lbl=option_label, idx=i: self.on_option_leave(evt, opt, lbl, idx))
+            
+            list_sizer.Add(option, 0, wx.EXPAND | wx.ALL, 1)
+            self.option_labels.append((option, option_label))
+        
+        list_panel.SetSizer(list_sizer)
+        
+        # Sizer do popup
+        popup_sizer = wx.BoxSizer(wx.VERTICAL)
+        popup_sizer.Add(list_panel, 1, wx.EXPAND)
+        self.dropdown_popup.SetSizer(popup_sizer)
+        
+        # Mostra popup
+        self.dropdown_popup.Show()
+        
+        # Captura cliques fora para fechar
+        self.dropdown_popup.Bind(wx.EVT_KILL_FOCUS, self.on_lose_focus)
+    
+    def on_option_hover(self, event, option, label):
+        """Hover na opção"""
+        option.SetBackgroundColour(wx.Colour(60, 60, 60))
+        label.SetBackgroundColour(wx.Colour(60, 60, 60))
+        option.Refresh()
+    
+    def on_option_leave(self, event, option, label, index):
+        """Remove hover da opção"""
+        bg_color = wx.Colour(50, 50, 50) if index == self.selected_index else wx.Colour(40, 40, 40)
+        option.SetBackgroundColour(bg_color)
+        label.SetBackgroundColour(bg_color)
+        option.Refresh()
+    
+    def on_option_click(self, event):
+        """Seleciona opção"""
+        option = event.GetEventObject()
+        if hasattr(option, 'choice_index'):
+            index = option.choice_index
+        else:
+            # Se clicou no label, pega o painel pai
+            index = option.GetParent().choice_index
+        
+        self.SetSelection(index)
+        self.hide_dropdown()
+    
+    def on_lose_focus(self, event):
+        """Fecha dropdown quando perde foco"""
+        self.hide_dropdown()
+    
+    def hide_dropdown(self):
+        """Esconde dropdown"""
+        if not self.expanded:
+            return
+            
+        self.expanded = False
+        self.arrow_label.SetLabel(" ▼")
+        
+        if self.dropdown_popup:
+            self.dropdown_popup.Destroy()
+            self.dropdown_popup = None
+        
+        # Restaura cor normal
+        self.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.text_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.arrow_label.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.Refresh()
+    
+    def SetSelection(self, index):
+        """Define seleção"""
+        if 0 <= index < len(self.choices):
+            self.selected_index = index
+            self.selected_text = self.choices[index]
+            self.text_label.SetLabel(self.selected_text)
+            self.Refresh()
+    
+    def GetSelection(self):
+        """Retorna índice selecionado"""
+        return self.selected_index
+    
+    def GetStringSelection(self):
+        """Retorna texto selecionado"""
+        return self.selected_text
+
+class CustomSpinCtrl(wx.Panel):
+    """SpinCtrl completamente customizado"""
+    
+    def __init__(self, parent, min_val, max_val, initial, colors, size=(-1, 35)):
+        super().__init__(parent, size=size)
+        
+        self.min_val = min_val
+        self.max_val = max_val
+        self.current_val = initial
+        self.colors = colors
+        
+        self.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.SetMinSize(size)
+        
+        # Layout
+        main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Campo de texto
+        self.text_ctrl = wx.TextCtrl(self, value=str(initial), style=wx.BORDER_NONE | wx.TE_CENTER)
+        self.text_ctrl.SetBackgroundColour(wx.Colour(45, 45, 45))
+        self.text_ctrl.SetForegroundColour(colors["text_color"])
+        
+        # Painel de botões
+        btn_panel = wx.Panel(self, size=(20, -1))
+        btn_panel.SetBackgroundColour(wx.Colour(45, 45, 45))
+        btn_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Botão up
+        self.btn_up = wx.Panel(btn_panel, size=(20, 17))
+        self.btn_up.SetBackgroundColour(wx.Colour(60, 60, 60))
+        up_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        up_label = wx.StaticText(self.btn_up, label="▲")
+        up_label.SetForegroundColour(colors["text_color"])
+        up_label.SetBackgroundColour(wx.Colour(60, 60, 60))
+        up_label.SetFont(wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        up_sizer.Add(up_label, 0, wx.ALIGN_CENTER)
+        self.btn_up.SetSizer(up_sizer)
+        
+        # Botão down
+        self.btn_down = wx.Panel(btn_panel, size=(20, 17))
+        self.btn_down.SetBackgroundColour(wx.Colour(60, 60, 60))
+        down_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        down_label = wx.StaticText(self.btn_down, label="▼")
+        down_label.SetForegroundColour(colors["text_color"])
+        down_label.SetBackgroundColour(wx.Colour(60, 60, 60))
+        down_label.SetFont(wx.Font(8, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        down_sizer.Add(down_label, 0, wx.ALIGN_CENTER)
+        self.btn_down.SetSizer(down_sizer)
+        
+        btn_sizer.Add(self.btn_up, 0, wx.EXPAND)
+        btn_sizer.Add(self.btn_down, 0, wx.EXPAND | wx.TOP, 1)
+        btn_panel.SetSizer(btn_sizer)
+        
+        # Layout principal
+        main_sizer.Add(self.text_ctrl, 1, wx.EXPAND | wx.ALL, 2)
+        main_sizer.Add(btn_panel, 0, wx.EXPAND | wx.RIGHT, 2)
+        self.SetSizer(main_sizer)
+        
+        # Eventos
+        self.btn_up.Bind(wx.EVT_LEFT_DOWN, self.on_increment)
+        up_label.Bind(wx.EVT_LEFT_DOWN, self.on_increment)
+        self.btn_down.Bind(wx.EVT_LEFT_DOWN, self.on_decrement)
+        down_label.Bind(wx.EVT_LEFT_DOWN, self.on_decrement)
+        self.text_ctrl.Bind(wx.EVT_TEXT, self.on_text_change)
+        
+        # Hover effects
+        self.btn_up.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, True))
+        self.btn_up.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, False))
+        up_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, True))
+        up_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_up, up_label, False))
+        
+        self.btn_down.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, True))
+        self.btn_down.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, False))
+        down_label.Bind(wx.EVT_ENTER_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, True))
+        down_label.Bind(wx.EVT_LEAVE_WINDOW, lambda evt: self.on_btn_hover(self.btn_down, down_label, False))
+        
+        # Paint event
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+    
+    def on_paint(self, event):
+        """Desenha borda"""
+        dc = wx.BufferedPaintDC(self)
+        dc.Clear()
+        
+        rect = self.GetClientRect()
+        dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
+        dc.SetPen(wx.Pen(wx.Colour(60, 60, 60), 1))
+        dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, 4)
+    
+    def on_btn_hover(self, btn, label, hover):
+        """Efeito hover nos botões"""
+        color = wx.Colour(80, 80, 80) if hover else wx.Colour(60, 60, 60)
+        btn.SetBackgroundColour(color)
+        label.SetBackgroundColour(color)
+        btn.Refresh()
+    
+    def on_increment(self, event):
+        """Incrementa valor"""
+        new_val = min(self.current_val + 1, self.max_val)
+        self.SetValue(new_val)
+    
+    def on_decrement(self, event):
+        """Decrementa valor"""
+        new_val = max(self.current_val - 1, self.min_val)
+        self.SetValue(new_val)
+    
+    def on_text_change(self, event):
+        """Valida entrada de texto"""
+        try:
+            val = int(self.text_ctrl.GetValue())
+            if self.min_val <= val <= self.max_val:
+                self.current_val = val
+            else:
+                self.text_ctrl.SetValue(str(self.current_val))
+        except ValueError:
+            self.text_ctrl.SetValue(str(self.current_val))
+    
+    def GetValue(self):
+        return self.current_val
+    
+    def SetValue(self, val):
+        if self.min_val <= val <= self.max_val:
+            self.current_val = val
+            self.text_ctrl.SetValue(str(val))
+
+def apply_dark_scrollbar_style(window):
+    """Aplica estilo escuro nas barras de scroll"""
+    try:
+        # Para Windows, tenta aplicar estilo escuro
+        if wx.Platform == '__WXMSW__':
+            import ctypes
+            from ctypes import wintypes
+            
+            # Obtém o handle da janela
+            hwnd = window.GetHandle()
+            
+            # Define cores escuras para scrollbar
+            # Cor de fundo da scrollbar
+            ctypes.windll.user32.SetClassLongPtrW(
+                hwnd, -10,  # GCL_HBRBACKGROUND
+                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)  # RGB em formato BGR
+            )
+            
+        # Força redesenho
+        window.Refresh()
+        
+    except Exception as e:
+        # Se falhar, continua sem erro
+        pass
+
+def create_styled_scrolled_window(parent, colors):
+    """Cria um ScrolledWindow com estilo escuro"""
+    scrolled = wx.ScrolledWindow(parent, style=wx.BORDER_NONE)
+    scrolled.SetBackgroundColour(colors["bg_color"])
+    
+    # Aplica estilo escuro na scrollbar
+    apply_dark_scrollbar_style(scrolled)
+    
+    return scrolled
 
 class AutoPrintConfigPanel(wx.ScrolledWindow):
     """Painel com rolagem para configurar a impressão automática"""
@@ -24,6 +397,8 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
             theme_manager: Gerenciador de temas (opcional)
         """
         super().__init__(parent, style=wx.BORDER_NONE)
+
+        apply_dark_scrollbar_style(self)
         
         self.config = config
         self.theme_manager = theme_manager
@@ -108,22 +483,15 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         action_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para salvar
-        self.save_button = wx.Button(action_panel, label="Salvar Configurações", size=(180, 36))
-        self.save_button.SetBackgroundColour(self.colors["accent_color"])
-        self.save_button.SetForegroundColour(self.colors["text_color"])
+        self.save_button = create_styled_button(
+            action_panel,
+            "Salvar Configurações",
+            self.colors["accent_color"],
+            self.colors["text_color"],
+            wx.Colour(255, 120, 70),
+            (180, 36)
+        )
         self.save_button.Bind(wx.EVT_BUTTON, self.on_save)
-        
-        # Eventos de hover para o botão
-        def on_save_enter(evt):
-            self.save_button.SetBackgroundColour(wx.Colour(255, 120, 70))
-            self.save_button.Refresh()
-        
-        def on_save_leave(evt):
-            self.save_button.SetBackgroundColour(self.colors["accent_color"])
-            self.save_button.Refresh()
-        
-        self.save_button.Bind(wx.EVT_ENTER_WINDOW, on_save_enter)
-        self.save_button.Bind(wx.EVT_LEAVE_WINDOW, on_save_leave)
         
         action_sizer.Add(self.save_button, 0, wx.ALIGN_CENTER_VERTICAL)
         
@@ -168,6 +536,22 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         
         self.auto_print_checkbox = wx.CheckBox(toggle_panel, label="")
         self.auto_print_checkbox.SetValue(self.auto_print_enabled)
+        self.auto_print_checkbox.SetBackgroundColour(self.colors["card_bg"])
+        self.auto_print_checkbox.SetForegroundColour(self.colors["text_color"])
+
+        # Evento de hover para o checkbox
+        def on_checkbox_enter(evt):
+            toggle_panel.SetBackgroundColour(wx.Colour(40, 40, 40))
+            toggle_panel.Refresh()
+
+        def on_checkbox_leave(evt):
+            toggle_panel.SetBackgroundColour(self.colors["card_bg"])
+            toggle_panel.Refresh()
+
+        self.auto_print_checkbox.Bind(wx.EVT_ENTER_WINDOW, on_checkbox_enter)
+        self.auto_print_checkbox.Bind(wx.EVT_LEAVE_WINDOW, on_checkbox_leave)
+        toggle_text.Bind(wx.EVT_ENTER_WINDOW, on_checkbox_enter)
+        toggle_text.Bind(wx.EVT_LEAVE_WINDOW, on_checkbox_leave)
         
         toggle_sizer.Add(toggle_text, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         toggle_sizer.Add(self.auto_print_checkbox, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -241,8 +625,8 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         # Obtém lista de impressoras
         printers = self.config.get_printers()
         printer_names = [p.get('name', '') for p in printers] if printers else []
-        
-        self.printer_choice = wx.Choice(config_panel, choices=printer_names)
+
+        self.printer_choice = CustomDropdown(config_panel, printer_names, self.colors)
         if printer_names:
             # Seleciona a impressora padrão se existir
             default_idx = 0
@@ -251,60 +635,60 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
                     default_idx = i
                     break
             self.printer_choice.SetSelection(default_idx)
-        
+
         config_sizer.Add(printer_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.printer_choice, 0, wx.EXPAND)
-        
+
         # Modo de cor
         color_label = wx.StaticText(config_panel, label="Modo de cor:")
         color_label.SetForegroundColour(self.colors["text_color"])
-        
+
         color_choices = ["Automático", "Colorido", "Preto e branco"]
-        self.color_choice = wx.Choice(config_panel, choices=color_choices)
+        self.color_choice = CustomDropdown(config_panel, color_choices, self.colors)
         self.color_choice.SetSelection(0)  # Automático
-        
+
         config_sizer.Add(color_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.color_choice, 0, wx.EXPAND)
-        
+
         # Duplex
         duplex_label = wx.StaticText(config_panel, label="Impressão frente e verso:")
         duplex_label.SetForegroundColour(self.colors["text_color"])
-        
+
         duplex_choices = ["Somente frente", "Frente e verso (borda longa)", "Frente e verso (borda curta)"]
-        self.duplex_choice = wx.Choice(config_panel, choices=duplex_choices)
+        self.duplex_choice = CustomDropdown(config_panel, duplex_choices, self.colors)
         self.duplex_choice.SetSelection(0)  # Somente frente
-        
+
         config_sizer.Add(duplex_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.duplex_choice, 0, wx.EXPAND)
-        
+
         # Qualidade
         quality_label = wx.StaticText(config_panel, label="Qualidade:")
         quality_label.SetForegroundColour(self.colors["text_color"])
-        
+
         quality_choices = ["Rascunho", "Normal", "Alta"]
-        self.quality_choice = wx.Choice(config_panel, choices=quality_choices)
+        self.quality_choice = CustomDropdown(config_panel, quality_choices, self.colors)
         self.quality_choice.SetSelection(1)  # Normal
-        
+
         config_sizer.Add(quality_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.quality_choice, 0, wx.EXPAND)
-        
+
         # Orientação
         orientation_label = wx.StaticText(config_panel, label="Orientação:")
         orientation_label.SetForegroundColour(self.colors["text_color"])
-        
+
         orientation_choices = ["Retrato", "Paisagem"]
-        self.orientation_choice = wx.Choice(config_panel, choices=orientation_choices)
+        self.orientation_choice = CustomDropdown(config_panel, orientation_choices, self.colors)
         self.orientation_choice.SetSelection(0)  # Retrato
-        
+
         config_sizer.Add(orientation_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.orientation_choice, 0, wx.EXPAND)
-        
+
         # Cópias
         copies_label = wx.StaticText(config_panel, label="Número de cópias:")
         copies_label.SetForegroundColour(self.colors["text_color"])
-        
-        self.copies_spin = wx.SpinCtrl(config_panel, min=1, max=99, initial=1)
-        
+
+        self.copies_spin = CustomSpinCtrl(config_panel, 1, 99, 1, self.colors)
+
         config_sizer.Add(copies_label, 0, wx.ALIGN_RIGHT | wx.ALIGN_CENTER_VERTICAL)
         config_sizer.Add(self.copies_spin, 0, wx.EXPAND)
         

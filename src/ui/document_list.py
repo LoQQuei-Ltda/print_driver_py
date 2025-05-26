@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Componente de listagem de documentos moderno - VERSÃO CORRIGIDA
+Componente de listagem de documentos moderno
 """
 
 import logging
@@ -12,8 +12,24 @@ import datetime
 from src.api.client import APIError
 from src.utils.resource_manager import ResourceManager
 from src.ui.print_dialog import select_printer_and_print
+from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManager.UI.DocumentList")
+
+def apply_dark_scrollbar_style(window):
+    """Aplica estilo escuro nas barras de scroll"""
+    try:
+        if wx.Platform == '__WXMSW__':
+            import ctypes
+            hwnd = window.GetHandle()
+            # Define cor escura para scrollbar
+            ctypes.windll.user32.SetClassLongPtrW(
+                hwnd, -10,
+                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)
+            )
+        window.Refresh()
+    except:
+        pass
 
 class DocumentCardPanel(wx.Panel):
     """Painel de card para exibir um documento com botões de ação"""
@@ -233,25 +249,21 @@ class DocumentCardPanel(wx.Panel):
         Returns:
             wx.Button: Botão criado
         """
-        button = wx.Button(parent, label=label, size=(90, 36))
-        button.SetBackgroundColour(color)
-        button.SetForegroundColour(wx.WHITE)
+        # Define cor de hover baseada na cor principal
+        if color == wx.Colour(255, 90, 36):  # Laranja
+            hover_color = wx.Colour(255, 120, 70)
+        else:
+            hover_color = wx.Colour(80, 80, 80)
+        
+        button = create_styled_button(
+            parent, 
+            label, 
+            color, 
+            wx.WHITE, 
+            hover_color, 
+            (90, 36)
+        )
         button.Bind(wx.EVT_BUTTON, handler)
-        
-        # Eventos de hover para o botão
-        def on_btn_enter(evt):
-            if color == wx.Colour(255, 90, 36):  # Laranja
-                button.SetBackgroundColour(wx.Colour(255, 120, 70))
-            else:
-                button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            button.Refresh()
-        
-        def on_btn_leave(evt):
-            button.SetBackgroundColour(color)
-            button.Refresh()
-        
-        button.Bind(wx.EVT_ENTER_WINDOW, on_btn_enter)
-        button.Bind(wx.EVT_LEAVE_WINDOW, on_btn_leave)
         
         return button
     
@@ -321,6 +333,8 @@ class DocumentListPanel(wx.ScrolledWindow):
             style=wx.TAB_TRAVERSAL
         )
 
+        apply_dark_scrollbar_style(self)
+
         self.theme_manager = theme_manager
         self.api_client = api_client
         self.on_print = on_print
@@ -353,22 +367,15 @@ class DocumentListPanel(wx.ScrolledWindow):
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         title.SetForegroundColour(self.colors["text_color"])
         
-        self.refresh_button = wx.Button(header_panel, label="Atualizar", size=(120, 36))
-        self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        self.refresh_button.SetForegroundColour(self.colors["text_color"])
+        self.refresh_button = create_styled_button(
+            header_panel,
+            "Atualizar",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (120, 36)
+        )
         self.refresh_button.Bind(wx.EVT_BUTTON, self.load_documents)
-        
-        # Eventos de hover para o botão
-        def on_refresh_enter(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            self.refresh_button.Refresh()
-        
-        def on_refresh_leave(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            self.refresh_button.Refresh()
-        
-        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
-        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
         
         header_sizer.Add(title, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
         header_sizer.AddStretchSpacer()

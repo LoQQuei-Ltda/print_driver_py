@@ -11,65 +11,9 @@ import logging
 from src.api import APIError
 from src.utils import AuthError
 from src.utils.resource_manager import ResourceManager
+from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.LoginScreen")
-
-class RoundedButton(wx.Button):
-    """Botão personalizado com cantos arredondados"""
-    
-    def __init__(self, parent, id=wx.ID_ANY, label="", pos=wx.DefaultPosition, 
-                 size=wx.DefaultSize, style=0, validator=wx.DefaultValidator, 
-                 name=wx.ButtonNameStr):
-        # Remova qualquer borda nativa que possa interferir com nossa renderização personalizada
-        style |= wx.BORDER_NONE
-        super().__init__(parent, id, label, pos, size, style, validator, name)
-        
-        self.SetBackgroundColour(wx.Colour(255, 90, 36))  # Cor laranja
-        self.SetForegroundColour(wx.WHITE)
-        
-        # Eventos de hover
-        self.Bind(wx.EVT_ENTER_WINDOW, self.on_enter)
-        self.Bind(wx.EVT_LEAVE_WINDOW, self.on_leave)
-        
-        # Redesenhar para cantos arredondados
-        self.Bind(wx.EVT_PAINT, self.on_paint)
-        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)  # Evita piscar durante redesenho
-    
-    def on_enter(self, event):
-        """Manipula o evento de mouse sobre o botão"""
-        self.SetBackgroundColour(wx.Colour(255, 120, 70))  # Cor de hover
-        self.Refresh()
-        
-    def on_leave(self, event):
-        """Manipula o evento de mouse saindo do botão"""
-        self.SetBackgroundColour(wx.Colour(255, 90, 36))  # Cor original
-        self.Refresh()
-    
-    def on_paint(self, event):
-        """Redesenha o botão com cantos arredondados sem borda branca"""
-        dc = wx.BufferedPaintDC(self)
-        dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
-        dc.Clear()
-        
-        rect = self.GetClientRect()
-        
-        # Desenha o fundo com cantos arredondados - removida a borda branca
-        dc.SetBrush(wx.Brush(self.GetBackgroundColour()))
-        dc.SetPen(wx.Pen(self.GetBackgroundColour(), 1))  # Mesma cor que o fundo
-        
-        radius = 8
-        dc.DrawRoundedRectangle(0, 0, rect.width, rect.height, radius)
-        
-        # Desenha o texto centralizado
-        dc.SetFont(self.GetFont())
-        dc.SetTextForeground(self.GetForegroundColour())
-        
-        text = self.GetLabel()
-        text_width, text_height = dc.GetTextExtent(text)
-        
-        x = (rect.width - text_width) // 2
-        y = (rect.height - text_height) // 2
-        dc.DrawText(text, x, y)
 
 class CustomTextCtrl(wx.Panel):
     """Campo de texto personalizado com cantos arredondados"""
@@ -294,8 +238,14 @@ class LoginScreen(wx.Frame):
         self.error_message.Hide()
         
         # Botão de login
-        self.login_button = RoundedButton(form_panel, label="Entrar")
-        self.login_button.SetMinSize((form_width-2*form_margin, 50))  # 50px de altura
+        self.login_button = create_styled_button(
+            form_panel,
+            "Entrar",
+            wx.Colour(255, 90, 36),
+            wx.WHITE,
+            wx.Colour(255, 120, 70),
+            (form_width-2*form_margin, 50)
+        )
         self.login_button.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         self.login_button.Bind(wx.EVT_BUTTON, self.on_login)
         

@@ -17,6 +17,7 @@ from src.ui.taskbar_icon import PrintManagerTaskBarIcon
 from src.utils.resource_manager import ResourceManager
 from src.ui.print_dialog import select_printer_and_print
 from src.ui.print_queue_panel import PrintQueuePanel
+from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.MainScreen")
 
@@ -58,21 +59,14 @@ class DocumentsPanel(wx.ScrolledWindow):
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         title.SetForegroundColour(wx.WHITE)
         
-        self.refresh_button = wx.Button(header_panel, label="Atualizar", size=(120, 36))
-        self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        self.refresh_button.SetForegroundColour(wx.WHITE)
-        
-        # Eventos de hover para o botão
-        def on_refresh_enter(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(70, 70, 70))
-            self.refresh_button.Refresh()
-
-        def on_refresh_leave(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            self.refresh_button.Refresh()
-        
-        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
-        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
+        self.refresh_button = create_styled_button(
+            header_panel,
+            "Atualizar",
+            wx.Colour(60, 60, 60),
+            wx.WHITE,
+            wx.Colour(80, 80, 80),
+            (120, 36)
+        )
         
         header_sizer.Add(title, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
         header_sizer.AddStretchSpacer()
@@ -342,22 +336,19 @@ class MainScreen(wx.Frame):
             def on_click(evt, handler=item["handler"]):
                 handler(evt)
             
-            # Bind eventos no painel principal
-            item_panel.Bind(wx.EVT_ENTER_WINDOW, on_enter)
-            item_panel.Bind(wx.EVT_LEAVE_WINDOW, on_leave)
-            item_panel.Bind(wx.EVT_LEFT_DOWN, on_click)
-            
-            # Bind eventos nos elementos filhos (ícone e texto) - MODIFICADO
-            if icon_bitmap:
-                # Propaga os mesmos eventos para o ícone
-                icon_bitmap.Bind(wx.EVT_ENTER_WINDOW, lambda evt, p=item_panel: on_enter(evt, p))
-                icon_bitmap.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, p=item_panel: on_leave(evt, p))
-                icon_bitmap.Bind(wx.EVT_LEFT_DOWN, on_click)
-            
-            # Propaga os mesmos eventos para o texto
-            item_text.Bind(wx.EVT_ENTER_WINDOW, lambda evt, p=item_panel: on_enter(evt, p))
-            item_text.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, p=item_panel: on_leave(evt, p))
-            item_text.Bind(wx.EVT_LEFT_DOWN, on_click)
+            # Função para propagar eventos aos filhos
+            def bind_events_recursive(widget, panel=item_panel):
+                """Propaga eventos de mouse para todos os controles filhos"""
+                widget.Bind(wx.EVT_ENTER_WINDOW, lambda evt, p=panel: on_enter(evt, p))
+                widget.Bind(wx.EVT_LEAVE_WINDOW, lambda evt, p=panel: on_leave(evt, p))
+                widget.Bind(wx.EVT_LEFT_DOWN, on_click)
+                
+                # Propaga para todos os filhos
+                for child in widget.GetChildren():
+                    bind_events_recursive(child, panel)
+
+            # Aplica eventos ao painel principal e todos os filhos
+            bind_events_recursive(item_panel)
             
             sidebar_sizer.Add(item_panel, 0, wx.EXPAND | wx.TOP, 5)
             self.menu_buttons.append(item_panel)

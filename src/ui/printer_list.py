@@ -12,9 +12,25 @@ import threading
 import json
 from src.models.printer import Printer
 from src.utils.resource_manager import ResourceManager
+from src.ui.custom_button import create_styled_button
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
 
+def apply_dark_scrollbar_style(window):
+    """Aplica estilo escuro nas barras de scroll"""
+    try:
+        if wx.Platform == '__WXMSW__':
+            import ctypes
+            hwnd = window.GetHandle()
+            # Define cor escura para scrollbar
+            ctypes.windll.user32.SetClassLongPtrW(
+                hwnd, -10,
+                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)
+            )
+        window.Refresh()
+    except:
+        pass
+    
 class PrinterCardPanel(wx.Panel):
     """Painel de card para exibir uma impressora"""
     
@@ -486,22 +502,15 @@ class PrinterDetailsDialog(wx.Dialog):
         
         # Botão para diagnóstico (somente se tiver IP)
         if self.printer.ip:
-            diagnostic_button = wx.Button(self.connectivity_panel, label="Executar Diagnóstico", size=(-1, 36))
-            diagnostic_button.SetBackgroundColour(self.colors["accent_color"])
-            diagnostic_button.SetForegroundColour(self.colors["text_color"])
+            diagnostic_button = create_styled_button(
+                self.connectivity_panel,
+                "Executar Diagnóstico",
+                self.colors["accent_color"],
+                self.colors["text_color"],
+                wx.Colour(255, 120, 70),
+                (-1, 36)
+            )
             diagnostic_button.Bind(wx.EVT_BUTTON, self._on_diagnostic)
-            
-            # Eventos de hover para o botão
-            def on_btn_enter(evt):
-                diagnostic_button.SetBackgroundColour(wx.Colour(255, 120, 70))
-                diagnostic_button.Refresh()
-            
-            def on_btn_leave(evt):
-                diagnostic_button.SetBackgroundColour(self.colors["accent_color"])
-                diagnostic_button.Refresh()
-            
-            diagnostic_button.Bind(wx.EVT_ENTER_WINDOW, on_btn_enter)
-            diagnostic_button.Bind(wx.EVT_LEAVE_WINDOW, on_btn_leave)
             
             connectivity_sizer.Add(diagnostic_button, 0, wx.ALIGN_CENTER | wx.ALL, 15)
         
@@ -598,43 +607,29 @@ class PrinterDetailsDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para atualizar
-        self.refresh_button = wx.Button(self.panel, label="Atualizar Informações", size=(-1, 36))
-        self.refresh_button.SetBackgroundColour(self.colors["accent_color"])
-        self.refresh_button.SetForegroundColour(self.colors["text_color"])
+        self.refresh_button = create_styled_button(
+            self.panel,
+            "Atualizar Informações",
+            self.colors["accent_color"],
+            self.colors["text_color"],
+            wx.Colour(255, 120, 70),
+            (-1, 36)
+        )
         self.refresh_button.Bind(wx.EVT_BUTTON, self._on_refresh)
-        
-        # Eventos de hover para o botão
-        def on_refresh_enter(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(255, 120, 70))
-            self.refresh_button.Refresh()
-        
-        def on_refresh_leave(evt):
-            self.refresh_button.SetBackgroundColour(self.colors["accent_color"])
-            self.refresh_button.Refresh()
-        
-        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
-        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
-        
+
         button_sizer.Add(self.refresh_button, 0, wx.RIGHT, 10)
-        
+
         # Botão para fechar
-        close_button = wx.Button(self.panel, label="Fechar", size=(-1, 36))
-        close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        close_button.SetForegroundColour(self.colors["text_color"])
+        close_button = create_styled_button(
+            self.panel,
+            "Fechar",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (-1, 36)
+        )
         close_button.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CANCEL))
-        
-        # Eventos de hover para o botão
-        def on_close_enter(evt):
-            close_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            close_button.Refresh()
-        
-        def on_close_leave(evt):
-            close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            close_button.Refresh()
-        
-        close_button.Bind(wx.EVT_ENTER_WINDOW, on_close_enter)
-        close_button.Bind(wx.EVT_LEAVE_WINDOW, on_close_leave)
-        
+
         button_sizer.Add(close_button, 0)
         
         main_sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
@@ -714,22 +709,15 @@ class PrinterDetailsDialog(wx.Dialog):
             value_sizer.Add(value_ctrl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
             
             # Botão para copiar
-            copy_button = wx.Button(value_panel, label="Copiar", size=(70, 26))
-            copy_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            copy_button.SetForegroundColour(self.colors["text_color"])
+            copy_button = create_styled_button(
+                value_panel,
+                "Copiar",
+                wx.Colour(60, 60, 60),
+                self.colors["text_color"],
+                wx.Colour(80, 80, 80),
+                (70, 26)
+            )
             copy_button.Bind(wx.EVT_BUTTON, lambda evt, v=value: self._copy_to_clipboard(v))
-            
-            # Eventos de hover para o botão
-            def on_copy_enter(evt):
-                copy_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-                copy_button.Refresh()
-            
-            def on_copy_leave(evt):
-                copy_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-                copy_button.Refresh()
-            
-            copy_button.Bind(wx.EVT_ENTER_WINDOW, on_copy_enter)
-            copy_button.Bind(wx.EVT_LEAVE_WINDOW, on_copy_leave)
             
             value_sizer.Add(copy_button, 0, wx.ALIGN_CENTER_VERTICAL)
             
@@ -805,6 +793,9 @@ class PrinterDetailsDialog(wx.Dialog):
             message: Mensagem de progresso
         """
         # Cria um texto para a mensagem
+        if not message:
+            message = "Erro ao executar diagnóstico!"
+
         message_text = wx.StaticText(self.diagnostic_panel, label=message)
         message_text.SetForegroundColour(self.colors["text_color"])
         self.diagnostic_sizer.Add(message_text, 0, wx.ALL | wx.LEFT, 10)
@@ -1510,6 +1501,8 @@ class PrinterListPanel(wx.ScrolledWindow):
             pos=wx.DefaultPosition,
             style=wx.TAB_TRAVERSAL
         )
+
+        apply_dark_scrollbar_style(self)
         
         self.theme_manager = theme_manager
         self.config = config
@@ -1544,22 +1537,15 @@ class PrinterListPanel(wx.ScrolledWindow):
         title.SetForegroundColour(self.colors["text_color"])
         
         # Botão de atualizar impressoras (com servidor)
-        self.update_button = wx.Button(header_panel, label="Atualizar Impressoras", size=(160, 36))
-        self.update_button.SetBackgroundColour(self.colors["accent_color"])
-        self.update_button.SetForegroundColour(self.colors["text_color"])
+        self.update_button = create_styled_button(
+            header_panel,
+            "Atualizar Impressoras",
+            self.colors["accent_color"],
+            self.colors["text_color"],
+            wx.Colour(255, 120, 70),
+            (160, 36)
+        )
         self.update_button.Bind(wx.EVT_BUTTON, self.on_update_printers)
-        
-        # Eventos de hover para o botão
-        def on_update_enter(evt):
-            self.update_button.SetBackgroundColour(wx.Colour(255, 120, 70))
-            self.update_button.Refresh()
-        
-        def on_update_leave(evt):
-            self.update_button.SetBackgroundColour(self.colors["accent_color"])
-            self.update_button.Refresh()
-        
-        self.update_button.Bind(wx.EVT_ENTER_WINDOW, on_update_enter)
-        self.update_button.Bind(wx.EVT_LEAVE_WINDOW, on_update_leave)
         
         header_sizer.Add(title, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
         header_sizer.AddStretchSpacer()

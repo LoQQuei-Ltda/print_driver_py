@@ -9,11 +9,27 @@ import os
 import wx
 import logging
 from datetime import datetime
+from src.ui.custom_button import create_styled_button
 
 from src.models.print_job import PrintJob, PrintJobStatus
 from src.utils.print_system import PrintQueueManager
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrintQueuePanel")
+
+def apply_dark_scrollbar_style(window):
+    """Aplica estilo escuro nas barras de scroll"""
+    try:
+        if wx.Platform == '__WXMSW__':
+            import ctypes
+            hwnd = window.GetHandle()
+            # Define cor escura para scrollbar
+            ctypes.windll.user32.SetClassLongPtrW(
+                hwnd, -10,
+                ctypes.windll.gdi32.CreateSolidBrush(0x2D2D2D)
+            )
+        window.Refresh()
+    except:
+        pass
 
 class PrintQueuePanel(wx.Panel):
     """Painel para exibir e gerenciar a fila de impressão"""
@@ -27,6 +43,8 @@ class PrintQueuePanel(wx.Panel):
             config: Configuração do sistema
         """
         super().__init__(parent, style=wx.TAB_TRAVERSAL)
+
+        apply_dark_scrollbar_style(self)
         
         self.config = config
         self.print_queue_manager = PrintQueueManager.get_instance()
@@ -70,23 +88,18 @@ class PrintQueuePanel(wx.Panel):
         title.SetFont(wx.Font(14, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         title.SetForegroundColour(self.colors["text_color"])
         
-        self.refresh_button = wx.Button(header_panel, label="Atualizar", size=(120, 36))
-        self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        self.refresh_button.SetForegroundColour(self.colors["text_color"])
+        # self.refresh_button = wx.Button(header_panel, label="Atualizar", size=(120, 36))
+
+        self.refresh_button = create_styled_button(
+            header_panel,
+            "Atualizar",
+            self.colors["accent_color"],
+            self.colors["text_color"],
+            wx.Colour(60, 60, 60),
+            (120, 36)
+        )
         self.refresh_button.Bind(wx.EVT_BUTTON, self.load_jobs)
-        
-        # Eventos de hover para o botão
-        def on_refresh_enter(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            self.refresh_button.Refresh()
-        
-        def on_refresh_leave(evt):
-            self.refresh_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            self.refresh_button.Refresh()
-        
-        self.refresh_button.Bind(wx.EVT_ENTER_WINDOW, on_refresh_enter)
-        self.refresh_button.Bind(wx.EVT_LEAVE_WINDOW, on_refresh_leave)
-        
+
         header_sizer.Add(title, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 20)
         header_sizer.AddStretchSpacer()
         header_sizer.Add(self.refresh_button, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 20)
@@ -113,14 +126,23 @@ class PrintQueuePanel(wx.Panel):
         list_panel.SetBackgroundColour(self.colors["card_bg"])
         list_sizer = wx.BoxSizer(wx.VERTICAL)
         
-        # Lista em formato de tabela
+        # Lista em formato de tabela com estilo customizado
         self.job_list = wx.ListCtrl(
             list_panel,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_SIMPLE
         )
-        
+
         self.job_list.SetBackgroundColour(self.colors["card_bg"])
         self.job_list.SetForegroundColour(self.colors["text_color"])
+
+        # Personaliza as cores das linhas
+        self.job_list.Bind(wx.EVT_LIST_ITEM_SELECTED, self._on_list_item_focus)
+
+        # Estiliza o cabeçalho da lista
+        if hasattr(self.job_list, 'GetMainWindow'):
+            main_window = self.job_list.GetMainWindow()
+            if main_window:
+                main_window.SetBackgroundColour(self.colors["panel_bg"])
         
         # Adiciona colunas
         self.job_list.InsertColumn(0, "ID", width=80)
@@ -138,46 +160,28 @@ class PrintQueuePanel(wx.Panel):
         action_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para cancelar trabalho
-        self.cancel_button = wx.Button(action_panel, label="Cancelar Trabalho", size=(150, 36))
-        self.cancel_button.SetBackgroundColour(wx.Colour(220, 53, 69))  # Vermelho
-        self.cancel_button.SetForegroundColour(self.colors["text_color"])
+        self.cancel_button = create_styled_button(
+            action_panel, 
+            "Cancelar Trabalho", 
+            wx.Colour(220, 53, 69),
+            self.colors["text_color"],
+            wx.Colour(240, 73, 89),
+            (150, 36)
+        )
         self.cancel_button.Bind(wx.EVT_BUTTON, self.on_cancel_job)
         self.cancel_button.Disable()  # Inicialmente desabilitado
-        
-        # Eventos de hover para o botão
-        def on_cancel_enter(evt):
-            if self.cancel_button.IsEnabled():
-                self.cancel_button.SetBackgroundColour(wx.Colour(240, 73, 89))
-                self.cancel_button.Refresh()
-        
-        def on_cancel_leave(evt):
-            if self.cancel_button.IsEnabled():
-                self.cancel_button.SetBackgroundColour(wx.Colour(220, 53, 69))
-                self.cancel_button.Refresh()
-        
-        self.cancel_button.Bind(wx.EVT_ENTER_WINDOW, on_cancel_enter)
-        self.cancel_button.Bind(wx.EVT_LEAVE_WINDOW, on_cancel_leave)
-        
+
         # Botão para ver detalhes
-        self.details_button = wx.Button(action_panel, label="Ver Detalhes", size=(150, 36))
-        self.details_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        self.details_button.SetForegroundColour(self.colors["text_color"])
+        self.details_button = create_styled_button(
+            action_panel,
+            "Ver Detalhes",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (150, 36)
+        )
         self.details_button.Bind(wx.EVT_BUTTON, self.on_view_details)
         self.details_button.Disable()  # Inicialmente desabilitado
-        
-        # Eventos de hover para o botão
-        def on_details_enter(evt):
-            if self.details_button.IsEnabled():
-                self.details_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-                self.details_button.Refresh()
-        
-        def on_details_leave(evt):
-            if self.details_button.IsEnabled():
-                self.details_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-                self.details_button.Refresh()
-        
-        self.details_button.Bind(wx.EVT_ENTER_WINDOW, on_details_enter)
-        self.details_button.Bind(wx.EVT_LEAVE_WINDOW, on_details_leave)
         
         action_sizer.Add(self.cancel_button, 0, wx.RIGHT, 10)
         action_sizer.Add(self.details_button, 0)
@@ -300,6 +304,18 @@ class PrintQueuePanel(wx.Panel):
                 wx.OK | wx.ICON_ERROR
             )
     
+    def _on_list_item_focus(self, event):
+        """Personaliza a cor de seleção dos itens da lista"""
+        # Chama o handler original primeiro
+        self.on_job_selected(event)
+        
+        # Personaliza cores de seleção
+        selected_idx = event.GetIndex()
+        if selected_idx >= 0:
+            # Define cor de fundo para item selecionado
+            self.job_list.SetItemBackgroundColour(selected_idx, wx.Colour(45, 45, 45))
+            self.job_list.SetItemTextColour(selected_idx, self.colors["accent_color"])
+
     def _get_status_text(self, status):
         """Obtém o texto do status"""
         if status == PrintJobStatus.PENDING:
@@ -649,25 +665,19 @@ class PrintJobDetailsDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para fechar
-        close_button = wx.Button(self.panel, wx.ID_CLOSE, label="Fechar", size=(-1, 36))
-        close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        close_button.SetForegroundColour(self.colors["text_color"])
+        close_button = create_styled_button(
+            self.panel,
+            "Fechar",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (-1, 36)
+        )
+        close_button.SetId(wx.ID_CLOSE)
         close_button.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.ID_CLOSE))
-        
-        # Eventos de hover para o botão
-        def on_close_enter(evt):
-            close_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            close_button.Refresh()
-        
-        def on_close_leave(evt):
-            close_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            close_button.Refresh()
-        
-        close_button.Bind(wx.EVT_ENTER_WINDOW, on_close_enter)
-        close_button.Bind(wx.EVT_LEAVE_WINDOW, on_close_leave)
-        
+
         button_sizer.Add(close_button, 0)
-        
+
         main_sizer.Add(button_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
         
         self.panel.SetSizer(main_sizer)

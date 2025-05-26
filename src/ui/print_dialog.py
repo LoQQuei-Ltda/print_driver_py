@@ -10,6 +10,7 @@ import wx
 import logging
 import uuid
 from datetime import datetime
+from src.ui.custom_button import create_styled_button
 
 from src.utils.print_system import PrintSystem, PrintOptions, ColorMode, Duplex, Quality
 
@@ -81,41 +82,27 @@ class SelectPrinterDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para cancelar
-        cancel_button = wx.Button(self.panel, wx.ID_CANCEL, label="Cancelar", size=(-1, 36))
-        cancel_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-        cancel_button.SetForegroundColour(self.colors["text_color"])
-        
-        # Eventos de hover para o botão
-        def on_cancel_enter(evt):
-            cancel_button.SetBackgroundColour(wx.Colour(80, 80, 80))
-            cancel_button.Refresh()
-        
-        def on_cancel_leave(evt):
-            cancel_button.SetBackgroundColour(wx.Colour(60, 60, 60))
-            cancel_button.Refresh()
-        
-        cancel_button.Bind(wx.EVT_ENTER_WINDOW, on_cancel_enter)
-        cancel_button.Bind(wx.EVT_LEAVE_WINDOW, on_cancel_leave)
-        
+        cancel_button = create_styled_button(
+            self.panel,
+            "Cancelar",
+            wx.Colour(60, 60, 60),
+            self.colors["text_color"],
+            wx.Colour(80, 80, 80),
+            (-1, 36)
+        )
+        cancel_button.SetId(wx.ID_CANCEL)
+
         # Botão para selecionar
-        self.select_button = wx.Button(self.panel, wx.ID_OK, label="Selecionar", size=(-1, 36))
-        self.select_button.SetBackgroundColour(self.colors["accent_color"])
-        self.select_button.SetForegroundColour(self.colors["text_color"])
+        self.select_button = create_styled_button(
+            self.panel,
+            "Selecionar",
+            self.colors["accent_color"],
+            self.colors["text_color"],
+            wx.Colour(255, 120, 70),
+            (-1, 36)
+        )
+        self.select_button.SetId(wx.ID_OK)
         self.select_button.Disable()  # Desabilitado até que uma impressora seja selecionada
-        
-        # Eventos de hover para o botão
-        def on_select_enter(evt):
-            if self.select_button.IsEnabled():
-                self.select_button.SetBackgroundColour(wx.Colour(255, 120, 70))
-                self.select_button.Refresh()
-        
-        def on_select_leave(evt):
-            if self.select_button.IsEnabled():
-                self.select_button.SetBackgroundColour(self.colors["accent_color"])
-                self.select_button.Refresh()
-        
-        self.select_button.Bind(wx.EVT_ENTER_WINDOW, on_select_enter)
-        self.select_button.Bind(wx.EVT_LEAVE_WINDOW, on_select_leave)
         
         button_sizer.Add(cancel_button, 0, wx.RIGHT, 10)
         button_sizer.Add(self.select_button, 0)
