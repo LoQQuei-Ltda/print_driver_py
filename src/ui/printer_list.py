@@ -13,6 +13,8 @@ import json
 from src.models.printer import Printer
 from src.utils.resource_manager import ResourceManager
 from src.ui.custom_button import create_styled_button
+import re
+import traceback
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
 
@@ -1736,185 +1738,244 @@ class PrinterListPanel(wx.ScrolledWindow):
             self.Layout()
     
     def on_update_printers(self, event=None):
-        """Atualiza impressoras com o servidor principal"""
+        """Atualiza impressoras com o servidor principal - Versão Melhorada"""
         try:
-            # Mostra um indicador de progresso
-            busy = wx.BusyInfo("Atualizando impressoras do servidor e descobrindo informações na rede. Aguarde...", parent=self)
+            # Desabilita o botão para evitar cliques múltiplos
+            self.update_button.Disable()
+            self.update_button.SetLabel("Atualizando...")
             wx.GetApp().Yield()
             
-            # Primeiro, obtemos as impressoras do servidor
-            if not hasattr(self.api_client, 'get_printers'):
-                wx.MessageBox("Cliente API não possui método get_printers", "Erro", wx.OK | wx.ICON_ERROR)
-                return
-                
-            # Obtém as impressoras do servidor
-            logger.info("Obtendo impressoras do servidor")
-            server_printers = self.api_client.get_printers()
-            logger.info(f"Obtidas {len(server_printers)} impressoras do servidor")
+            # Mostra um indicador de progresso mais detalhado
+            progress_dialog = wx.ProgressDialog(
+                "Atualizando Impressoras",
+                "Iniciando descoberta de impressoras...",
+                maximum=100,
+                parent=self,
+                style=wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME | wx.PD_AUTO_HIDE
+            )
             
-            # Se não houver impressoras, tenta descoberta local
-            if not server_printers:
-                logger.warning("Nenhuma impressora retornada pelo servidor, tentando descoberta local")
-                
-                try:
-                    from src.utils.printer_discovery import PrinterDiscovery
-                    discovery = PrinterDiscovery()
-                    local_printers = discovery.discover_printers()
-                    
-                    if local_printers:
-                        logger.info(f"Descobertas {len(local_printers)} impressoras localmente")
-                        server_printers = local_printers
-                    else:
-                        wx.MessageBox("Não foi possível encontrar impressoras na rede. Verifique a conexão.", 
-                                     "Aviso", wx.OK | wx.ICON_WARNING)
-                        # Remove o indicador de progresso
-                        del busy
-                        return
-                except Exception as e:
-                    logger.error(f"Erro na descoberta local: {str(e)}")
-                    wx.MessageBox(f"Nenhuma impressora retornada pelo servidor e falha na descoberta local: {str(e)}", 
-                                 "Aviso", wx.OK | wx.ICON_WARNING)
-                    # Remove o indicador de progresso
-                    del busy
-                    return
-            
-            # Inicializa a classe de descoberta
             try:
-                from src.utils.printer_discovery import PrinterDiscovery
-                discovery = PrinterDiscovery()
-            except Exception as e:
-                logger.error(f"Erro ao inicializar descoberta: {str(e)}")
-                wx.MessageBox(f"Erro ao inicializar módulo de descoberta: {str(e)}", 
-                            "Erro", wx.OK | wx.ICON_ERROR)
-                del busy
-                return
-                
-            # Para cada impressora do servidor, buscamos o IP pelo MAC
-            updated_printers = []
-            discovery_attempts = 0
-            
-            for server_printer in server_printers:
-                mac = server_printer.get("mac_address", "")
-                if not mac:
-                    logger.warning(f"Impressora sem MAC: {server_printer.get('name', 'Sem nome')}")
-                    updated_printers.append(server_printer)
-                    continue
-                    
-                logger.info(f"Buscando impressora com MAC: {mac}")
-                discovery_attempts += 1
-                
-                # Atualiza o indicador de progresso para indicar o progresso atual
-                if hasattr(busy, 'Destroy'):  # Verifica se o objeto ainda existe
-                    del busy
-                busy = wx.BusyInfo(f"Processando impressora {discovery_attempts}/{len(server_printers)}...", parent=self)
+                # Fase 1: Verificar conectividade
+                progress_dialog.Update(10, "Verificando conectividade...")
                 wx.GetApp().Yield()
                 
-                # Busca específica pelo MAC
-                printer_info = discovery.discover_printer_by_mac(mac)
+                if not hasattr(self.api_client, 'get_printers_with_discovery'):
+                    wx.MessageBox("Cliente API não possui método de descoberta", "Erro", wx.OK | wx.ICON_ERROR)
+                    return
                 
-                if printer_info:
-                    # Encontramos o IP para este MAC
-                    ip = printer_info.get("ip", "")
-                    logger.info(f"MAC {mac} tem IP {ip}")
+                # Fase 2: Obter impressoras do servidor
+                progress_dialog.Update(20, "Conectando ao servidor...")
+                wx.GetApp().Yield()
+                
+                logger.info("Iniciando atualização de impressoras...")
+                
+                # Usa o método melhorado que já inclui descoberta
+                updated_printers = self.api_client.get_printers_with_discovery()
+                
+                # Fase 3: Processamento
+                progress_dialog.Update(80, "Processando impressoras encontradas...")
+                wx.GetApp().Yield()
+                
+                logger.info(f"Método get_printers_with_discovery retornou {len(updated_printers)} impressoras")
+                
+                # Fase 4: Validação e limpeza dos dados
+                validated_printers = self._validate_and_clean_printers(updated_printers)
+                
+                progress_dialog.Update(90, "Salvando configurações...")
+                wx.GetApp().Yield()
+                
+                # Salva as impressoras no config
+                if validated_printers:
+                    logger.info(f"Salvando {len(validated_printers)} impressoras validadas no config")
+                    self.config.set_printers(validated_printers)
                     
-                    # Atualiza a impressora do servidor com os dados encontrados
-                    server_printer["ip"] = ip
-                    server_printer["uri"] = printer_info.get("uri", "")
-                    server_printer["is_online"] = True
+                    # Recarrega a lista na interface
+                    self.load_printers()
                     
-                    # Se for uma impressora IPP (porta 631), buscamos mais detalhes
-                    if 631 in printer_info.get("ports", []):
-                        try:
-                            logger.info(f"Obtendo detalhes da impressora {ip}")
-                            details = discovery.get_printer_details(ip)
-                            if details:
-                                # Atualiza com os detalhes
-                                server_printer.update({
-                                    "model": details.get("printer-make-and-model", ""),
-                                    "location": details.get("printer-location", ""),
-                                    "state": details.get("printer-state", ""),
-                                    "is_ready": "Idle" in details.get("printer-state", ""),
-                                    "attributes": details
-                                })
-                                logger.info(f"Detalhes obtidos para {ip}: {details.get('printer-make-and-model', 'Desconhecido')}")
-                        except Exception as e:
-                            logger.error(f"Erro ao obter detalhes da impressora {ip}: {str(e)}")
+                    # Chama o callback se existir
+                    if self.on_update:
+                        self.on_update(validated_printers)
+                    
+                    progress_dialog.Update(100, "Concluído!")
+                    
+                    # Mostra mensagem de sucesso
+                    wx.MessageBox(
+                        f"{len(validated_printers)} impressoras atualizadas com sucesso!\n\n"
+                        f"Impressoras online: {sum(1 for p in validated_printers if p.get('is_online', False))}\n"
+                        f"Impressoras offline: {sum(1 for p in validated_printers if not p.get('is_online', False))}",
+                        "Atualização Concluída", 
+                        wx.OK | wx.ICON_INFORMATION
+                    )
                 else:
-                    logger.warning(f"Não foi possível encontrar IP para MAC: {mac}")
+                    progress_dialog.Update(100, "Nenhuma impressora encontrada")
                     
-                # Adiciona a impressora à lista
-                updated_printers.append(server_printer)
+                    # Mostra mensagem de aviso
+                    wx.MessageBox(
+                        "Não foi possível encontrar impressoras na rede.\n\n"
+                        "Possíveis causas:\n"
+                        "• Impressoras desligadas ou em modo de economia\n"
+                        "• Firewall bloqueando descoberta de rede\n"
+                        "• Impressoras em sub-rede diferente\n"
+                        "• Problemas de conectividade de rede\n\n"
+                        "Tente novamente em alguns minutos ou verifique as configurações de rede.",
+                        "Nenhuma Impressora Encontrada", 
+                        wx.OK | wx.ICON_WARNING
+                    )
             
-            # Se não encontrou nenhuma impressora, verifica se o problema é que há impressoras locais não cadastradas no servidor
-            if not updated_printers:
-                logger.warning("Nenhuma impressora encontrada. Tentando descoberta completa na rede...")
+            finally:
+                progress_dialog.Destroy()
                 
-                local_printers = discovery.discover_printers()
-                if local_printers:
-                    updated_printers = local_printers
-                    logger.info(f"Descobertas {len(local_printers)} impressoras localmente")
-            
-            # Sanitiza os dados antes de salvar
-            printer_dicts = []
-            for printer_data in updated_printers:
-                try:
-                    # Verifica se os campos principais existem
-                    if 'name' not in printer_data or not printer_data['name']:
-                        printer_data['name'] = f"Impressora {printer_data.get('mac_address', 'Desconhecida')}"
-                    if 'mac_address' not in printer_data:
-                        printer_data['mac_address'] = ""
-                    if 'ip' not in printer_data:
-                        printer_data['ip'] = ""
-                    
-                    # Substitui None por string vazia
-                    for key in printer_data:
-                        if printer_data[key] is None:
-                            printer_data[key] = ""
-                    
-                    # Log das informações finais
-                    logger.info(f"Impressora final: Nome={printer_data['name']}, "
-                            f"IP={printer_data.get('ip', 'Não encontrado')}, "
-                            f"MAC={printer_data.get('mac_address', 'Não encontrado')}")
-                    
-                    # Cria objeto Printer e converte para dicionário
-                    printer = Printer(printer_data)
-                    printer_dict = printer.to_dict()
-                    
-                    # Verifica novamente se há campos None
-                    for key in printer_dict:
-                        if printer_dict[key] is None:
-                            printer_dict[key] = ""
-                    
-                    printer_dicts.append(printer_dict)
-                except Exception as e:
-                    logger.error(f"Erro ao processar impressora: {str(e)}")
-            
-            # Salva as impressoras no config
-            logger.info(f"Salvando {len(printer_dicts)} impressoras no config")
-            self.config.set_printers(printer_dicts)
-            
-            # Recarrega a lista
-            self.load_printers()
-            
-            # Chama o callback se existir
-            if self.on_update:
-                self.on_update(printer_dicts)
-            
-            # Remove o indicador de progresso
-            del busy
-            
-            if printer_dicts:
-                # Mostra mensagem de sucesso
-                wx.MessageBox(f"{len(printer_dicts)} impressoras atualizadas com sucesso!", 
-                            "Informação", wx.OK | wx.ICON_INFORMATION)
-            else:
-                # Mostra mensagem de aviso se não encontrou impressoras
-                wx.MessageBox("Não foi possível encontrar impressoras na rede. Verifique a conexão e tente novamente.", 
-                            "Aviso", wx.OK | wx.ICON_WARNING)
         except Exception as e:
             logger.error(f"Erro ao atualizar impressoras: {str(e)}")
-            wx.MessageBox(f"Erro ao atualizar impressoras: {str(e)}", 
-                        "Erro", wx.OK | wx.ICON_ERROR)
+            logger.error(traceback.format_exc())
+            
+            # Mostra erro específico baseado no tipo de exceção
+            if "ConnectionError" in str(type(e)) or "requests" in str(e).lower():
+                error_msg = (
+                    "Erro de conectividade ao atualizar impressoras.\n\n"
+                    "Verifique:\n"
+                    "• Conexão com a internet\n"
+                    "• Configurações de proxy/firewall\n"
+                    "• Status do servidor"
+                )
+            elif "timeout" in str(e).lower():
+                error_msg = (
+                    "Tempo limite excedido ao descobrir impressoras.\n\n"
+                    "A rede pode estar lenta ou congestionada.\n"
+                    "Tente novamente em alguns minutos."
+                )
+            elif "permission" in str(e).lower() or "admin" in str(e).lower():
+                error_msg = (
+                    "Erro de permissões ao descobrir impressoras.\n\n"
+                    "No Windows, alguns comandos de rede requerem\n"
+                    "privilégios de administrador.\n\n"
+                    "Tente executar o programa como administrador."
+                )
+            else:
+                error_msg = f"Erro ao atualizar impressoras:\n\n{str(e)}"
+            
+            wx.MessageBox(error_msg, "Erro", wx.OK | wx.ICON_ERROR)
+            
+        finally:
+            # Reabilita o botão
+            self.update_button.Enable()
+            self.update_button.SetLabel("Atualizar Impressoras")
+    
+    def _validate_and_clean_printers(self, printers):
+        """
+        Valida e limpa dados das impressoras
+        
+        Args:
+            printers: Lista de impressoras para validar
+            
+        Returns:
+            list: Lista de impressoras validadas
+        """
+        validated_printers = []
+        
+        if not printers or not isinstance(printers, list):
+            logger.warning("Lista de impressoras inválida ou vazia")
+            return []
+        
+        for i, printer_data in enumerate(printers):
+            try:
+                if not isinstance(printer_data, dict):
+                    logger.warning(f"Dados de impressora inválidos no índice {i}: {type(printer_data)}")
+                    continue
+                
+                # Cria uma cópia limpa
+                clean_printer = {}
+                
+                # Campos obrigatórios
+                clean_printer['name'] = self._clean_string_field(
+                    printer_data.get('name') or f"Impressora {printer_data.get('ip', i+1)}"
+                )
+                
+                # MAC Address - tenta várias possibilidades
+                mac = (printer_data.get('macAddress') or 
+                       printer_data.get('mac_address') or 
+                       printer_data.get('MAC') or 
+                       "")
+                clean_printer['macAddress'] = self._clean_string_field(mac)
+                clean_printer['mac_address'] = clean_printer['macAddress']  # Compatibilidade
+                
+                # Campos opcionais
+                clean_printer['ip'] = self._clean_string_field(printer_data.get('ip', ""))
+                clean_printer['uri'] = self._clean_string_field(printer_data.get('uri', ""))
+                clean_printer['model'] = self._clean_string_field(printer_data.get('model', ""))
+                clean_printer['location'] = self._clean_string_field(printer_data.get('location', ""))
+                clean_printer['state'] = self._clean_string_field(printer_data.get('state', ""))
+                
+                # Campos booleanos
+                clean_printer['is_online'] = bool(printer_data.get('is_online', False))
+                clean_printer['is_ready'] = bool(printer_data.get('is_ready', False))
+                
+                # Campos de lista/dict
+                clean_printer['ports'] = printer_data.get('ports', []) if isinstance(printer_data.get('ports'), list) else []
+                clean_printer['attributes'] = printer_data.get('attributes', {}) if isinstance(printer_data.get('attributes'), dict) else {}
+                
+                # Validação básica
+                if not clean_printer['name']:
+                    clean_printer['name'] = f"Impressora {i+1}"
+                
+                # Log da impressora processada
+                logger.info(f"Impressora validada: {clean_printer['name']} "
+                          f"(IP: {clean_printer['ip']}, MAC: {clean_printer['macAddress']}, "
+                          f"Online: {clean_printer['is_online']})")
+                
+                validated_printers.append(clean_printer)
+                
+            except Exception as e:
+                logger.error(f"Erro ao validar impressora no índice {i}: {str(e)}")
+                # Tenta criar uma impressora básica como fallback
+                try:
+                    fallback_printer = {
+                        'name': f"Impressora {i+1}",
+                        'macAddress': "",
+                        'mac_address': "",
+                        'ip': "",
+                        'uri': "",
+                        'model': "",
+                        'location': "",
+                        'state': "",
+                        'is_online': False,
+                        'is_ready': False,
+                        'ports': [],
+                        'attributes': {}
+                    }
+                    validated_printers.append(fallback_printer)
+                    logger.warning(f"Criada impressora fallback para índice {i}")
+                except:
+                    logger.error(f"Falha ao criar impressora fallback para índice {i}")
+                    continue
+        
+        logger.info(f"Validação concluída: {len(validated_printers)} impressoras válidas de {len(printers)} originais")
+        return validated_printers
+
+    def _clean_string_field(self, value):
+        """
+        Limpa e valida campo string
+        
+        Args:
+            value: Valor a ser limpo
+            
+        Returns:
+            str: Valor limpo
+        """
+        if value is None:
+            return ""
+        
+        # Converte para string se não for
+        if not isinstance(value, str):
+            try:
+                value = str(value)
+            except:
+                return ""
+        
+        # Remove caracteres de controle e espaços extras
+        cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', value.strip())
+        
+        return cleaned
     
     def on_printer_selected(self, printer):
         """

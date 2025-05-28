@@ -4,6 +4,7 @@ TESTE
 Sistema de impressão IPP para arquivos PDF
 Suporta impressão de arquivos .pdf com fallback automático para JPG
 Inclui sistema de retry para páginas que falharam
+VERSÃO CORRIGIDA - Resolve erro HTTP 505
 """
 
 import os
@@ -13,9 +14,12 @@ import sys
 import struct
 import argparse
 import subprocess
-from typing import Dict, Optional, Any
+import socket
+import http.client
+from typing import Dict, Optional, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlparse
 import urllib3
 import platform
 import zipfile
@@ -38,6 +42,62 @@ def normalize_filename(filename):
         base, ext = os.path.splitext(filename)
         filename = f"{base[:25]}{ext}"
     return filename
+
+def test_printer_connectivity(printer_ip: str, port: int = 631) -> Tuple[bool, List[str]]:
+    """Testa conectividade básica e descobre endpoints válidos"""
+    print(f"🔍 Testando conectividade com {printer_ip}:{port}...")
+    
+    # Teste básico de socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((printer_ip, port))
+        sock.close()
+        
+        if result != 0:
+            print(f"  ✗ Porta {port} não está acessível")
+            return False, []
+        else:
+            print(f"  ✓ Porta {port} está acessível")
+    except Exception as e:
+        print(f"  ✗ Erro no teste de socket: {e}")
+        return False, []
+    
+    # Testa endpoints comuns
+    valid_endpoints = []
+    test_endpoints = [
+        "/ipp/print",
+        "/ipp",
+        "/printers/ipp", 
+        "/printers",
+        "",
+        "/ipp/printer",
+        "/print"
+    ]
+    
+    session = requests.Session()
+    # Configurações para evitar HTTP 505
+    session.headers.update({
+        'User-Agent': 'IPP/2.1',
+        'Connection': 'close',
+        'Accept': '*/*'
+    })
+    
+    for endpoint in test_endpoints:
+        url = f"http://{printer_ip}:{port}{endpoint}"
+        try:
+            # Faz uma requisição OPTIONS primeiro para testar
+            response = session.options(url, timeout=10, verify=False)
+            if response.status_code in [200, 405, 501]:  # 405/501 são OK, significa que o endpoint existe
+                valid_endpoints.append(endpoint)
+                print(f"  ✓ Endpoint válido: {endpoint} (Status: {response.status_code})")
+            else:
+                print(f"  ✗ Endpoint inválido: {endpoint} (Status: {response.status_code})")
+        except Exception as e:
+            print(f"  ✗ Erro testando {endpoint}: {e}")
+    
+    session.close()
+    return len(valid_endpoints) > 0, valid_endpoints
 
 # Instalação automática de dependências
 def install_package(package):
@@ -282,6 +342,7 @@ class PDFPrinter:
         self.protocol = "https" if use_https else "http"
         self.base_url = f"{self.protocol}://{printer_ip}:{port}"
         self.request_id = 1
+        self.valid_endpoints = []
         
     def print_file(self, file_path: str, options: PrintOptions, 
                    job_name: Optional[str] = None) -> bool:
@@ -306,6 +367,17 @@ class PDFPrinter:
         
         print(f"\n📄 Preparando impressão de: {job_name}")
         print(f"🖨️  Impressora: {self.printer_ip}:{self.port}")
+        
+        # NOVO: Teste de conectividade antes de começar
+        connectivity_ok, valid_endpoints = test_printer_connectivity(self.printer_ip, self.port)
+        if not connectivity_ok:
+            print(f"❌ Impressora não está acessível em {self.printer_ip}:{self.port}")
+            return False
+        
+        # Atualiza a lista de endpoints para usar apenas os válidos
+        if valid_endpoints:
+            print(f"✅ Endpoints válidos encontrados: {', '.join(valid_endpoints)}")
+            self.valid_endpoints = valid_endpoints
         
         # Lê o arquivo PDF
         try:
@@ -336,7 +408,12 @@ class PDFPrinter:
     def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
         """Tenta imprimir como PDF"""
         
-        endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+        # Usa endpoints válidos se disponíveis, senão usa lista padrão
+        if hasattr(self, 'valid_endpoints') and self.valid_endpoints:
+            endpoints = self.valid_endpoints
+            print(f"  → Usando endpoints validados: {endpoints}")
+        else:
+            endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
         
         for endpoint in endpoints:
             url = f"{self.base_url}{endpoint}"
@@ -476,7 +553,12 @@ class PDFPrinter:
     def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions) -> bool:
         """Processa páginas com sistema de retry inteligente"""
         
-        endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+        # Usa endpoints válidos se disponíveis, senão usa lista padrão
+        if hasattr(self, 'valid_endpoints') and self.valid_endpoints:
+            endpoints = self.valid_endpoints
+        else:
+            endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+            
         successful_pages = []
         failed_pages = list(page_jobs)  # Copia inicial
         retry_delays = [2, 5, 10]  # Delays progressivos em segundos
@@ -628,84 +710,215 @@ class PDFPrinter:
         return packet
     
     def _send_ipp_request(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
-        """Envia requisição IPP e verifica se teve sucesso"""
+        """Envia requisição IPP com múltiplas estratégias para máxima compatibilidade"""
         
         # Constrói requisição IPP
         ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
         ipp_request += document_data
         
+        print(f"    Tentando: {url}")
+        
+        # Estratégia 1: Headers minimalistas
+        if self._try_minimal_headers(url, ipp_request):
+            return True
+            
+        # Estratégia 2: Headers compatíveis
+        if self._try_compatible_headers(url, ipp_request):
+            return True
+            
+        # Estratégia 3: HTTP/1.0 direto
+        if self._send_ipp_request_http10(url, attributes, document_data):
+            return True
+            
+        # Estratégia 4: Raw socket (último recurso)
+        return self._try_raw_socket(url, ipp_request)
+    
+    def _try_minimal_headers(self, url: str, ipp_request: bytes) -> bool:
+        """Tenta com headers mínimos essenciais"""
         try:
             headers = {
                 'Content-Type': 'application/ipp',
-                'Accept': 'application/ipp',
-                'Accept-Encoding': 'identity',
-                'Connection': 'close',
-                'User-Agent': 'PDF-IPP/1.1'
+                'Content-Length': str(len(ipp_request))
             }
             
             response = requests.post(
                 url, 
                 data=ipp_request, 
                 headers=headers, 
-                timeout=30, 
-                verify=False,
-                allow_redirects=False
+                timeout=30,
+                verify=False
             )
             
-            print(f"    HTTP Status: {response.status_code}")
+            print(f"    Minimal Headers - HTTP Status: {response.status_code}")
             
-            # Verifica se HTTP foi 200
-            if response.status_code != 200:
-                print(f"    ✗ HTTP não é 200")
-                return False
-            
-            # Verifica status IPP na resposta
-            if len(response.content) >= 8:
-                version = struct.unpack('>H', response.content[0:2])[0]
+            if response.status_code == 200 and len(response.content) >= 8:
                 status_code = struct.unpack('>H', response.content[2:4])[0]
-                request_id = struct.unpack('>I', response.content[4:8])[0]
-                
-                print(f"    IPP Version: {version >> 8}.{version & 0xFF}")
-                print(f"    IPP Status: 0x{status_code:04X}")
-                
-                if status_code == 0x0507:
-                    print(f"    ✗ Erro IPP 0x0507: client-error-document-format-error (formato não suportado)")
-                    return False
-                elif status_code == 0x040A:
-                    print(f"    ✗ Erro IPP 0x040A: client-error-gone (recurso não disponível)")
-                    return False
-                elif status_code == 0x0400:
-                    print(f"    ✗ Erro IPP 0x0400: client-error-bad-request (requisição inválida)")
-                    return False
-                elif status_code == 0x0408:
-                    print(f"    ✗ Erro IPP 0x0408: client-error-request-entity-too-large (documento muito grande)")
-                    return False
-                elif status_code == 0x0001:  # Status esperado
-                    print(f"    ✓ Status IPP correto (0x0001)")
-                    
-                    job_id = self._extract_job_id_from_response(response.content)
-                    if job_id:
-                        print(f"    Job ID: {job_id}")
-                    
+                if status_code in [0x0000, 0x0001]:
+                    print(f"    ✓ Sucesso com headers mínimos!")
                     return True
-                elif status_code == 0x0000:  # Também aceitável
-                    print(f"    ✓ Status IPP alternativo (0x0000)")
-                    return True
-                else:
-                    print(f"    ✗ Status IPP não reconhecido: 0x{status_code:04X}")
-                    return False
-            else:
-                print(f"    ✗ Resposta IPP inválida")
-                return False
-                
-        except requests.exceptions.Timeout:
-            print(f"    ✗ Timeout")
-        except requests.exceptions.ConnectionError as e:
-            print(f"    ✗ Conexão recusada: {e}")
+            
         except Exception as e:
-            print(f"    ✗ Erro: {e}")
+            print(f"    Minimal Headers - Erro: {e}")
         
         return False
+    
+    def _try_compatible_headers(self, url: str, ipp_request: bytes) -> bool:
+        """Tenta com headers mais compatíveis"""
+        try:
+            headers = {
+                'Content-Type': 'application/ipp',
+                'User-Agent': 'CUPS/2.3',
+                'Accept': 'application/ipp',
+                'Content-Length': str(len(ipp_request)),
+                'Connection': 'close'
+            }
+            
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=30,
+                verify=False
+            )
+            
+            print(f"    Compatible Headers - HTTP Status: {response.status_code}")
+            
+            if response.status_code == 200 and len(response.content) >= 8:
+                status_code = struct.unpack('>H', response.content[2:4])[0]
+                if status_code in [0x0000, 0x0001]:
+                    print(f"    ✓ Sucesso com headers compatíveis!")
+                    return True
+            
+        except Exception as e:
+            print(f"    Compatible Headers - Erro: {e}")
+        
+        return False
+    
+    def _try_raw_socket(self, url: str, ipp_request: bytes) -> bool:
+        """Último recurso: conexão raw socket com HTTP básico"""
+        try:
+            parsed_url = urlparse(url)
+            host = parsed_url.hostname
+            port = parsed_url.port or 631
+            path = parsed_url.path or '/'
+            
+            # Constrói requisição HTTP manualmente
+            http_request = f"POST {path} HTTP/1.0\r\n"
+            http_request += f"Host: {host}:{port}\r\n"
+            http_request += f"Content-Type: application/ipp\r\n"
+            http_request += f"Content-Length: {len(ipp_request)}\r\n"
+            http_request += f"Connection: close\r\n"
+            http_request += "\r\n"
+            
+            # Conecta via socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(30)
+            sock.connect((host, port))
+            
+            # Envia requisição
+            sock.send(http_request.encode('ascii'))
+            sock.send(ipp_request)
+            
+            # Lê resposta
+            response_data = b""
+            while True:
+                try:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response_data += chunk
+                except socket.timeout:
+                    break
+            
+            sock.close()
+            
+            # Analisa resposta
+            if b"HTTP/1." in response_data[:20]:
+                status_line = response_data.split(b'\r\n')[0].decode('ascii')
+                status_code = int(status_line.split()[1])
+                
+                print(f"    Raw Socket - HTTP Status: {status_code}")
+                
+                if status_code == 200:
+                    # Encontra início dos dados IPP (após headers HTTP)
+                    ipp_start = response_data.find(b'\r\n\r\n')
+                    if ipp_start >= 0:
+                        ipp_data = response_data[ipp_start + 4:]
+                        if len(ipp_data) >= 8:
+                            ipp_status = struct.unpack('>H', ipp_data[2:4])[0]
+                            if ipp_status in [0x0000, 0x0001]:
+                                print(f"    ✓ Sucesso com raw socket!")
+                                return True
+            
+        except Exception as e:
+            print(f"    Raw Socket - Erro: {e}")
+        
+        return False
+
+    def _send_ipp_request_http10(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Fallback usando HTTP/1.0 simplificado"""
+        
+        try:
+            parsed_url = urlparse(url)
+            
+            # Constrói requisição IPP
+            ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+            ipp_request += document_data
+            
+            # Usa HTTP/1.0 manualmente com headers mínimos
+            if parsed_url.scheme == 'https':
+                conn = http.client.HTTPSConnection(
+                    parsed_url.hostname, 
+                    parsed_url.port or 631,
+                    timeout=30
+                )
+            else:
+                conn = http.client.HTTPConnection(
+                    parsed_url.hostname, 
+                    parsed_url.port or 631,
+                    timeout=30
+                )
+            
+            # Headers mínimos para HTTP/1.0
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Content-Length': str(len(ipp_request))
+            }
+            
+            path = parsed_url.path if parsed_url.path else '/'
+            
+            print(f"    Fallback HTTP/1.0: {url}")
+            
+            # Faz requisição HTTP/1.0 explícita
+            conn.putrequest('POST', path, skip_host=True, skip_accept_encoding=True)
+            conn.putheader('Host', f"{parsed_url.hostname}:{parsed_url.port or 631}")
+            for header, value in headers.items():
+                conn.putheader(header, value)
+            conn.endheaders()
+            
+            # Envia dados
+            conn.send(ipp_request)
+            
+            response = conn.getresponse()
+            response_data = response.read()
+            
+            print(f"    HTTP/1.0 Status: {response.status}")
+            
+            conn.close()
+            
+            if response.status == 200 and len(response_data) >= 8:
+                status_code = struct.unpack('>H', response_data[2:4])[0]
+                print(f"    IPP Status (HTTP/1.0): 0x{status_code:04X}")
+                
+                if status_code in [0x0000, 0x0001]:
+                    print(f"    ✓ HTTP/1.0 funcionou!")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"    ✗ Erro HTTP/1.0: {e}")
+            return False
     
     def _extract_job_id_from_response(self, ipp_response: bytes) -> Optional[int]:
         """Extrai job-id de uma resposta IPP"""

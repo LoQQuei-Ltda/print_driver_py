@@ -2,13 +2,15 @@
 # -*- coding: utf-8 -*-
 
 """
-Cliente para comunicação com a API
+Cliente para comunicação com a API - Versão Corrigida
 """
 
 import json
 import logging
 import requests
 from requests.exceptions import RequestException
+import time
+import traceback
 
 logger = logging.getLogger("PrintManagementSystem.API.Client")
 
@@ -222,9 +224,10 @@ class APIClient:
             
             # Verifica se o resultado é uma lista
             if isinstance(result, list):
-                print(result)
+                logger.info(f"Servidor retornou {len(result)} impressoras")
                 return result
             # Se não for uma lista, retorna uma lista vazia
+            logger.warning("Servidor não retornou lista de impressoras")
             return []
         except APIError as e:
             # Se recebermos um erro 404, retornamos uma lista vazia
@@ -237,88 +240,220 @@ class APIClient:
     def get_printers_with_discovery(self):
         """
         Obtém lista de impressoras e enriquece com descoberta automática
+        Versão melhorada com melhor tratamento de erros e fallbacks
         
         Returns:
             list: Lista de impressoras com informações completas
         """
+        logger.info("Iniciando obtenção de impressoras com descoberta automática")
+        
+        # Primeiro obtém impressoras do servidor
+        server_printers = []
         try:
-            # Primeiro obtém impressoras do servidor
-            printers = []
             result = self._make_request("GET", "/desktop/printers")
             
-            # Verifica se o resultado é uma lista
             if isinstance(result, list):
-                printers = result
-            
-            # Se não conseguir impressoras do servidor, retorna lista vazia
-            if not printers:
-                logger.warning("Nenhuma impressora retornada pelo servidor")
-                return []
-                
-            # Cria um dicionário com as impressoras pelo MAC address
-            printers_by_mac = {}
-            for printer in printers:
-                mac = printer.get("macAddress", "")
-                if mac:
-                    mac = mac.lower()
-                    printers_by_mac[mac] = printer
-            
-            # Executa a descoberta automática
+                server_printers = result
+                logger.info(f"Servidor retornou {len(server_printers)} impressoras")
+            else:
+                logger.warning("Servidor não retornou lista válida de impressoras")
+        except APIError as e:
+            if e.status_code == 404:
+                logger.warning("Endpoint de impressoras não encontrado no servidor")
+            else:
+                logger.warning(f"Erro ao obter impressoras do servidor: {str(e)}")
+        except Exception as e:
+            logger.warning(f"Erro inesperado ao acessar servidor: {str(e)}")
+        
+        # Se não conseguiu impressoras do servidor, tenta descoberta local
+        if not server_printers:
+            logger.info("Nenhuma impressora do servidor, tentando descoberta local completa")
             try:
                 from src.utils.printer_discovery import PrinterDiscovery
                 
                 discovery = PrinterDiscovery()
                 discovered_printers = discovery.discover_printers()
                 
-                # Para cada impressora descoberta
-                for discovered in discovered_printers:
-                    mac = discovered.get("macAddress", "")
+                if discovered_printers:
+                    logger.info(f"Descoberta local encontrou {len(discovered_printers)} impressoras")
+                    return self._format_discovered_printers(discovered_printers)
+                else:
+                    logger.warning("Descoberta local não encontrou impressoras")
+                    return []
                     
-                    # Se não tem MAC ou é desconhecido, pula
-                    if not mac or mac == "desconhecido":
-                        continue
-
-                    mac = mac.lower()
-                    
-                    # Verifica se existe uma impressora com este MAC
-                    if mac in printers_by_mac:
-                        # Atualiza a impressora existente com os dados descobertos
-                        printers_by_mac[mac].update({
-                            "ip": discovered.get("ip", ""),
-                            "uri": discovered.get("uri", ""),
-                            "is_online": True
-                        })
-                        
-                        # Obtém detalhes adicionais (estado, modelo, etc.)
-                        ip = discovered.get("ip")
-                        if ip:
-                            try:
-                                details = discovery.get_printer_details(ip)
-                                if details:
-                                    printers_by_mac[mac].update({
-                                        "model": details.get("printer-make-and-model", ""),
-                                        "location": details.get("printer-location", ""),
-                                        "state": details.get("printer-state", ""),
-                                        "is_ready": "Idle" in details.get("printer-state", ""),
-                                        "attributes": details
-                                    })
-                            except Exception as e:
-                                logger.warning(f"Erro ao obter detalhes da impressora {ip}: {str(e)}")
+            except ImportError as e:
+                logger.error(f"Módulo de descoberta não disponível: {str(e)}")
+                return []
+            except Exception as e:
+                logger.error(f"Erro na descoberta local: {str(e)}")
+                logger.error(traceback.format_exc())
+                return []
+        
+        # Enriquece impressoras do servidor com dados de descoberta
+        return self._enrich_server_printers(server_printers)
+    
+    def _enrich_server_printers(self, server_printers):
+        """
+        Enriquece impressoras do servidor com dados de descoberta
+        
+        Args:
+            server_printers: Lista de impressoras do servidor
+            
+        Returns:
+            list: Lista de impressoras enriquecidas
+        """
+        logger.info(f"Enriquecendo {len(server_printers)} impressoras do servidor")
+        
+        try:
+            from src.utils.printer_discovery import PrinterDiscovery
+        except ImportError as e:
+            logger.error(f"Módulo de descoberta não disponível: {str(e)}")
+            return server_printers
+        
+        try:
+            discovery = PrinterDiscovery()
+            enriched_printers = []
+            
+            for printer in server_printers:
+                try:
+                    enriched_printer = self._enrich_single_printer(printer, discovery)
+                    enriched_printers.append(enriched_printer)
+                except Exception as e:
+                    logger.warning(f"Erro ao enriquecer impressora {printer.get('name', 'desconhecida')}: {str(e)}")
+                    # Adiciona a impressora original se falhar
+                    enriched_printers.append(printer)
+            
+            logger.info(f"Enriquecimento concluído: {len(enriched_printers)} impressoras processadas")
+            return enriched_printers
+            
+        except Exception as e:
+            logger.error(f"Erro geral no enriquecimento: {str(e)}")
+            logger.error(traceback.format_exc())
+            return server_printers
+    
+    def _enrich_single_printer(self, printer, discovery):
+        """
+        Enriquece uma única impressora com dados de descoberta
+        
+        Args:
+            printer: Dados da impressora do servidor
+            discovery: Instância do PrinterDiscovery
+            
+        Returns:
+            dict: Impressora enriquecida
+        """
+        # Faz uma cópia para não modificar o original
+        enriched = printer.copy()
+        
+        # Normaliza campos
+        mac = enriched.get("macAddress") or enriched.get("mac_address", "")
+        if not mac:
+            logger.warning(f"Impressora '{enriched.get('name', 'sem nome')}' sem MAC address")
+            return enriched
+        
+        # Normaliza o MAC
+        normalized_mac = discovery.normalize_mac(mac)
+        if not normalized_mac:
+            logger.warning(f"MAC inválido para impressora '{enriched.get('name', 'sem nome')}': {mac}")
+            return enriched
+        
+        # Padroniza o campo MAC
+        enriched["macAddress"] = normalized_mac
+        enriched["mac_address"] = normalized_mac
+        
+        try:
+            # Tenta descobrir o IP para este MAC
+            logger.info(f"Buscando IP para MAC {normalized_mac}...")
+            
+            discovered_info = discovery.discover_printer_by_mac(normalized_mac)
+            
+            if discovered_info:
+                # Atualiza com dados descobertos
+                enriched.update({
+                    "ip": discovered_info.get("ip", ""),
+                    "uri": discovered_info.get("uri", ""),
+                    "is_online": True,
+                    "ports": discovered_info.get("ports", [])
+                })
                 
-                logger.info(f"Enriquecidas {len(printers_by_mac)} impressoras com dados de descoberta")
+                logger.info(f"IP encontrado para {normalized_mac}: {discovered_info.get('ip')}")
+                
+                # Se tem IP e porta IPP, tenta obter detalhes
+                ip = discovered_info.get("ip")
+                if ip and 631 in discovered_info.get("ports", []):
+                    try:
+                        logger.info(f"Obtendo detalhes IPP para {ip}...")
+                        details = discovery.get_printer_details(ip)
+                        
+                        if details and isinstance(details, dict):
+                            # Atualiza com detalhes IPP
+                            enriched.update({
+                                "model": details.get("printer-make-and-model", ""),
+                                "location": details.get("printer-location", ""),
+                                "state": details.get("printer-state", ""),
+                                "is_ready": "Idle" in details.get("printer-state", ""),
+                                "attributes": details
+                            })
+                            
+                            logger.info(f"Detalhes IPP obtidos para {ip}: {details.get('printer-make-and-model', 'modelo desconhecido')}")
+                        else:
+                            logger.warning(f"Detalhes IPP inválidos para {ip}")
+                            
+                    except Exception as e:
+                        logger.warning(f"Erro ao obter detalhes IPP para {ip}: {str(e)}")
+                        
+            else:
+                logger.warning(f"Não foi possível encontrar IP para MAC {normalized_mac}")
+                # Marca como offline se não encontrou
+                enriched.update({
+                    "ip": "",
+                    "is_online": False
+                })
+                
+        except Exception as e:
+            logger.error(f"Erro ao descobrir informações para MAC {normalized_mac}: {str(e)}")
+            enriched.update({
+                "ip": "",
+                "is_online": False
+            })
+        
+        return enriched
+    
+    def _format_discovered_printers(self, discovered_printers):
+        """
+        Formata impressoras descobertas localmente para o formato esperado
+        
+        Args:
+            discovered_printers: Lista de impressoras descobertas
+            
+        Returns:
+            list: Lista formatada
+        """
+        formatted_printers = []
+        
+        for printer in discovered_printers:
+            try:
+                formatted = {
+                    "name": printer.get("name", f"Impressora {printer.get('ip', 'desconhecida')}"),
+                    "macAddress": printer.get("mac_address", "desconhecido"),
+                    "mac_address": printer.get("mac_address", "desconhecido"),
+                    "ip": printer.get("ip", ""),
+                    "uri": printer.get("uri", ""),
+                    "is_online": printer.get("is_online", True),
+                    "ports": printer.get("ports", []),
+                    "model": printer.get("model", ""),
+                    "location": printer.get("location", ""),
+                    "state": printer.get("state", ""),
+                    "is_ready": printer.get("is_ready", False),
+                    "attributes": printer.get("attributes", {})
+                }
+                
+                formatted_printers.append(formatted)
                 
             except Exception as e:
-                logger.warning(f"Erro na descoberta automática: {str(e)}")
-            
-            return printers
-            
-        except APIError as e:
-            # Se recebermos um erro 404, retornamos uma lista vazia
-            if e.status_code == 404:
-                logger.warning("Endpoint de impressoras não encontrado. Retornando lista vazia.")
-                return []
-            # Propaga outros erros
-            raise
+                logger.warning(f"Erro ao formatar impressora descoberta: {str(e)}")
+        
+        return formatted_printers
         
     def sync_print_job(self, date, file_id, asset_id, pages):
         """
