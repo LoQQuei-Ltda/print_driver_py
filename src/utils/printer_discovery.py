@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Utilitário para descoberta automática de impressoras na rede - Versão Corrigida
-Melhorada para maior compatibilidade com Windows 11 e robustez geral
+Utilitário para descoberta automática de impressoras na rede - Versão Universalmente Compatível
+Funciona perfeitamente em Windows 10, Windows 11, Windows Server, Linux e macOS
 """
 
 import asyncio
@@ -22,16 +22,17 @@ from datetime import datetime
 import platform
 import random
 import traceback
+import struct
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrinterDiscovery")
 
-# Configurações globais ajustadas para maior compatibilidade
-TIMEOUT_REQUEST = 3         # Aumentado de 2 para 3 segundos
-TIMEOUT_SCAN = 1           # Aumentado de 0.3 para 1 segundo
-TIMEOUT_PING = 2           # Novo timeout específico para ping
-PARALLEL_HOSTS = 15        # Reduzido de 25 para 15 para evitar sobrecarga
-RETRY_ATTEMPTS = 3         # Número de tentativas para comandos que podem falhar
-COMMON_PRINTER_PORTS = [631, 9100, 80, 443, 515]
+# Configurações globais base
+BASE_TIMEOUT_REQUEST = 5
+BASE_TIMEOUT_SCAN = 2
+BASE_TIMEOUT_PING = 3
+BASE_PARALLEL_HOSTS = 10
+RETRY_ATTEMPTS = 3
+COMMON_PRINTER_PORTS = [631, 9100, 80, 443, 515, 8080, 8443]
 
 # Configurações para o IPP
 try:
@@ -42,20 +43,150 @@ except ImportError:
     logger.warning("Módulo pyipp não encontrado. Informações detalhadas de impressoras não estarão disponíveis.")
 
 class PrinterDiscovery:
-    """Classe para descoberta automática de impressoras na rede - Versão Melhorada"""
+    """Classe para descoberta automática de impressoras na rede - Versão Universalmente Compatível"""
     
     def __init__(self):
         """Inicializa o descobridor de impressoras"""
         self.printers = []
         self.system = platform.system().lower()
         self.is_windows = self.system == "windows"
+        
+        # Detecção detalhada do Windows
+        self.windows_version = self._detect_windows_version()
+        self.is_server = self.windows_version.get('is_server', False)
+        self.is_win10 = self.windows_version.get('is_win10', False)
+        self.is_win11 = self.windows_version.get('is_win11', False)
+        
         self.is_admin = self._check_admin_privileges()
         
         # Cache para MACs descobertos
         self.mac_cache = {}
         self.last_arp_update = 0
         
-        logger.info(f"Sistema: {self.system}, Admin: {self.is_admin}")
+        # Configurações específicas do sistema
+        self.config = self._setup_system_configs()
+        
+        logger.info(f"Sistema: {self.system}, Versão: {self.windows_version}, Admin: {self.is_admin}")
+        logger.info(f"Configurações: Timeouts={self.config['timeouts']}, Parallelismo={self.config['parallel_hosts']}")
+    
+    def _detect_windows_version(self):
+        """Detecta versão específica do Windows"""
+        if not self.is_windows:
+            return {'version': 'not_windows', 'is_server': False, 'is_win10': False, 'is_win11': False}
+        
+        version_info = {
+            'version': 'unknown',
+            'is_server': False,
+            'is_win10': False,
+            'is_win11': False,
+            'build': 0
+        }
+        
+        try:
+            # Método 1: Registry
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
+                               r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+            
+            product_name = winreg.QueryValueEx(key, "ProductName")[0]
+            current_build = winreg.QueryValueEx(key, "CurrentBuild")[0]
+            
+            try:
+                display_version = winreg.QueryValueEx(key, "DisplayVersion")[0]
+            except:
+                display_version = ""
+            
+            winreg.CloseKey(key)
+            
+            version_info['version'] = product_name
+            version_info['build'] = int(current_build)
+            version_info['is_server'] = "server" in product_name.lower()
+            
+            # Windows 10: builds 10240-19044
+            # Windows 11: builds 22000+
+            if version_info['build'] >= 22000:
+                version_info['is_win11'] = True
+            elif version_info['build'] >= 10240:
+                version_info['is_win10'] = True
+            
+            logger.info(f"Windows detectado: {product_name}, Build: {current_build}, DisplayVersion: {display_version}")
+            
+        except Exception as e:
+            logger.warning(f"Erro detectando versão do Windows via registry: {str(e)}")
+            
+            # Método 2: WMIC como fallback
+            try:
+                result = subprocess.run(
+                    ["wmic", "os", "get", "Caption,Version,ProductType", "/value"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                
+                if result.returncode == 0:
+                    output = result.stdout
+                    if "Windows 10" in output:
+                        version_info['is_win10'] = True
+                        version_info['version'] = "Windows 10"
+                    elif "Windows 11" in output:
+                        version_info['is_win11'] = True
+                        version_info['version'] = "Windows 11"
+                    
+                    if "ProductType=3" in output:
+                        version_info['is_server'] = True
+                        
+            except Exception as e2:
+                logger.warning(f"Erro detectando versão do Windows via WMIC: {str(e2)}")
+        
+        return version_info
+    
+    def _setup_system_configs(self):
+        """Configura timeouts e parâmetros específicos do sistema"""
+        config = {
+            'timeouts': {
+                'request': BASE_TIMEOUT_REQUEST,
+                'scan': BASE_TIMEOUT_SCAN,
+                'ping': BASE_TIMEOUT_PING
+            },
+            'parallel_hosts': BASE_PARALLEL_HOSTS,
+            'arp_method': 'standard',
+            'ping_method': 'standard',
+            'socket_method': 'standard'
+        }
+        
+        if self.is_windows:
+            if self.is_server:
+                # Windows Server: mais conservador
+                config['timeouts'] = {
+                    'request': 8,
+                    'scan': 4,
+                    'ping': 6
+                }
+                config['parallel_hosts'] = 6
+                config['arp_method'] = 'robust'
+                
+            elif self.is_win10:
+                # Windows 10: configurações específicas
+                config['timeouts'] = {
+                    'request': 6,
+                    'scan': 3,
+                    'ping': 4
+                }
+                config['parallel_hosts'] = 8
+                config['arp_method'] = 'win10_specific'
+                config['ping_method'] = 'win10_specific'
+                config['socket_method'] = 'win10_specific'
+                
+            elif self.is_win11:
+                # Windows 11: configurações otimizadas
+                config['timeouts'] = {
+                    'request': 5,
+                    'scan': 2,
+                    'ping': 3
+                }
+                config['parallel_hosts'] = 12
+                config['arp_method'] = 'modern'
+        
+        return config
     
     def _check_admin_privileges(self):
         """Verifica se tem privilégios de administrador"""
@@ -101,8 +232,8 @@ class PrinterDiscovery:
         try:
             logger.info("Iniciando descoberta de impressoras...")
             
-            # Atualiza cache ARP primeiro
-            self._update_arp_cache()
+            # Força atualização do cache ARP primeiro
+            self._force_arp_refresh()
             
             # Executa a varredura de forma síncrona
             loop = asyncio.new_event_loop()
@@ -122,6 +253,35 @@ class PrinterDiscovery:
             logger.error(f"Erro na descoberta de impressoras: {str(e)}")
             logger.error(traceback.format_exc())
             return []
+    
+    def _force_arp_refresh(self):
+        """Força atualização do cache ARP usando múltiplos métodos"""
+        logger.info("Forçando atualização do cache ARP...")
+        
+        try:
+            # Método 1: Limpa cache ARP existente (Windows)
+            if self.is_windows:
+                try:
+                    subprocess.run(
+                        ["arp", "-d", "*"], 
+                        capture_output=True, 
+                        timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                except:
+                    pass
+            
+            # Método 2: Faz ping broadcast na rede local
+            networks = self._get_local_networks()
+            for network in networks[:2]:  # Limita a 2 redes para não demorar muito
+                broadcast_ip = str(network.broadcast_address)
+                self._ping_host(broadcast_ip, 1)
+            
+            # Método 3: Atualiza cache ARP convencional
+            self._update_arp_cache()
+            
+        except Exception as e:
+            logger.warning(f"Erro forçando refresh ARP: {str(e)}")
     
     def _filter_valid_printers(self, printers):
         """Filtra e valida impressoras encontradas"""
@@ -244,69 +404,349 @@ class PrinterDiscovery:
         return networks
     
     def _get_local_networks(self):
-        """Obtém as redes locais para escanear"""
+        """Obtém as redes locais para escanear - Versão ultra-robusta"""
         networks = []
-        local_ip = self._get_local_ip()
         
-        if not local_ip or local_ip.startswith('127.'):
-            # Fallback para redes comuns
+        # Método 1: Detecta todas as interfaces de rede
+        local_ips = self._get_all_local_ips()
+        
+        for local_ip in local_ips:
+            if local_ip and not local_ip.startswith('127.'):
+                try:
+                    network = self._detect_network_for_ip(local_ip)
+                    if network and network not in networks:
+                        networks.append(network)
+                        logger.info(f"Rede detectada para {local_ip}: {network}")
+                except Exception as e:
+                    logger.warning(f"Erro detectando rede para {local_ip}: {str(e)}")
+        
+        # Método 2: Windows 10 específico - usa comando route
+        if self.is_win10:
+            win10_networks = self._get_win10_networks()
+            for network in win10_networks:
+                if network not in networks:
+                    networks.append(network)
+                    logger.info(f"Rede Win10 detectada: {network}")
+        
+        # Método 3: Fallback baseado em gateway padrão
+        if not networks:
+            gateway_networks = self._get_networks_from_gateway()
+            networks.extend(gateway_networks)
+        
+        # Método 4: Fallback final - redes comuns
+        if not networks:
+            logger.info("Usando redes comuns como fallback")
             common_networks = [
                 "192.168.1.0/24", "192.168.0.0/24", "192.168.2.0/24",
-                "10.0.0.0/24", "10.0.1.0/24", "172.16.0.0/24"
+                "10.0.0.0/24", "10.0.1.0/24", "172.16.0.0/24",
+                "192.168.10.0/24", "192.168.100.0/24", "192.168.254.0/24"
             ]
             for net_str in common_networks:
                 try:
                     networks.append(ipaddress.IPv4Network(net_str))
                 except:
                     pass
-        else:
-            # Rede principal baseada no IP atual
-            try:
-                parts = local_ip.split('.')
-                if len(parts) == 4:
-                    network_24 = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
-                    networks.append(ipaddress.IPv4Network(network_24))
-                    logger.info(f"Rede principal detectada: {network_24}")
-            except:
-                pass
         
         return networks
     
+    def _get_win10_networks(self):
+        """Método específico para detectar redes no Windows 10"""
+        networks = []
+        
+        try:
+            # Comando route específico para Windows 10
+            result = subprocess.run(
+                ["route", "print", "-4"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            if result.returncode == 0:
+                # Processa a tabela de rotas
+                in_table = False
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    
+                    if "Network Destination" in line:
+                        in_table = True
+                        continue
+                    
+                    if in_table and line:
+                        # Formato: Network Destination    Netmask    Gateway    Interface    Metric
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            dest = parts[0]
+                            netmask = parts[1]
+                            interface = parts[3]
+                            
+                            # Pula rota padrão e loopback
+                            if dest in ['0.0.0.0', '127.0.0.1'] or interface.startswith('127.'):
+                                continue
+                            
+                            try:
+                                # Converte netmask para CIDR
+                                if '.' in netmask:
+                                    cidr = self._netmask_to_cidr(netmask)
+                                    if cidr and dest != '0.0.0.0':
+                                        network_str = f"{dest}/{cidr}"
+                                        network = ipaddress.IPv4Network(network_str, strict=False)
+                                        networks.append(network)
+                            except:
+                                continue
+                                
+        except Exception as e:
+            logger.warning(f"Erro detectando redes Win10: {str(e)}")
+        
+        return networks
+    
+    def _netmask_to_cidr(self, netmask):
+        """Converte netmask para notação CIDR"""
+        try:
+            return ipaddress.IPv4Network(f"0.0.0.0/{netmask}").prefixlen
+        except:
+            # Conversão manual para netmasks comuns
+            netmask_map = {
+                '255.255.255.0': 24,
+                '255.255.0.0': 16,
+                '255.0.0.0': 8,
+                '255.255.255.128': 25,
+                '255.255.255.192': 26,
+                '255.255.255.224': 27,
+                '255.255.255.240': 28,
+                '255.255.255.248': 29,
+                '255.255.255.252': 30
+            }
+            return netmask_map.get(netmask)
+    
+    def _get_networks_from_gateway(self):
+        """Detecta redes baseado no gateway padrão"""
+        networks = []
+        
+        try:
+            if self.is_windows:
+                result = subprocess.run(
+                    ["ipconfig"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                
+                if result.returncode == 0:
+                    gateway_pattern = r'Default Gateway.*?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+                    gateways = re.findall(gateway_pattern, result.stdout, re.IGNORECASE)
+                    
+                    for gateway in gateways:
+                        if not gateway.startswith('169.254.'):  # Pula APIPA
+                            # Assume rede /24 baseada no gateway
+                            parts = gateway.split('.')
+                            if len(parts) == 4:
+                                network_addr = f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+                                try:
+                                    networks.append(ipaddress.IPv4Network(network_addr))
+                                except:
+                                    pass
+        except:
+            pass
+        
+        return networks
+    
+    def _get_all_local_ips(self):
+        """Obtém todos os IPs locais da máquina - Versão aprimorada"""
+        local_ips = []
+        
+        try:
+            # Método 1: socket.getaddrinfo (mais confiável)
+            hostname = socket.gethostname()
+            for info in socket.getaddrinfo(hostname, None):
+                ip = info[4][0]
+                if not ip.startswith('127.') and '::' not in ip and not ip.startswith('169.254.'):
+                    local_ips.append(ip)
+        except:
+            pass
+        
+        try:
+            # Método 2: Conecta a diferentes IPs externos
+            external_ips = ["8.8.8.8", "1.1.1.1", "208.67.222.222", "4.4.4.4"]
+            for ext_ip in external_ips:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                        s.settimeout(3)
+                        s.connect((ext_ip, 80))
+                        local_ip = s.getsockname()[0]
+                        if local_ip and not local_ip.startswith('127.') and not local_ip.startswith('169.254.'):
+                            local_ips.append(local_ip)
+                except:
+                    continue
+        except:
+            pass
+        
+        try:
+            # Método 3: Comando específico do sistema
+            if self.is_windows:
+                result = subprocess.run(
+                    ["ipconfig", "/all"], capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if result.returncode == 0:
+                    # Procura IPs IPv4 ativos
+                    patterns = [
+                        r'IPv4 Address.*?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})',
+                        r'IP Address.*?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+                    ]
+                    
+                    for pattern in patterns:
+                        ips = re.findall(pattern, result.stdout, re.IGNORECASE)
+                        for ip in ips:
+                            if not ip.startswith('127.') and not ip.startswith('169.254.'):
+                                local_ips.append(ip)
+            else:
+                result = subprocess.run(
+                    ["ip", "addr", "show"], capture_output=True, text=True, timeout=10
+                )
+                if result.returncode == 0:
+                    ips = re.findall(r'inet (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', result.stdout)
+                    for ip in ips:
+                        if not ip.startswith('127.') and not ip.startswith('169.254.'):
+                            local_ips.append(ip)
+        except:
+            pass
+        
+        # Remove duplicatas e ordena
+        unique_ips = list(set(local_ips))
+        logger.info(f"IPs locais detectados: {unique_ips}")
+        return unique_ips
+    
+    def _detect_network_for_ip(self, ip):
+        """Detecta a rede para um IP específico"""
+        try:
+            # Assume rede /24 como padrão mais comum
+            ip_parts = ip.split('.')
+            if len(ip_parts) == 4:
+                network_addr = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0/24"
+                return ipaddress.IPv4Network(network_addr)
+                
+        except Exception as e:
+            logger.debug(f"Erro detectando rede para {ip}: {str(e)}")
+        
+        return None
+    
     async def _manual_network_scan(self, network):
-        """Escaneamento manual da rede"""
+        """Escaneamento manual da rede - Versão otimizada para Windows 10"""
         printers = []
         
         try:
-            # Primeiro escaneamento: IPs comuns para impressoras
-            common_ips = self._get_common_printer_ips(network)
-            logger.info(f"Escaneando {len(common_ips)} IPs comuns para impressoras...")
-            
-            common_printers = await self._scan_ip_list(common_ips)
-            printers.extend(common_printers)
-            
-            # Se não encontrou muitas impressoras, expande a busca
-            if len(common_printers) < 3:
-                # Pega mais IPs da rede (mas limita para não sobrecarregar)
-                all_hosts = list(network.hosts())
-                if len(all_hosts) > 50:
-                    # Para redes grandes, pega uma amostra
-                    sample_size = min(50, len(all_hosts))
-                    extended_ips = random.sample([str(ip) for ip in all_hosts], sample_size)
-                else:
-                    extended_ips = [str(ip) for ip in all_hosts]
+            # Windows 10: Estratégia mais agressiva de descoberta
+            if self.is_win10:
+                printers = await self._win10_optimized_scan(network)
+            else:
+                printers = await self._standard_network_scan(network)
                 
-                # Remove IPs já escaneados
-                extended_ips = [ip for ip in extended_ips if ip not in common_ips]
-                
-                if extended_ips:
-                    logger.info(f"Expandindo busca para {len(extended_ips)} IPs adicionais...")
-                    extended_printers = await self._scan_ip_list(extended_ips)
-                    printers.extend(extended_printers)
-        
         except Exception as e:
             logger.error(f"Erro no escaneamento manual: {str(e)}")
         
         return printers
+    
+    async def _win10_optimized_scan(self, network):
+        """Escaneamento otimizado específico para Windows 10"""
+        printers = []
+        
+        # Passo 1: Verifica IPs do cache ARP
+        arp_ips = [ip for ip in self.mac_cache.keys() if ipaddress.IPv4Address(ip) in network]
+        if arp_ips:
+            logger.info(f"Windows 10: Verificando {len(arp_ips)} IPs do cache ARP...")
+            arp_printers = await self._scan_ip_list(arp_ips)
+            printers.extend(arp_printers)
+        
+        # Passo 2: Escaneamento de IPs comuns (mais agressivo para Win10)
+        common_ips = self._get_extended_common_ips(network)
+        common_ips = [ip for ip in common_ips if ip not in arp_ips]
+        if common_ips:
+            logger.info(f"Windows 10: Escaneando {len(common_ips)} IPs comuns...")
+            common_printers = await self._scan_ip_list(common_ips)
+            printers.extend(common_printers)
+        
+        # Passo 3: Se ainda não encontrou suficientes, escaneamento completo
+        if len(printers) < 2:
+            logger.info("Windows 10: Escaneamento completo da rede...")
+            all_hosts = list(network.hosts())
+            scanned_ips = set(arp_ips + common_ips)
+            remaining_ips = [str(ip) for ip in all_hosts if str(ip) not in scanned_ips]
+            
+            if remaining_ips:
+                # Para Windows 10, escaneia mais IPs
+                if len(remaining_ips) > 100:
+                    # Usa amostragem inteligente
+                    sample_size = min(80, len(remaining_ips))
+                    remaining_ips = random.sample(remaining_ips, sample_size)
+                
+                logger.info(f"Windows 10: Escaneando {len(remaining_ips)} IPs adicionais...")
+                additional_printers = await self._scan_ip_list(remaining_ips)
+                printers.extend(additional_printers)
+        
+        return printers
+    
+    async def _standard_network_scan(self, network):
+        """Escaneamento padrão para outros sistemas"""
+        printers = []
+        
+        # Estratégia em camadas padrão
+        arp_ips = [ip for ip in self.mac_cache.keys() if ipaddress.IPv4Address(ip) in network]
+        if arp_ips:
+            logger.info(f"Verificando {len(arp_ips)} IPs do cache ARP...")
+            arp_printers = await self._scan_ip_list(arp_ips)
+            printers.extend(arp_printers)
+        
+        common_ips = self._get_common_printer_ips(network)
+        common_ips = [ip for ip in common_ips if ip not in arp_ips]
+        if common_ips:
+            logger.info(f"Escaneando {len(common_ips)} IPs comuns...")
+            common_printers = await self._scan_ip_list(common_ips)
+            printers.extend(common_printers)
+        
+        if len(printers) < 3:
+            all_hosts = list(network.hosts())
+            if len(all_hosts) > 50:
+                scanned_ips = set(arp_ips + common_ips)
+                remaining_ips = [str(ip) for ip in all_hosts if str(ip) not in scanned_ips]
+                
+                sample_size = min(30, len(remaining_ips))
+                extended_ips = random.sample(remaining_ips, sample_size)
+                
+                if extended_ips:
+                    logger.info(f"Expandindo busca para {len(extended_ips)} IPs...")
+                    extended_printers = await self._scan_ip_list(extended_ips)
+                    printers.extend(extended_printers)
+        
+        return printers
+    
+    def _get_extended_common_ips(self, network):
+        """Gera lista estendida de IPs comuns para Windows 10"""
+        common_ips = []
+        
+        try:
+            # IPs mais comuns para Windows 10 (expandido)
+            common_suffixes = [
+                1, 2, 3, 4, 5, 10, 11, 12, 13, 14, 15, 20, 21, 22, 23, 24, 25,
+                30, 31, 32, 40, 41, 42, 50, 51, 52, 53, 54, 55, 60, 61, 62,
+                70, 71, 72, 80, 81, 82, 90, 91, 92, 100, 101, 102, 103, 104, 105,
+                110, 111, 112, 120, 121, 122, 130, 131, 132, 140, 141, 142,
+                150, 151, 152, 160, 161, 162, 170, 171, 172, 180, 181, 182,
+                190, 191, 192, 200, 201, 202, 203, 204, 205, 210, 211, 212,
+                220, 221, 222, 230, 231, 232, 240, 241, 242, 250, 251, 252, 253, 254
+            ]
+            
+            network_addr = network.network_address
+            for suffix in common_suffixes:
+                try:
+                    ip = str(network_addr + suffix)
+                    if ipaddress.IPv4Address(ip) in network:
+                        common_ips.append(ip)
+                except:
+                    continue
+                    
+        except Exception as e:
+            logger.warning(f"Erro ao gerar IPs comuns: {str(e)}")
+        
+        return common_ips
     
     def _get_common_printer_ips(self, network):
         """Gera lista de IPs comuns para impressoras"""
@@ -314,7 +754,11 @@ class PrinterDiscovery:
         
         try:
             # IPs com finais típicos de impressoras
-            common_suffixes = [1, 2, 10, 20, 30, 50, 100, 101, 102, 150, 200, 250, 251, 252, 253, 254]
+            common_suffixes = [
+                1, 2, 3, 10, 11, 12, 20, 21, 22, 30, 31, 32, 
+                50, 51, 52, 100, 101, 102, 103, 110, 111, 112,
+                150, 151, 152, 200, 201, 202, 250, 251, 252, 253, 254
+            ]
             
             network_addr = network.network_address
             for suffix in common_suffixes:
@@ -331,40 +775,51 @@ class PrinterDiscovery:
         return common_ips
     
     async def _scan_ip_list(self, ip_list):
-        """Escaneia uma lista de IPs"""
+        """Escaneia uma lista de IPs - Versão adaptativa"""
         printers = []
         
-        # Processa em chunks para evitar sobrecarga
-        for i in range(0, len(ip_list), PARALLEL_HOSTS):
-            chunk = ip_list[i:i+PARALLEL_HOSTS]
+        # Ajusta chunk size baseado no sistema
+        chunk_size = self.config['parallel_hosts']
+        
+        for i in range(0, len(ip_list), chunk_size):
+            chunk = ip_list[i:i+chunk_size]
             
             # Cria tasks para este chunk
             tasks = [self._scan_single_ip(ip) for ip in chunk]
             
             try:
-                # Aguarda todas as tasks do chunk com timeout
+                # Timeout baseado na configuração do sistema
+                base_timeout = self.config['timeouts']['scan']
+                timeout = base_timeout * len(chunk) + 10
+                
                 chunk_results = await asyncio.wait_for(
                     asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=TIMEOUT_SCAN * len(chunk) + 5
+                    timeout=timeout
                 )
                 
                 for result in chunk_results:
                     if isinstance(result, dict) and result:
                         printers.append(result)
-                        logger.info(f"Impressora encontrada: {result['ip']}")
+                        logger.info(f"Impressora encontrada: {result['ip']} - Portas: {result.get('ports', [])}")
                         
             except asyncio.TimeoutError:
-                logger.warning(f"Timeout no escaneamento do chunk {i//PARALLEL_HOSTS + 1}")
+                logger.warning(f"Timeout no escaneamento do chunk {i//chunk_size + 1}")
             except Exception as e:
-                logger.warning(f"Erro no chunk {i//PARALLEL_HOSTS + 1}: {str(e)}")
+                logger.warning(f"Erro no chunk {i//chunk_size + 1}: {str(e)}")
+            
+            # Pausa entre chunks (menor para Win10)
+            if i + chunk_size < len(ip_list):
+                pause = 0.1 if not self.is_win10 else 0.05
+                await asyncio.sleep(pause)
         
         return printers
     
     async def _scan_single_ip(self, ip):
         """Escaneia um único IP para verificar se é impressora"""
         try:
-            # Primeiro verifica se o host responde
-            if not self._ping_host(ip, TIMEOUT_PING):
+            # Ping com timeout baseado na configuração
+            ping_timeout = self.config['timeouts']['ping']
+            if not self._ping_host(ip, ping_timeout):
                 return None
             
             # Verifica portas de impressora
@@ -372,9 +827,12 @@ class PrinterDiscovery:
             port_tasks = [self._check_port_async(ip, port) for port in COMMON_PRINTER_PORTS]
             
             try:
+                scan_timeout = self.config['timeouts']['scan']
+                port_timeout = scan_timeout * len(COMMON_PRINTER_PORTS) + 5
+                
                 port_results = await asyncio.wait_for(
                     asyncio.gather(*port_tasks, return_exceptions=True),
-                    timeout=TIMEOUT_SCAN * len(COMMON_PRINTER_PORTS)
+                    timeout=port_timeout
                 )
                 
                 for i, result in enumerate(port_results):
@@ -415,10 +873,11 @@ class PrinterDiscovery:
     async def _check_port_async(self, ip, port):
         """Verifica uma porta de forma assíncrona"""
         try:
+            scan_timeout = self.config['timeouts']['scan']
             future = asyncio.get_event_loop().run_in_executor(
-                None, self._is_port_open, ip, port, TIMEOUT_SCAN
+                None, self._is_port_open, ip, port, scan_timeout
             )
-            return await asyncio.wait_for(future, timeout=TIMEOUT_SCAN + 1)
+            return await asyncio.wait_for(future, timeout=scan_timeout + 2)
         except:
             return False
     
@@ -434,6 +893,10 @@ class PrinterDiscovery:
         
         # Se tem LPD, provavelmente é impressora
         if 515 in open_ports:
+            return True
+            
+        # Se tem múltiplas portas típicas de impressora
+        if len(open_ports) >= 2:
             return True
         
         return False
@@ -458,21 +921,27 @@ class PrinterDiscovery:
             req = urllib.request.Request(url)
             req.add_header('User-Agent', 'PrinterDiscovery/1.0')
             
-            with urllib.request.urlopen(req, timeout=2, context=ctx) as response:
+            # Timeout baseado na configuração
+            timeout = self.config['timeouts']['request']
+            
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
                 content = response.read().decode('utf-8', errors='ignore').lower()
                 
-                # Palavras-chave que indicam impressora
+                # Palavras-chave que indicam impressora (expandido)
                 printer_keywords = [
-                    'printer', 'print', 'toner', 'cartridge', 'ink',
+                    'printer', 'print', 'toner', 'cartridge', 'ink', 'drum',
                     'samsung', 'hp', 'canon', 'epson', 'brother', 'lexmark',
-                    'xerox', 'kyocera', 'ricoh', 'sharp', 'konica',
-                    'status', 'supplies', 'maintenance'
+                    'xerox', 'kyocera', 'ricoh', 'sharp', 'konica', 'dell',
+                    'status', 'supplies', 'maintenance', 'queue', 'job',
+                    'laserjet', 'deskjet', 'officejet', 'imageclass',
+                    'workforce', 'stylus', 'colorlaserjet', 'pagewide'
                 ]
                 
                 return any(keyword in content for keyword in printer_keywords)
                 
-        except:
-            return False  # Se falhar, assume que não é impressora
+        except Exception as e:
+            logger.debug(f"Erro verificando HTTP para {ip}: {str(e)}")
+            return False
     
     def _determine_uri(self, ip, open_ports):
         """Determina o melhor URI para a impressora"""
@@ -518,18 +987,63 @@ class PrinterDiscovery:
         return unique_printers
     
     def _update_arp_cache(self):
-        """Atualiza o cache ARP"""
+        """Atualiza o cache ARP - Versão específica por sistema"""
         current_time = time.time()
         
-        # Só atualiza se passou mais de 30 segundos
-        if current_time - self.last_arp_update < 30:
+        # Só atualiza se passou mais de 30 segundos (20s para Win10)
+        min_interval = 20 if self.is_win10 else 30
+        if current_time - self.last_arp_update < min_interval:
             return
         
         try:
             logger.info("Atualizando cache ARP...")
-            self.mac_cache = {}
+            old_cache_size = len(self.mac_cache)
             
-            # Comando para obter tabela ARP
+            # Método específico baseado na configuração
+            if self.config['arp_method'] == 'win10_specific':
+                self._update_arp_cache_win10()
+            else:
+                self._update_arp_cache_standard()
+                
+            self.last_arp_update = current_time
+            new_cache_size = len(self.mac_cache)
+            logger.info(f"Cache ARP atualizado: {old_cache_size} -> {new_cache_size} entradas")
+            
+        except Exception as e:
+            logger.warning(f"Erro ao atualizar cache ARP: {str(e)}")
+    
+    def _update_arp_cache_win10(self):
+        """Atualização específica do cache ARP para Windows 10"""
+        try:
+            # Método 1: arp -a
+            result = subprocess.run(
+                ['arp', '-a'],
+                capture_output=True, text=True, timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            if result.returncode == 0:
+                self._parse_arp_output(result.stdout)
+            
+            # Método 2: netsh (específico Win10)
+            try:
+                result = subprocess.run(
+                    ['netsh', 'interface', 'ip', 'show', 'neighbors'],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                
+                if result.returncode == 0:
+                    self._parse_netsh_output(result.stdout)
+            except:
+                pass
+                
+        except Exception as e:
+            logger.warning(f"Erro atualizando cache ARP Win10: {str(e)}")
+    
+    def _update_arp_cache_standard(self):
+        """Atualização padrão do cache ARP"""
+        try:
             if self.is_windows:
                 cmd = ['arp', '-a']
                 creation_flags = subprocess.CREATE_NO_WINDOW
@@ -537,53 +1051,85 @@ class PrinterDiscovery:
                 cmd = ['arp', '-a']
                 creation_flags = 0
             
+            timeout = self.config['timeouts']['request']
+            
             result = subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=5,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=creation_flags
             )
             
             if result.returncode == 0:
                 self._parse_arp_output(result.stdout)
-                self.last_arp_update = current_time
-                logger.info(f"Cache ARP atualizado com {len(self.mac_cache)} entradas")
-            
+            else:
+                logger.warning(f"Comando ARP falhou com código {result.returncode}")
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout ao executar comando ARP")
         except Exception as e:
             logger.warning(f"Erro ao atualizar cache ARP: {str(e)}")
     
-    def _parse_arp_output(self, output):
-        """Processa a saída do comando ARP"""
+    def _parse_netsh_output(self, output):
+        """Processa saída do comando netsh (Windows 10)"""
         try:
-            # Padrões para diferentes sistemas
-            if self.is_windows:
-                # Windows: "  192.168.1.1          00-11-22-33-44-55     dynamic"
-                pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2})'
-            else:
-                # Linux/macOS: formato pode variar
-                pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s.*?([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})'
+            for line in output.split('\n'):
+                line = line.strip()
+                
+                # Formato netsh: "Interface: Local Area Connection"
+                # Seguido por: "Internet Address      Physical Address      Type"
+                # E dados: "192.168.1.1           00-11-22-33-44-55     dynamic"
+                
+                if re.match(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        ip = parts[0]
+                        mac_raw = parts[1]
+                        
+                        mac = self.normalize_mac(mac_raw)
+                        if mac and ip:
+                            self.mac_cache[ip] = mac
+                            
+        except Exception as e:
+            logger.warning(f"Erro processando saída netsh: {str(e)}")
+    
+    def _parse_arp_output(self, output):
+        """Processa a saída do comando ARP - Versão robusta"""
+        try:
+            # Múltiplos padrões para diferentes formatos
+            patterns = [
+                # Windows padrão: "  192.168.1.1          00-11-22-33-44-55     dynamic"
+                r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2}[-:][0-9A-Fa-f]{2})',
+                # Windows formato alternativo
+                r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2})',
+                # Linux/Unix: formato com "ether"
+                r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*?ether\s+([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})',
+                # Formato genérico
+                r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s.*?([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})'
+            ]
             
             for line in output.split('\n'):
-                match = re.search(pattern, line, re.IGNORECASE)
-                if match:
-                    ip = match.group(1)
-                    mac = self.normalize_mac(match.group(2))
-                    if mac:
-                        self.mac_cache[ip] = mac
+                for pattern in patterns:
+                    match = re.search(pattern, line, re.IGNORECASE)
+                    if match:
+                        ip = match.group(1)
+                        mac = self.normalize_mac(match.group(2))
+                        if mac and ip:
+                            self.mac_cache[ip] = mac
+                            break
                         
         except Exception as e:
             logger.warning(f"Erro ao processar saída ARP: {str(e)}")
     
     def _get_mac_for_ip(self, ip):
-        """Obtém MAC address para um IP"""
+        """Obtém MAC address para um IP - Versão robusta"""
         # Primeiro verifica cache
         if ip in self.mac_cache:
             return self.mac_cache[ip]
         
         # Faz ping para atualizar ARP
-        self._ping_host(ip, 1)
-        time.sleep(0.1)
+        ping_timeout = self.config['timeouts']['ping']
+        self._ping_host(ip, ping_timeout)
+        time.sleep(0.3 if self.is_win10 else 0.2)
         
         # Tenta obter MAC usando múltiplos métodos
         for attempt in range(RETRY_ATTEMPTS):
@@ -593,7 +1139,7 @@ class PrinterDiscovery:
                 return mac
             
             if attempt < RETRY_ATTEMPTS - 1:
-                time.sleep(0.2)
+                time.sleep(0.4 if self.is_win10 else 0.3)
         
         return "desconhecido"
     
@@ -607,63 +1153,111 @@ class PrinterDiscovery:
                 cmd = ['arp', '-n', ip]
                 creation_flags = 0
             
+            timeout = self.config['timeouts']['scan'] + 1
+            
             result = subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=2,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=creation_flags
             )
             
             if result.returncode == 0:
-                # Procura MAC na saída
-                mac_pattern = r'([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})'
-                match = re.search(mac_pattern, result.stdout, re.IGNORECASE)
-                if match:
-                    return self.normalize_mac(match.group(1))
+                # Múltiplos padrões para encontrar MAC
+                mac_patterns = [
+                    r'([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})',
+                    r'([0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2}-[0-9A-Fa-f]{2})'
+                ]
+                
+                for pattern in mac_patterns:
+                    match = re.search(pattern, result.stdout, re.IGNORECASE)
+                    if match:
+                        return self.normalize_mac(match.group(1))
             
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Timeout consultando MAC para {ip}")
         except Exception as e:
             logger.debug(f"Erro consultando MAC para {ip}: {str(e)}")
         
         return "desconhecido"
     
-    def _get_local_ip(self):
-        """Obtém o endereço IP local da máquina"""
-        try:
-            # Método mais confiável: conecta a um servidor externo
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-                s.settimeout(2)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                
-                if local_ip and not local_ip.startswith('127.'):
-                    return local_ip
-        except:
-            pass
-        
-        # Fallback: usa hostname
-        try:
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
-            if local_ip and not local_ip.startswith('127.'):
-                return local_ip
-        except:
-            pass
-        
-        return "192.168.1.100"  # Fallback final
-    
     def _is_port_open(self, ip, port, timeout=1):
-        """Verifica se uma porta está aberta"""
+        """Verifica se uma porta está aberta - Versão específica por sistema"""
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(timeout)
-                result = sock.connect_ex((ip, port))
-                return result == 0
+                
+                # Método específico para Windows 10
+                if self.config['socket_method'] == 'win10_specific':
+                    return self._is_port_open_win10(sock, ip, port, timeout)
+                else:
+                    result = sock.connect_ex((ip, port))
+                    return result == 0
+                    
+        except Exception as e:
+            logger.debug(f"Erro verificando porta {port} em {ip}: {str(e)}")
+            return False
+    
+    def _is_port_open_win10(self, sock, ip, port, timeout):
+        """Método específico de verificação de porta para Windows 10"""
+        try:
+            # Windows 10: usa método não-bloqueante mais confiável
+            sock.setblocking(False)
+            
+            try:
+                sock.connect((ip, port))
+                return True
+            except socket.error as e:
+                if e.errno == 10035:  # WSAEWOULDBLOCK
+                    # Socket em modo não-bloqueante, usa select
+                    import select
+                    _, ready, error = select.select([], [sock], [sock], timeout)
+                    if ready:
+                        return True
+                    elif error:
+                        return False
+                    else:
+                        return False  # Timeout
+                elif e.errno == 10056:  # WSAEISCONN - já conectado
+                    return True
+                else:
+                    return False
         except:
             return False
     
     def _ping_host(self, ip, timeout=1):
-        """Faz ping em um host"""
+        """Faz ping em um host - Versão específica por sistema"""
+        try:
+            if self.config['ping_method'] == 'win10_specific':
+                return self._ping_host_win10(ip, timeout)
+            else:
+                return self._ping_host_standard(ip, timeout)
+                
+        except Exception as e:
+            logger.debug(f"Erro fazendo ping em {ip}: {str(e)}")
+            return False
+    
+    def _ping_host_win10(self, ip, timeout):
+        """Ping específico para Windows 10"""
+        try:
+            # Windows 10: usa parâmetros mais agressivos
+            cmd = ["ping", "-n", "2", "-w", str(int(timeout * 800)), ip]
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 3,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            return result.returncode == 0
+            
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Timeout fazendo ping Win10 em {ip}")
+            return False
+    
+    def _ping_host_standard(self, ip, timeout):
+        """Ping padrão para outros sistemas"""
         try:
             if self.is_windows:
                 cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
@@ -676,23 +1270,23 @@ class PrinterDiscovery:
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=timeout + 1,
+                timeout=timeout + 2,
                 creationflags=creation_flags
             )
             
             return result.returncode == 0
             
-        except:
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Timeout fazendo ping em {ip}")
             return False
     
     def _run_nmap_scan(self, subnet):
-        """Executa nmap para descoberta rápida"""
+        """Executa nmap para descoberta rápida - Versão específica por sistema"""
         try:
             # Verifica se nmap está disponível
             result = subprocess.run(
                 ["nmap", "--version"],
-                capture_output=True,
-                timeout=3,
+                capture_output=True, timeout=5,
                 creationflags=subprocess.CREATE_NO_WINDOW if self.is_windows else 0
             )
             if result.returncode != 0:
@@ -704,22 +1298,48 @@ class PrinterDiscovery:
         try:
             logger.info(f"Executando nmap em {subnet}...")
             
-            cmd = [
-                "nmap",
-                "-p", "631,9100,80,443,515",  # Portas de impressora
-                "-T4",  # Timing template
-                "--open",  # Só portas abertas
-                "-n",  # Não resolve DNS
-                "--host-timeout", "10s",
-                "--max-retries", "1",
-                str(subnet)
-            ]
+            # Parâmetros específicos por sistema
+            if self.is_win10:
+                cmd = [
+                    "nmap",
+                    "-p", "631,9100,80,443,515",
+                    "-T4",  # Mais agressivo para Win10
+                    "--open",
+                    "-n",
+                    "--host-timeout", "8s",
+                    "--max-retries", "2",
+                    "--min-rate", "100",  # Adicional para Win10
+                    str(subnet)
+                ]
+                timeout = 90
+            elif self.is_server:
+                cmd = [
+                    "nmap",
+                    "-p", "631,9100,80,443,515",
+                    "-T3",
+                    "--open",
+                    "-n",
+                    "--host-timeout", "20s",
+                    "--max-retries", "2",
+                    str(subnet)
+                ]
+                timeout = 120
+            else:
+                cmd = [
+                    "nmap",
+                    "-p", "631,9100,80,443,515",
+                    "-T4",
+                    "--open",
+                    "-n",
+                    "--host-timeout", "10s",
+                    "--max-retries", "1",
+                    str(subnet)
+                ]
+                timeout = 60
             
             result = subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
+                capture_output=True, text=True, timeout=timeout,
                 creationflags=subprocess.CREATE_NO_WINDOW if self.is_windows else 0
             )
             
@@ -729,6 +1349,9 @@ class PrinterDiscovery:
             
             return self._parse_nmap_output(result.stdout)
             
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout executando nmap")
+            return []
         except Exception as e:
             logger.warning(f"Erro executando nmap: {str(e)}")
             return []
@@ -813,8 +1436,8 @@ class PrinterDiscovery:
         
         logger.info(f"Procurando impressora com MAC: {normalized_mac}")
         
-        # Atualiza cache ARP
-        self._update_arp_cache()
+        # Força atualização do cache ARP
+        self._force_arp_refresh()
         
         # Verifica se já está no cache
         for ip, mac in self.mac_cache.items():
@@ -827,11 +1450,16 @@ class PrinterDiscovery:
         # Faz ping em IPs comuns para atualizar ARP
         networks = self._get_local_networks()
         for network in networks:
-            common_ips = self._get_common_printer_ips(network)
+            if self.is_win10:
+                common_ips = self._get_extended_common_ips(network)
+            else:
+                common_ips = self._get_common_printer_ips(network)
             
-            # Ping em paralelo
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                executor.map(lambda ip: self._ping_host(ip, 1), common_ips)
+            # Ping em paralelo com configurações adequadas
+            max_workers = self.config['parallel_hosts']
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                ping_timeout = self.config['timeouts']['ping']
+                executor.map(lambda ip: self._ping_host(ip, ping_timeout), common_ips)
             
             # Atualiza cache ARP
             self._update_arp_cache()
@@ -850,8 +1478,9 @@ class PrinterDiscovery:
         """Verifica se um IP é de uma impressora"""
         try:
             # Verifica se alguma porta de impressora está aberta
+            scan_timeout = self.config['timeouts']['scan']
             for port in COMMON_PRINTER_PORTS:
-                if self._is_port_open(ip, port, 1):
+                if self._is_port_open(ip, port, scan_timeout):
                     return True
             return False
         except:
@@ -862,8 +1491,9 @@ class PrinterDiscovery:
         try:
             # Verifica portas abertas
             open_ports = []
+            scan_timeout = self.config['timeouts']['scan']
             for port in COMMON_PRINTER_PORTS:
-                if self._is_port_open(ip, port, 1):
+                if self._is_port_open(ip, port, scan_timeout):
                     open_ports.append(port)
             
             printer_info = {
@@ -893,6 +1523,9 @@ class PrinterDiscovery:
         
         endpoints = ["/ipp/print", "/ipp/printer", "/ipp", ""]
         
+        # Timeout baseado na configuração
+        timeout = self.config['timeouts']['request']
+        
         for protocol in protocols:
             tls_mode = protocol["tls"]
             protocol_name = protocol["name"]
@@ -904,7 +1537,7 @@ class PrinterDiscovery:
                     client = pyipp.IPP(host=ip, port=port, tls=tls_mode)
                     client.url_path = endpoint
                     
-                    printer_attrs = await asyncio.wait_for(client.printer(), timeout=TIMEOUT_REQUEST)
+                    printer_attrs = await asyncio.wait_for(client.printer(), timeout=timeout)
                     
                     if printer_attrs:
                         logger.info(f"Conexão IPP bem-sucedida: {protocol_name} - {endpoint}")
