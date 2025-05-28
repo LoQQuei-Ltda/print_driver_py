@@ -21,9 +21,23 @@ import platform
 import zipfile
 import urllib.request
 import shutil
+import re
+import unicodedata
 
 # Desabilita avisos SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def normalize_filename(filename):
+    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
+    # Remove acentos
+    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
+    # Remove caracteres não alfanuméricos e substitui por underscores
+    filename = re.sub(r'[^\w\-\.]', '_', filename)
+    # Limita o comprimento do nome
+    if len(filename) > 30:
+        base, ext = os.path.splitext(filename)
+        filename = f"{base[:25]}{ext}"
+    return filename
 
 # Instalação automática de dependências
 def install_package(package):
@@ -284,7 +298,11 @@ class PDFPrinter:
             return False
         
         if job_name is None:
-            job_name = os.path.basename(file_path)
+            # Normaliza o nome do arquivo para o job_name
+            job_name = normalize_filename(os.path.basename(file_path))
+        else:
+            # Normaliza o job_name fornecido
+            job_name = normalize_filename(job_name)
         
         print(f"\n📄 Preparando impressão de: {job_name}")
         print(f"🖨️  Impressora: {self.printer_ip}:{self.port}")
@@ -324,10 +342,10 @@ class PDFPrinter:
             url = f"{self.base_url}{endpoint}"
             print(f"  → Testando endpoint: {url}")
             
-            # Atributos IPP para PDF
+            # Atributos IPP para PDF com nome normalizado
             attributes = {
                 "printer-uri": url,
-                "requesting-user-name": os.getenv("USER", "usuario"),
+                "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
                 "job-name": job_name,
                 "document-name": job_name,
                 "document-format": "application/pdf",
@@ -353,8 +371,11 @@ class PDFPrinter:
     
     def _create_temp_folder(self, base_name: str) -> str:
         """Cria uma pasta temporária para salvar as imagens convertidas"""
+        # Normaliza o nome base para evitar problemas com caracteres especiais
+        safe_name = normalize_filename(base_name)
         timestamp = int(time.time())
-        temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_to_jpg_{base_name}_{timestamp}")
+        # Usa um nome de pasta sem espaços ou caracteres especiais
+        temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_print_{safe_name}_{timestamp}")
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
 
@@ -371,8 +392,10 @@ class PDFPrinter:
             
             # Cria pasta temporária para salvar as imagens
             base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            print(f"  → Base do nome: {base_name}")
-            temp_folder = self._create_temp_folder(base_name)
+            # Normaliza o nome do arquivo para evitar problemas
+            safe_base_name = normalize_filename(base_name)
+            print(f"  → Base do nome: {safe_base_name} (normalizado de: {base_name})")
+            temp_folder = self._create_temp_folder(safe_base_name)
             print(f"  → Pasta temporária: {temp_folder}")
             
             # Converte PDF para imagens com poppler_path se necessário
@@ -405,12 +428,12 @@ class PDFPrinter:
                 elif image.mode not in ['RGB', 'L']:
                     image = image.convert('RGB')
                 
-                # Define nome do arquivo
+                # Define nome do arquivo (normalizado)
                 if len(images) > 1:
-                    image_filename = f"{base_name}_pagina_{page_num:02d}.jpg"
-                    page_job_name = f"{job_name}_pagina_{page_num}"
+                    image_filename = f"{safe_base_name}_p{page_num:02d}.jpg"
+                    page_job_name = f"{job_name}_p{page_num:02d}"
                 else:
-                    image_filename = f"{base_name}.jpg"
+                    image_filename = f"{safe_base_name}.jpg"
                     page_job_name = job_name
                 
                 image_path = os.path.join(temp_folder, image_filename)
@@ -479,10 +502,10 @@ class PDFPrinter:
                 for endpoint_idx, endpoint in enumerate(endpoints):
                     url = f"{self.base_url}{endpoint}"
                     
-                    # Atributos IPP para JPG
+                    # Atributos IPP para JPG - com nome normalizado
                     attributes = {
                         "printer-uri": url,
-                        "requesting-user-name": os.getenv("USER", "usuario"),
+                        "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
                         "job-name": page_job.job_name,
                         "document-name": page_job.job_name,
                         "document-format": "image/jpeg",
@@ -532,7 +555,7 @@ class PDFPrinter:
         # Relatório final
         total_pages = len(page_jobs)
         successful_count = len(successful_pages)
-        failed_count = total_pages - successful_count  # CORREÇÃO: calcular corretamente
+        failed_count = total_pages - successful_count
         
         print(f"\n📊 Relatório de impressão:")
         print(f"  ✅ Páginas enviadas com sucesso: {successful_count}/{total_pages}")
@@ -541,7 +564,6 @@ class PDFPrinter:
         if successful_pages:
             print(f"  📄 Páginas bem-sucedidas: {', '.join(str(p.page_num) for p in successful_pages)}")
         
-        # CORREÇÃO: usar failed_count ao invés de failed_pages
         remaining_failed = [p for p in page_jobs if p not in successful_pages]
         if remaining_failed:
             print(f"  🚫 Páginas que falharam: {', '.join(str(p.page_num) for p in remaining_failed)}")
@@ -553,7 +575,6 @@ class PDFPrinter:
             print(f"  📁 Imagens temporárias mantidas em: {temp_folder}")
             print(f"  💡 Você pode remover a pasta manualmente após validar as impressões")
         
-        # CORREÇÃO: Retorna True apenas se TODAS as páginas foram impressas com sucesso
         return successful_count == total_pages
 
     def _build_ipp_request(self, operation: int, attributes: Dict[str, Any]) -> bytes:
@@ -647,7 +668,6 @@ class PDFPrinter:
                 print(f"    IPP Version: {version >> 8}.{version & 0xFF}")
                 print(f"    IPP Status: 0x{status_code:04X}")
                 
-                # CORREÇÃO: Tratar status 0x0507 como erro específico
                 if status_code == 0x0507:
                     print(f"    ✗ Erro IPP 0x0507: client-error-document-format-error (formato não suportado)")
                     return False
@@ -656,6 +676,9 @@ class PDFPrinter:
                     return False
                 elif status_code == 0x0400:
                     print(f"    ✗ Erro IPP 0x0400: client-error-bad-request (requisição inválida)")
+                    return False
+                elif status_code == 0x0408:
+                    print(f"    ✗ Erro IPP 0x0408: client-error-request-entity-too-large (documento muito grande)")
                     return False
                 elif status_code == 0x0001:  # Status esperado
                     print(f"    ✓ Status IPP correto (0x0001)")
@@ -743,6 +766,11 @@ Exemplos de uso:
                        help='DPI para conversão JPG (padrão: 300)')
     
     args = parser.parse_args()
+    
+    # Normaliza o nome do job se fornecido
+    if args.job_name:
+        args.job_name = normalize_filename(args.job_name)
+        print(f"Nome do trabalho normalizado: {args.job_name}")
     
     # Cria objeto da impressora
     printer = PDFPrinter(args.ip, args.port, args.https)

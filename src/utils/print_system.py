@@ -32,10 +32,24 @@ from urllib3.util.retry import Retry
 import struct
 import ssl
 import requests
+import re
+import unicodedata
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
+
+def normalize_filename(filename):
+    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
+    # Remove acentos
+    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
+    # Remove caracteres não alfanuméricos e substitui por underscores
+    filename = re.sub(r'[^\w\-\.]', '_', filename)
+    # Limita o comprimento do nome
+    if len(filename) > 30:
+        base, ext = os.path.splitext(filename)
+        filename = f"{base[:25]}{ext}"
+    return filename
 
 # Instalação automática de dependências
 def install_package(package):
@@ -550,6 +564,10 @@ class IPPPrinter:
             job_name = os.path.basename(file_path)
         
         logger.info(f"Preparando impressão de: {job_name}")
+
+        job_name = normalize_filename(job_name)
+        logger.info(f"Nome do trabalho normalizado: {job_name}")
+
         logger.info(f"Impressora: {self.printer_ip}:{self.port}")
         
         # Lê o arquivo PDF
@@ -610,16 +628,22 @@ class IPPPrinter:
 
     
     def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
-        """Tenta imprimir como PDF com URIs corretos"""
+        # Normaliza o nome do trabalho
+        job_name = normalize_filename(job_name)
+        logger.info(f"Nome de trabalho normalizado: {job_name}")
         
-        # Descobre endpoints disponíveis na impressora
-        if not self.discovered_endpoints:
-            self.discovered_endpoints = self._discover_printer_endpoints()
+        # Limita o número de tentativas para não ficar em loop infinito
+        max_endpoint_tries = 2
+        endpoint_tries = 0
         
         # Tenta cada endpoint descoberto
-        for endpoint_info in self.discovered_endpoints:
+        for endpoint_info in self.discovered_endpoints[:max_endpoint_tries]:
             endpoint = endpoint_info["endpoint"]
             url = endpoint_info["url"]
+            
+            # Garante que a URL use o protocolo correto
+            if self.use_https and url.startswith("http://"):
+                url = url.replace("http://", "https://", 1)
             
             logger.info(f"Tentando imprimir PDF em: {url} (protocolo: {self.protocol})")
             
@@ -629,10 +653,10 @@ class IPPPrinter:
             else:
                 printer_uri = url.replace("http://", "ipp://", 1)
             
-            # Atributos IPP para PDF
+            # Atributos IPP para PDF com nome normalizado
             attributes = {
                 "printer-uri": printer_uri,
-                "requesting-user-name": os.getenv("USER", "usuario"),
+                "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
                 "job-name": job_name,
                 "document-name": job_name,
                 "document-format": "application/pdf",
@@ -650,48 +674,26 @@ class IPPPrinter:
             if options.duplex != Duplex.SIMPLES:
                 attributes["sides"] = options.duplex.value
                 
-            # Constrói e envia requisição IPP
+            # Limita o tempo máximo de tentativa para este endpoint
+            endpoint_tries += 1
             if self._send_ipp_request(url, attributes, pdf_data):
                 return True
+            
+            # Breve pausa antes de tentar próximo endpoint
+            time.sleep(1)
         
-        # Se todos os endpoints falharam, tenta diretamente com o endpoint raiz
-        # (algumas impressoras precisam de uma URI específica não descoberta automaticamente)
-        for uri_suffix in ["", "/ipp/print", "/ipp/port1", "/printer"]:
-            printer_uri = f"{'ipps' if self.use_https else 'ipp'}://{self.printer_ip}:{self.port}{uri_suffix}"
-            url = f"{self.protocol}://{self.printer_ip}:{self.port}{uri_suffix}"
-            
-            logger.info(f"Tentativa de fallback: {url} com printer-uri={printer_uri}")
-            
-            attributes = {
-                "printer-uri": printer_uri,
-                "requesting-user-name": os.getenv("USER", "usuario"),
-                "job-name": job_name,
-                "document-name": job_name,
-                "document-format": "application/pdf",
-                "ipp-attribute-fidelity": False,
-                "job-priority": 50,
-                "copies": options.copies,
-                "orientation-requested": 3 if options.orientation == "portrait" else 4,
-                "print-quality": options.quality.value,
-                "media": options.paper_size,
-            }
-            
-            # Adiciona opções condicionais
-            if options.color_mode != ColorMode.AUTO:
-                attributes["print-color-mode"] = options.color_mode.value
-            if options.duplex != Duplex.SIMPLES:
-                attributes["sides"] = options.duplex.value
-                
-            if self._send_ipp_request(url, attributes, pdf_data):
-                return True
-        
+        # Se falhar após tentar todos os endpoints, vai para o modo JPG
+        logger.info("Falha na tentativa de enviar como PDF, passando para JPG")
         return False
 
     
     def _create_temp_folder(self, base_name: str) -> str:
         """Cria uma pasta temporária para salvar as imagens convertidas"""
+        # Normaliza o nome base para evitar problemas com caracteres especiais
+        safe_name = normalize_filename(base_name)
         timestamp = int(time.time())
-        temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_to_jpg_{base_name}_{timestamp}")
+        # Usa um nome de pasta sem espaços ou caracteres especiais
+        temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_print_{safe_name}_{timestamp}")
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
 
@@ -709,13 +711,19 @@ class IPPPrinter:
             import pdf2image
             from PIL import Image
             
+            # Normaliza o nome do trabalho
+            job_name = normalize_filename(job_name)
+            logger.info(f"Nome do trabalho normalizado: {job_name}")
+            
             # Configura Poppler
             poppler_path = PopplerManager.setup_poppler()
             
             # Cria pasta temporária para salvar as imagens
             base_name = os.path.splitext(os.path.basename(pdf_path))[0]
-            logger.info(f"Base do nome: {base_name}")
-            temp_folder = self._create_temp_folder(base_name)
+            # Normaliza o nome base
+            safe_base_name = normalize_filename(base_name)
+            logger.info(f"Base do nome: {safe_base_name} (normalizado de: {base_name})")
+            temp_folder = self._create_temp_folder(safe_base_name)
             logger.info(f"Pasta temporária: {temp_folder}")
             
             # Converte PDF para imagens com poppler_path se necessário
@@ -750,13 +758,17 @@ class IPPPrinter:
                 elif image.mode not in ['RGB', 'L']:
                     image = image.convert('RGB')
                 
+                safe_base_name = normalize_filename(base_name)
+                logger.info(f"Base do nome normalizado: {safe_base_name}")
+
                 # Define nome do arquivo
                 if len(images) > 1:
-                    image_filename = f"{base_name}_pagina_{page_num:02d}.jpg"
-                    page_job_name = f"{job_name}_pagina_{page_num}"
+                    image_filename = f"{safe_base_name}_p{page_num:02d}.jpg"
+                    page_job_name = f"{normalize_filename(job_name)}_p{page_num:02d}"
                 else:
-                    image_filename = f"{base_name}.jpg"
-                    page_job_name = job_name
+                    image_filename = f"{safe_base_name}.jpg"
+                    page_job_name = normalize_filename(job_name)
+
                 
                 image_path = os.path.join(temp_folder, image_filename)
                 
@@ -836,7 +848,7 @@ class IPPPrinter:
                     # Atributos IPP para JPG
                     attributes = {
                         "printer-uri": url,
-                        "requesting-user-name": os.getenv("USER", "usuario"),
+                        "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
                         "job-name": page_job.job_name,
                         "document-name": page_job.job_name,
                         "document-format": "image/jpeg",
