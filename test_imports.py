@@ -3,7 +3,6 @@
 import sys
 print(f"Python: {sys.version}")
 print(f"Executável: {sys.executable}")
-print(f"Sistema: {sys.platform}")
 print("-" * 50)
 
 modules_to_test = [

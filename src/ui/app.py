@@ -143,12 +143,12 @@ class PrintManagementApp(wx.App):
             from src.tasks import update_printers_task, update_application_task
             
             self.scheduler = TaskScheduler()
-            self.scheduler.add_task(
-                "update_printers",
-                update_printers_task,
-                3600,  # Atualiza a cada hora
-                args=(self.api_client, self.config)
-            )
+            # self.scheduler.add_task(
+            #     "update_printers",
+            #     update_printers_task,
+            #     3600,  # Atualiza a cada hora
+            #     args=(self.api_client, self.config)
+            # )
 
             self.scheduler.add_task(
                 "check_updates",

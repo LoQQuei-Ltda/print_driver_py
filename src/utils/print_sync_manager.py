@@ -69,6 +69,15 @@ class PrintSyncManager:
                 logger.error("Gerenciador não inicializado")
                 return False
             
+            # Verifica se consegue acessar o histórico
+            try:
+                # Log para debug
+                print_history = self.config.get("print_jobs", [])
+                logger.debug(f"Verificação inicial: encontrados {len(print_history)} trabalhos no histórico")
+            except Exception as e:
+                logger.error(f"Erro ao acessar histórico: {e}")
+                return False
+                
             self.is_syncing = True
         
         # Inicia a sincronização em uma thread separada
@@ -91,14 +100,21 @@ class PrintSyncManager:
         try:
             logger.info("Iniciando sincronização de trabalhos de impressão")
             
-            # Obtém o histórico de impressão
-            print_history = self.config.get_print_history()
+            # Obtém o histórico de impressão - CORRIGIDO: usa a mesma chave que PrintQueueManager
+            print_history = self.config.get("print_jobs", [])
+            
+            # Log do histórico para debug
+            logger.debug(f"Histórico encontrado: {len(print_history)} trabalhos")
+            for idx, job in enumerate(print_history):
+                logger.debug(f"Trabalho {idx+1}: ID={job.get('job_id')}, status={job.get('status')}, synced={job.get('synced', False)}")
             
             # Filtra apenas os trabalhos concluídos e não sincronizados
             jobs_to_sync = [
                 job for job in print_history
                 if job.get("status") == "completed" and not job.get("synced", False)
             ]
+            
+            logger.info(f"Encontrados {len(jobs_to_sync)} trabalhos para sincronizar")
             
             if not jobs_to_sync:
                 logger.info("Nenhum trabalho para sincronizar")
@@ -116,8 +132,8 @@ class PrintSyncManager:
                     # Extrai informações do trabalho
                     job_id = job.get("job_id", "")
                     document_id = job.get("document_id", "")
-                    completed_at = job.get("completed_at")
-                    pages = job.get("completed_pages", 0)
+                    completed_at = job.get("end_time") or job.get("completed_at")
+                    pages = job.get("completed_pages", 0) or job.get("total_pages", 0)
                     
                     # Se não tiver ID do documento, usa o caminho do arquivo
                     if not document_id:
@@ -148,8 +164,8 @@ class PrintSyncManager:
                     logger.error(f"Erro ao sincronizar trabalho {job.get('job_id')}: {str(e)}")
                     job["sync_error"] = str(e)
             
-            # Salva o histórico atualizado
-            self.config.set_print_history(print_history)
+            # Salva o histórico atualizado - CORRIGIDO: usa a mesma chave que PrintQueueManager
+            self.config.set("print_jobs", print_history)
             
             # Limpa trabalhos antigos
             self._cleanup_old_jobs()
@@ -168,8 +184,8 @@ class PrintSyncManager:
     def _cleanup_old_jobs(self):
         """Limpa trabalhos antigos (mais de 72 horas)"""
         try:
-            # Obtém o histórico
-            print_history = self.config.get_print_history()
+            # Obtém o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
+            print_history = self.config.get("print_jobs", [])
             
             # Filtra apenas os trabalhos com mais de 72 horas
             now = datetime.now()
@@ -181,7 +197,7 @@ class PrintSyncManager:
             for job in print_history:
                 try:
                     # Obtém a data de conclusão ou criação
-                    job_date_str = job.get("completed_at") or job.get("created_at")
+                    job_date_str = job.get("end_time") or job.get("completed_at") or job.get("start_time") or job.get("created_at")
                     
                     if not job_date_str:
                         # Se não tiver data, mantém o trabalho (não sabemos quando foi criado)
@@ -201,10 +217,10 @@ class PrintSyncManager:
                     logger.error(f"Erro ao processar data do trabalho: {str(e)}")
                     new_history.append(job)
             
-            # Atualiza o histórico
+            # Atualiza o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
             if len(new_history) != len(print_history):
                 logger.info(f"Removidos {len(print_history) - len(new_history)} trabalhos antigos")
-                self.config.set_print_history(new_history)
+                self.config.set("print_jobs", new_history)
             
         except Exception as e:
             logger.error(f"Erro ao limpar trabalhos antigos: {str(e)}")
