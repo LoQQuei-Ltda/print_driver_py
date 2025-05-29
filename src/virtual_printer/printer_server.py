@@ -18,6 +18,7 @@ import tempfile
 import re
 import unicodedata
 from pathlib import Path
+from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Server")
 
@@ -131,7 +132,7 @@ class PrinterServer:
         
         # Verificar no PATH do sistema
         try:
-            result = subprocess.run(['which', 'gs'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = run_hidden(['which', 'gs'])
             if result.returncode == 0:
                 gs_path = result.stdout.strip()
                 if self._test_ghostscript_executable(gs_path):
@@ -161,18 +162,16 @@ class PrinterServer:
         """Testa se um executável Ghostscript funciona"""
         try:
             if self.system == 'Windows' and os.path.basename(path).lower().startswith('gpcl'):
-                process = subprocess.Popen(
+                process = popen_hidden(
                     [path, '--help'],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    universal_newlines=True, 
-                    creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                    universal_newlines=True
                 )
                 stdout, stderr = process.communicate(timeout=5)
                 return "PCL" in stdout or "PCL" in stderr or "Ghostscript" in stdout
             else:
-                result = subprocess.run([path, '--version'], 
-                                    capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+                result = run_hidden([path, '--version'], timeout=5)
                 return result.returncode == 0
         except:
             return False
@@ -221,13 +220,13 @@ class PrinterServer:
     def _install_ghostscript_macos(self):
         """Instala Ghostscript no macOS"""
         try:
-            subprocess.run(['which', 'brew'], check=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            run_hidden(['which', 'brew'], timeout=5)
             logger.info("Homebrew encontrado, tentando instalar Ghostscript...")
-            result = subprocess.run(['brew', 'install', 'ghostscript'], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
+            result = run_hidden(['brew', 'install', 'ghostscript'])
             if result.returncode == 0:
-                gs_path = subprocess.run(['which', 'gs'], capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0)
-                if gs_path.returncode == 0:
-                    return gs_path.stdout.strip()
+                gs_result = run_hidden(['which', 'gs'])
+                if gs_result.returncode == 0:
+                    return gs_result.stdout.strip()
         except:
             pass
         
@@ -371,12 +370,11 @@ class PrinterServer:
         ]
         
         try:
-            process = subprocess.Popen(
+            process = popen_hidden(
                 cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, 
-                creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                stderr=subprocess.PIPE
             )
             
             pdf_data, stderr = process.communicate(input=data, timeout=60)

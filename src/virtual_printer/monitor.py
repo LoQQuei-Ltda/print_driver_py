@@ -12,6 +12,7 @@ from datetime import datetime
 from src.utils.file_monitor import FileMonitor
 from .printer_server import PrinterServer
 from .installer import VirtualPrinterInstaller
+from src.utils.subprocess_utils import run_hidden
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Monitor")
 
@@ -77,10 +78,9 @@ class VirtualPrinterManager:
             
             # Verificar firewall
             try:
-                import subprocess
-                result = subprocess.run(
+                result = run_hidden(
                     ['netsh', 'advfirewall', 'show', 'currentprofile'],
-                    capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0
+                    timeout=5
                 )
                 if result.returncode == 0:
                     if 'State                                 ON' in result.stdout:
