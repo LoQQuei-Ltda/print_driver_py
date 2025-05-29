@@ -10,6 +10,8 @@ import json
 import logging
 import platform
 import wx
+import getpass
+import appdirs
 
 logger = logging.getLogger("PrintManagementSystem.Config")
 
@@ -43,11 +45,147 @@ class AppConfig:
             },
             "printers": [],
             "print_jobs": [],
-            "print_history": []
+            "print_history": [],
+            "multi_user_mode": True,  # Indica se o sistema deve salvar por usuário
+            "user_directories": {}    # Mapeamento de usuários para diretórios
         }
 
         # Carrega configurações ou cria se não existir
         self.config = self._load_config()
+        
+        # Garante que os diretórios existam
+        self._ensure_directories()
+
+    def _ensure_directories(self):
+        """Garante que os diretórios necessários existam"""
+        # Garante que o diretório de PDFs base exista
+        os.makedirs(self.pdf_dir, exist_ok=True)
+        
+        # Se estiver no Windows, verifica diretórios de usuários
+        if self.system == 'Windows' and self.get("multi_user_mode", True):
+            self._ensure_user_directories()
+    
+    def _ensure_user_directories(self):
+        """Garante que os diretórios de usuários estejam atualizados"""
+        try:
+            # Diretório Users
+            users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
+            
+            if os.path.exists(users_dir):
+                # Lista de usuários atuais no sistema
+                for username in os.listdir(users_dir):
+                    user_profile = os.path.join(users_dir, username)
+                    
+                    # Verifica se é um diretório de usuário válido
+                    if os.path.isdir(user_profile) and not username.startswith('.'):
+                        # Localização padrão AppData para o usuário
+                        app_data = os.path.join(user_profile, 'AppData', 'Local')
+                        
+                        if os.path.exists(app_data):
+                            user_pdf_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                            
+                            # Tenta criar o diretório se não existir
+                            try:
+                                if not os.path.exists(user_pdf_dir):
+                                    os.makedirs(user_pdf_dir, exist_ok=True)
+                                
+                                # Atualiza o dicionário de diretórios de usuários
+                                user_directories = self.get("user_directories", {})
+                                user_directories[username] = user_pdf_dir
+                                self.set("user_directories", user_directories)
+                                
+                                logger.debug(f"Diretório para usuário {username}: {user_pdf_dir}")
+                            except PermissionError:
+                                logger.debug(f"Sem permissão para criar diretório para o usuário {username}")
+                            except Exception as e:
+                                logger.debug(f"Erro ao processar diretório do usuário {username}: {e}")
+        except Exception as e:
+            logger.warning(f"Erro ao configurar diretórios de usuários: {e}")
+    
+    def get_user_pdf_dir(self, username=None):
+        """
+        Obtém o diretório de PDFs para um usuário específico
+        
+        Args:
+            username (str, optional): Nome do usuário. Se None, usa o usuário atual.
+            
+        Returns:
+            str: Caminho para o diretório de PDFs do usuário
+        """
+        # Se multi_user_mode estiver desativado, retorna o diretório base
+        if not self.get("multi_user_mode", True):
+            return self.pdf_dir
+        
+        # Se não foi especificado um usuário, usa o usuário atual
+        if username is None:
+            username = getpass.getuser()
+        
+        # Verifica se existe um diretório configurado para este usuário
+        user_directories = self.get("user_directories", {})
+        if username in user_directories:
+            user_dir = user_directories[username]
+            # Verifica se o diretório existe
+            if os.path.exists(user_dir) or self._try_create_directory(user_dir):
+                return user_dir
+        
+        # Se estiver no Windows, tenta criar no AppData do usuário
+        if self.system == 'Windows':
+            user_profile = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users', username)
+            if os.path.exists(user_profile):
+                app_data = os.path.join(user_profile, 'AppData', 'Local')
+                if os.path.exists(app_data):
+                    user_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                    if self._try_create_directory(user_dir):
+                        # Atualiza o dicionário de diretórios de usuários
+                        user_directories[username] = user_dir
+                        self.set("user_directories", user_directories)
+                        return user_dir
+        
+        # Fallback: cria um subdiretório no diretório base
+        user_dir = os.path.join(self.pdf_dir, username)
+        if self._try_create_directory(user_dir):
+            # Atualiza o dicionário de diretórios de usuários
+            user_directories[username] = user_dir
+            self.set("user_directories", user_directories)
+            return user_dir
+        
+        # Em último caso, retorna o diretório base
+        return self.pdf_dir
+    
+    def _try_create_directory(self, directory):
+        """
+        Tenta criar um diretório
+        
+        Args:
+            directory (str): Caminho do diretório a ser criado
+            
+        Returns:
+            bool: True se o diretório existe ou foi criado com sucesso
+        """
+        try:
+            os.makedirs(directory, exist_ok=True)
+            return True
+        except Exception as e:
+            logger.warning(f"Erro ao criar diretório {directory}: {e}")
+            return False
+    
+    def get_all_pdf_directories(self):
+        """
+        Obtém todos os diretórios de PDFs configurados
+        
+        Returns:
+            list: Lista de caminhos para diretórios de PDFs
+        """
+        directories = [self.pdf_dir]  # Diretório base sempre incluído
+        
+        # Adiciona diretórios de usuários
+        if self.get("multi_user_mode", True):
+            user_directories = self.get("user_directories", {})
+            for user_dir in user_directories.values():
+                if user_dir not in directories and os.path.exists(user_dir):
+                    directories.append(user_dir)
+        
+        return directories
 
     def _get_system_theme(self):
         """
@@ -399,3 +537,16 @@ class AppConfig:
         except Exception as e:
             logger.error(f"Erro ao limpar histórico de impressão: {str(e)}")
             return False
+            
+    def set_multi_user_mode(self, enabled):
+        """
+        Define se o modo multi-usuário está ativado
+        
+        Args:
+            enabled (bool): True para ativar, False para desativar
+        """
+        self.set("multi_user_mode", enabled)
+        
+        # Se ativado, garante que os diretórios de usuários estejam configurados
+        if enabled and self.system == 'Windows':
+            self._ensure_user_directories()

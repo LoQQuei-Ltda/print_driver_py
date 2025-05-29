@@ -12,6 +12,7 @@ import logging
 import wx
 import appdirs
 import time
+import platform
 from src.ui.app import PrintManagementApp
 from src.config import AppConfig
 
@@ -87,6 +88,48 @@ def setup_user_data_dir():
     
     return data_dir
 
+def setup_multi_user_directories():
+    """
+    Configura diretórios para múltiplos usuários em ambientes Windows Server
+    """
+    # Só executamos isso no Windows
+    if platform.system() != 'Windows':
+        return
+    
+    # Diretório Users
+    users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
+    
+    # Verificar se estamos em um servidor
+    is_server = 'server' in platform.release().lower() or 'server' in platform.version().lower()
+    
+    if os.path.exists(users_dir):
+        logger = logging.getLogger("PrintManagementSystem")
+        logger.info(f"Verificando diretórios de usuários em: {users_dir}")
+        logger.info(f"Sistema operacional: {platform.system()} {platform.release()}")
+        logger.info(f"Versão: {platform.version()}")
+        logger.info(f"Detectado como servidor: {is_server}")
+        
+        # Lista todos os usuários
+        for username in os.listdir(users_dir):
+            user_profile = os.path.join(users_dir, username)
+            
+            # Verifica se é um diretório de usuário válido
+            if os.path.isdir(user_profile) and not username.startswith('.'):
+                # Localização padrão AppData para o usuário
+                app_data = os.path.join(user_profile, 'AppData', 'Local')
+                
+                if os.path.exists(app_data):
+                    user_pdf_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                    
+                    # Tenta criar o diretório do usuário
+                    try:
+                        os.makedirs(user_pdf_dir, exist_ok=True)
+                        logger.info(f"Diretório criado para usuário {username}: {user_pdf_dir}")
+                    except PermissionError:
+                        logger.warning(f"Sem permissão para criar diretório para o usuário {username}")
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório para usuário {username}: {e}")
+
 def main():
     """Função principal da aplicação"""
     try:
@@ -98,6 +141,14 @@ def main():
         
         # Inicializa a configuração da aplicação
         config = AppConfig(data_dir)
+        
+        # Configura diretórios para múltiplos usuários (especialmente em servidores)
+        if config.get("multi_user_mode", True):
+            setup_multi_user_directories()
+            
+            # Garante que a configuração conheça os diretórios
+            if hasattr(config, '_ensure_user_directories'):
+                config._ensure_user_directories()
         
         # Cria e inicia a aplicação wxPython passando a configuração diretamente
         app = PrintManagementApp(config)

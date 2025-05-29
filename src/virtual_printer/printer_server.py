@@ -18,6 +18,8 @@ import tempfile
 import re
 import unicodedata
 from pathlib import Path
+import getpass
+import ctypes
 from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
 logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Server")
@@ -46,12 +48,12 @@ class PrinterServer:
         self.system = platform.system()
         self.ghostscript_path = None
         
-        # Diretório de saída baseado na configuração
-        self.output_dir = config.pdf_dir
+        # Diretório base para PDFs
+        self.base_output_dir = config.pdf_dir
         
-        # Criar diretório de saída
-        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        logger.info(f"Diretório para PDFs: {self.output_dir}")
+        # Criar diretório base
+        Path(self.base_output_dir).mkdir(parents=True, exist_ok=True)
+        logger.info(f"Diretório base para PDFs: {self.base_output_dir}")
         
         # Verificar e instalar Ghostscript
         self._init_ghostscript()
@@ -416,6 +418,127 @@ class PrinterServer:
         except Exception as e:
             logger.error(f"Erro ao extrair metadados: {e}")
             return None
+    
+    def _extract_username_from_data(self, data):
+        """Extrai o nome do usuário que enviou o trabalho dos dados de impressão"""
+        try:
+            # Decodifica o cabeçalho do trabalho
+            ps_text = self._decode_with_multiple_encodings(data[:5000])
+            
+            # Padrões para extrair usuário
+            user_patterns = [
+                r'@PJL\s+SET\s+USERNAME\s*=\s*"([^"]+)"',
+                r'@PJL\s+JOB\s+NAME\s*=\s*"([^"]+)@([^"]+)"',
+                r'@PJL\s+COMMENT\s+USER\s*=\s*"([^"]+)"',
+                r'%%For:\s*([^\r\n]+)',
+                r'/For\s*\(([^)]+)\)',
+                r'%%Creator:\s*([^\r\n]+)',
+                r'user[=:\s]+([^\r\n\s"]+)',
+                r'owner[=:\s]+([^\r\n\s"]+)',
+                r'autor[=:\s]+([^\r\n\s"]+)',
+                r'autor[=:\s]+"([^"]+)"',
+                r'usu.rio[=:\s]+([^\r\n\s"]+)',
+                r'usuario[=:\s]+([^\r\n\s"]+)',
+            ]
+            
+            import re
+            
+            # Tentar cada padrão
+            for pattern in user_patterns:
+                matches = re.search(pattern, ps_text, re.IGNORECASE)
+                if matches:
+                    username = matches.group(1).strip()
+                    
+                    # Limpar nome de usuário - remover caracteres não permitidos
+                    username = re.sub(r'[\\/*?:"<>|]', '', username)
+                    username = username.strip()
+                    
+                    # Se for um email, extrair a parte do usuário
+                    if '@' in username:
+                        username = username.split('@')[0]
+                    
+                    # Verificar se o nome de usuário é válido (mais de 2 caracteres)
+                    if username and len(username) > 2:
+                        # Verificar se não é um nome de sistema
+                        if username.lower() not in ['sistema', 'system', 'admin', 'administrador', 'administrator', 'documentos']:
+                            logger.info(f"Nome de usuário extraído: {username}")
+                            return username
+            
+            # Se não conseguiu extrair um usuário válido, retorna None para usar o diretório padrão
+            logger.info("Não foi possível extrair um nome de usuário válido, usando diretório padrão")
+            return None
+        
+        except Exception as e:
+            logger.error(f"Erro ao extrair nome de usuário: {e}")
+            return None
+    
+    def _get_current_windows_user(self):
+        """Obtém o nome do usuário atual no Windows"""
+        try:
+            if self.system == 'Windows':
+                # Tenta usando o processo de spooler
+                try:
+                    # Verifica o processo do spooler
+                    import psutil
+                    for process in psutil.process_iter(['pid', 'name', 'username']):
+                        if process.info['name'] and 'spoolsv' in process.info['name'].lower():
+                            if process.info['username']:
+                                # Extrai apenas o nome de usuário da string de domínio\usuário
+                                username = process.info['username'].split('\\')[-1]
+                                return username
+                except:
+                    pass
+                
+                # Método mais direto usando módulo getpass
+                return getpass.getuser()
+            else:
+                # Em sistemas Unix
+                return getpass.getuser()
+        except:
+            # Fallback
+            return "shared_user"
+    
+    def _get_user_output_dir(self, username=None):
+        """
+        Obtém o diretório para salvar PDFs, baseado no usuário ou usando o diretório padrão
+        
+        Args:
+            username (str, optional): Nome do usuário. Se None ou inválido, usa o diretório padrão.
+            
+        Returns:
+            str: Caminho para o diretório de saída
+        """
+        # Se não foi fornecido um nome de usuário válido, usa o diretório padrão
+        if not username:
+            logger.info(f"Usando diretório padrão: {self.base_output_dir}")
+            return self.base_output_dir
+        
+        # Se estiver no Windows, tenta criar/usar o diretório no AppData do usuário
+        if self.system == 'Windows':
+            try:
+                # Tenta encontrar o perfil do usuário
+                users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
+                user_profile = os.path.join(users_dir, username)
+                
+                # Se o perfil do usuário existe
+                if os.path.exists(user_profile):
+                    app_data = os.path.join(user_profile, 'AppData', 'Local')
+                    if os.path.exists(app_data):
+                        user_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                        try:
+                            os.makedirs(user_dir, exist_ok=True)
+                            logger.info(f"Usando diretório específico do usuário: {user_dir}")
+                            return user_dir
+                        except PermissionError:
+                            logger.warning(f"Sem permissão para criar diretório no AppData do usuário {username}")
+                        except Exception as e:
+                            logger.warning(f"Erro ao criar diretório do usuário {username}: {e}")
+            except Exception as e:
+                logger.warning(f"Erro ao processar diretório para usuário {username}: {e}")
+        
+        # Se não conseguiu usar o diretório específico do usuário, usa o diretório base
+        logger.info(f"Usando diretório base: {self.base_output_dir}")
+        return self.base_output_dir
     
     def _decode_with_multiple_encodings(self, data):
         """Tenta decodificar dados com múltiplos encodings - Versão melhorada"""
@@ -1037,44 +1160,53 @@ class PrinterServer:
         return filename
     
     def _save_pdf(self, pdf_data, title=None, author=None, filename=None):
-        """Salva os dados PDF em um arquivo"""
+        """Salva os dados PDF em um arquivo no diretório apropriado"""
         if not pdf_data:
             logger.error("Nenhum dado PDF para salvar.")
             return None
         
-        # Determinar nome do arquivo
-        if filename:
-            base_name = filename
-        elif title:
-            base_name = title
-        else:
-            data_br = time.strftime('%d-%m-%Y')
-            hora_br = time.strftime('%H-%M-%S')
-            base_name = f"sem_titulo_{data_br}_{hora_br}"
-        
-        # Limpa o nome do arquivo (usando a nova função de limpeza)
-        base_name = self._clean_filename(base_name) or f"documento_{time.strftime('%d-%m-%Y_%H-%M-%S')}"
-        
-        # Garante extensão .pdf
-        if not base_name.lower().endswith('.pdf'):
-            base_name += '.pdf'
-        
-        # Caminho completo
-        output_path = os.path.join(self.output_dir, base_name)
-        
-        # Evitar sobrescrever arquivos existentes
-        counter = 1
-        while os.path.exists(output_path):
-            name_parts = base_name.rsplit('.', 1)
-            if counter == 1:
-                new_name = f"{name_parts[0]}_copia.{name_parts[1]}"
-            else:
-                new_name = f"{name_parts[0]}_copia{counter}.{name_parts[1]}"
-            output_path = os.path.join(self.output_dir, new_name)
-            counter += 1
-        
-        # Salvar o arquivo
         try:
+            # Extrai o nome do usuário que enviou o trabalho (pode ser None)
+            username = self._extract_username_from_data(pdf_data)
+            
+            # Obtém o diretório de saída (diretório base ou específico do usuário)
+            output_dir = self._get_user_output_dir(username)
+            
+            # Determinar nome do arquivo
+            if filename:
+                base_name = filename
+            elif title:
+                base_name = title
+            else:
+                data_br = time.strftime('%d-%m-%Y')
+                hora_br = time.strftime('%H-%M-%S')
+                base_name = f"documento_{data_br}_{hora_br}"
+            
+            # Limpa o nome do arquivo
+            base_name = self._clean_filename(base_name) or f"documento_{time.strftime('%d-%m-%Y_%H-%M-%S')}"
+            
+            # Garante extensão .pdf
+            if not base_name.lower().endswith('.pdf'):
+                base_name += '.pdf'
+            
+            # Caminho completo
+            output_path = os.path.join(output_dir, base_name)
+            
+            # Evitar sobrescrever arquivos existentes
+            counter = 1
+            while os.path.exists(output_path):
+                name_parts = base_name.rsplit('.', 1)
+                if counter == 1:
+                    new_name = f"{name_parts[0]}_copia.{name_parts[1]}"
+                else:
+                    new_name = f"{name_parts[0]}_copia{counter}.{name_parts[1]}"
+                output_path = os.path.join(output_dir, new_name)
+                counter += 1
+            
+            # Garante que o diretório existe
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
+            # Salvar o arquivo
             with open(output_path, 'wb') as f:
                 f.write(pdf_data)
             logger.info(f"PDF salvo em: {output_path}")
@@ -1091,7 +1223,32 @@ class PrinterServer:
             return output_path
         except Exception as e:
             logger.error(f"Erro ao salvar PDF: {e}")
-            return None
+            
+            # Tentativa de fallback para o diretório base
+            try:
+                fallback_filename = f"documento_{time.strftime('%d-%m-%Y_%H-%M-%S')}.pdf"
+                fallback_path = os.path.join(self.base_output_dir, fallback_filename)
+                
+                # Garante que o diretório existe
+                os.makedirs(os.path.dirname(fallback_path), exist_ok=True)
+                
+                with open(fallback_path, 'wb') as f:
+                    f.write(pdf_data)
+                logger.info(f"PDF salvo em fallback: {fallback_path}")
+                
+                # Callback para o documento salvo em fallback
+                if self.on_new_document:
+                    try:
+                        from src.models.document import Document
+                        doc = Document.from_file(fallback_path)
+                        self.on_new_document(doc)
+                    except Exception as e:
+                        logger.error(f"Erro ao processar callback para fallback: {e}")
+                
+                return fallback_path
+            except Exception as fallback_error:
+                logger.error(f"Erro ao salvar PDF no fallback: {fallback_error}")
+                return None
     
     def start(self):
         """Inicia o servidor de impressão"""

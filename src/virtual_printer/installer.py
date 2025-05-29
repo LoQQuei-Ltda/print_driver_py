@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Instalador da impressora virtual cross-platform
+Instalador da impressora virtual cross-platform com suporte multi-usuário
 """
 
 import os
@@ -44,7 +44,7 @@ class PrinterManager:
         raise NotImplementedError
 
 class WindowsPrinterManager(PrinterManager):
-    """Gerenciador de impressoras para Windows"""
+    """Gerenciador de impressoras para Windows com suporte multi-usuário"""
     
     def __init__(self):
         self.postscript_printer_drivers = [
@@ -58,12 +58,32 @@ class WindowsPrinterManager(PrinterManager):
         self._debug_environment()
     
     def _debug_environment(self):
-        """Debug do ambiente Windows"""
+        """Debug do ambiente Windows com informações multi-usuário"""
         logger.debug(f"Sistema operacional: {platform.system()} {platform.release()}")
         logger.debug(f"Versão do Windows: {platform.version()}")
         logger.debug(f"Arquitetura: {platform.machine()}")
         logger.debug(f"Usuário: {os.environ.get('USERNAME', 'Unknown')}")
         logger.debug(f"É admin: {self._is_admin()}")
+        
+        # Detectar tipo de Windows
+        try:
+            result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+            if result.returncode == 0:
+                if 'Server' in result.stdout:
+                    logger.info("Detectado Windows Server - modo multi-usuário otimizado")
+                else:
+                    logger.info("Detectado Windows Desktop")
+        except:
+            pass
+        
+        # Verificar sessões de usuário ativas (apenas em servidores)
+        try:
+            result = run_hidden(['query', 'user'], timeout=5)
+            if result.returncode == 0:
+                logger.debug("Sessões de usuário ativas:")
+                logger.debug(result.stdout)
+        except:
+            pass
     
     def _is_admin(self):
         """Verifica se está rodando como administrador"""
@@ -121,7 +141,7 @@ class WindowsPrinterManager(PrinterManager):
         return 'Microsoft Print To PDF'
     
     def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
-        """Adiciona impressora no Windows"""
+        """Adiciona impressora no Windows com configuração multi-usuário"""
         if printer_port_name is None:
             printer_port_name = f"IP_{ip}:{port}"
         
@@ -129,6 +149,11 @@ class WindowsPrinterManager(PrinterManager):
         logger.info(f"Driver: {self.default_driver}")
         logger.info(f"Porta: {printer_port_name}")
         logger.info(f"IP: {ip}:{port}")
+        
+        # Para Windows Server, verificar se precisa configurar para todos os usuários
+        is_server = self._is_windows_server()
+        if is_server:
+            logger.info("Configurando impressora para ambiente Windows Server (multi-usuário)")
         
         # Criar porta usando diferentes métodos
         port_created = self._create_port(printer_port_name, ip, port)
@@ -141,7 +166,7 @@ class WindowsPrinterManager(PrinterManager):
         time.sleep(2)
         
         # Criar impressora usando diferentes métodos
-        printer_created = self._create_printer(name, printer_port_name)
+        printer_created = self._create_printer(name, printer_port_name, is_server)
         
         if printer_created:
             logger.info(f"Impressora '{name}' instalada com sucesso!")
@@ -151,7 +176,14 @@ class WindowsPrinterManager(PrinterManager):
             
             # Definir comentário se fornecido
             if comment:
+                # Adicionar informação sobre multi-usuário ao comentário
+                if is_server:
+                    comment += " (Configurado para multi-usuário)"
                 self._set_printer_comment(name, comment)
+            
+            # Configurar permissões para todos os usuários em servidores
+            if is_server:
+                self._configure_multiuser_permissions(name)
             
             return True
         else:
@@ -159,6 +191,49 @@ class WindowsPrinterManager(PrinterManager):
             # Tentar remover a porta criada
             self.remove_port(printer_port_name)
             return False
+    
+    def _is_windows_server(self):
+        """Verifica se está rodando em Windows Server"""
+        try:
+            result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+            if result.returncode == 0:
+                return 'Server' in result.stdout
+        except:
+            pass
+        return False
+    
+    def _configure_multiuser_permissions(self, printer_name):
+        """Configura permissões da impressora para todos os usuários"""
+        try:
+            # Tentar dar permissão para o grupo "Everyone" usando PowerShell
+            logger.info("Configurando permissões multi-usuário...")
+            
+            # Método 1: PowerShell com Set-Printer
+            try:
+                cmd = [
+                    'powershell', '-command',
+                    f'$printer = Get-Printer -Name "{printer_name}"; '
+                    f'$printer.PermissionSDDL = $null; '
+                    f'Set-Printer -InputObject $printer'
+                ]
+                run_hidden(cmd, timeout=15)
+                logger.info("Permissões configuradas via PowerShell")
+            except Exception as e:
+                logger.debug(f"Erro na configuração via PowerShell: {e}")
+            
+            # Método 2: Usar rundll32 para configurar permissões
+            try:
+                cmd = [
+                    'rundll32', 'printui.dll,PrintUIEntry',
+                    '/Xs', '/n', printer_name, 'attributes', '+shared'
+                ]
+                run_hidden(cmd, timeout=15)
+                logger.info("Impressora configurada como compartilhada")
+            except Exception as e:
+                logger.debug(f"Erro na configuração de compartilhamento: {e}")
+            
+        except Exception as e:
+            logger.warning(f"Erro ao configurar permissões multi-usuário: {e}")
     
     def _create_port(self, port_name, ip, port):
         """Cria uma porta de impressora TCP/IP"""
@@ -240,7 +315,7 @@ class WindowsPrinterManager(PrinterManager):
         
         return False
     
-    def _create_printer(self, name, port_name):
+    def _create_printer(self, name, port_name, is_server=False):
         """Cria a impressora usando diferentes métodos"""
         # Método 1: PowerShell (Windows 8+)
         try:
@@ -248,6 +323,13 @@ class WindowsPrinterManager(PrinterManager):
                 'powershell', '-command',
                 f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
             ]
+            
+            # Para servidores, adicionar configurações específicas
+            if is_server:
+                cmd = [
+                    'powershell', '-command',
+                    f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -Shared $true -ErrorAction Stop'
+                ]
             
             result = run_hidden(cmd, timeout=30)
             
@@ -624,7 +706,7 @@ class UnixPrinterManager(PrinterManager):
         return True
 
 class VirtualPrinterInstaller:
-    """Instalador da impressora virtual cross-platform"""
+    """Instalador da impressora virtual cross-platform com suporte multi-usuário"""
     
     PRINTER_NAME = "Impressora LoQQuei"
     
@@ -639,6 +721,7 @@ class VirtualPrinterInstaller:
         self.system = platform.system()
         self.printer_manager = self._init_printer_manager()
         self.server_info = None
+        self.is_multiuser_env = self._detect_multiuser_environment()
     
     def _init_printer_manager(self):
         """Inicializa o gerenciador de impressoras baseado no sistema"""
@@ -646,6 +729,27 @@ class VirtualPrinterInstaller:
             return WindowsPrinterManager()
         else:  # Linux ou macOS
             return UnixPrinterManager()
+    
+    def _detect_multiuser_environment(self):
+        """Detecta se está em um ambiente multi-usuário"""
+        if self.system == 'Windows':
+            try:
+                # Verificar se é Windows Server
+                result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+                if result.returncode == 0 and 'Server' in result.stdout:
+                    return True
+                
+                # Verificar se há múltiplas sessões ativas
+                result = run_hidden(['query', 'user'], timeout=5)
+                if result.returncode == 0:
+                    lines = result.stdout.strip().split('\n')
+                    active_sessions = [line for line in lines if 'Active' in line]
+                    return len(active_sessions) > 1
+                    
+            except:
+                pass
+        
+        return False
     
     def install_with_server_info(self, server_info):
         """
@@ -669,11 +773,16 @@ class VirtualPrinterInstaller:
             ip = server_info['ip']
             port = server_info['port']
             
-            comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir}'
+            # Comentário adaptado para ambiente multi-usuário
+            if self.is_multiuser_env:
+                comment = f'Impressora virtual PDF multi-usuário que salva na pasta Documents de cada usuário (Servidor: {ip}:{port})'
+            else:
+                comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir} (Servidor: {ip}:{port})'
             
             logger.info(f"Iniciando instalação da impressora virtual...")
             logger.info(f"Nome: {self.PRINTER_NAME}")
             logger.info(f"Servidor: {ip}:{port}")
+            logger.info(f"Ambiente multi-usuário: {self.is_multiuser_env}")
             
             success = self.printer_manager.add_printer(
                 self.PRINTER_NAME, ip, port,
@@ -685,6 +794,11 @@ class VirtualPrinterInstaller:
                 time.sleep(2)  # Aguardar um pouco para o sistema processar
                 if self.is_installed():
                     logger.info(f"Impressora virtual '{self.PRINTER_NAME}' instalada e verificada com sucesso!")
+                    
+                    if self.is_multiuser_env:
+                        logger.info("IMPORTANTE: A impressora está configurada para ambiente multi-usuário.")
+                        logger.info("Cada usuário terá seus PDFs salvos em sua própria pasta Documents/Impressora_LoQQuei")
+                    
                     return True
                 else:
                     logger.error("Impressora foi instalada mas não é detectável pelo sistema")
@@ -763,3 +877,27 @@ class VirtualPrinterInstaller:
         except Exception as e:
             logger.error(f"Erro ao verificar instalação da impressora")
             return False
+    
+    def get_installation_info(self):
+        """
+        Obtém informações sobre a instalação
+        
+        Returns:
+            dict: Informações da instalação
+        """
+        info = {
+            'installed': self.is_installed(),
+            'printer_name': self.PRINTER_NAME,
+            'system': self.system,
+            'multiuser_environment': self.is_multiuser_env,
+            'server_info': self.server_info
+        }
+        
+        if self.is_multiuser_env:
+            info['description'] = 'Impressora configurada para ambiente multi-usuário'
+            info['save_location'] = 'Documents/Impressora_LoQQuei de cada usuário'
+        else:
+            info['description'] = 'Impressora configurada para usuário único'
+            info['save_location'] = self.config.pdf_dir if hasattr(self.config, 'pdf_dir') else 'Configuração padrão'
+        
+        return info

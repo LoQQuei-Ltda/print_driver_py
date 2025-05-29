@@ -9,6 +9,8 @@ import os
 import time
 import logging
 import threading
+import platform
+import appdirs
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from src.models.document import Document
@@ -84,57 +86,174 @@ class FileMonitor:
         """
         self.config = config
         self.on_documents_changed = on_documents_changed
-        self.pdf_dir = config.pdf_dir
+        self.base_pdf_dir = config.pdf_dir
         self.documents = {}  # Caminho -> Documento
-        self.observer = None
+        self.observers = []  # Lista de observadores para múltiplos diretórios
+        self._main_observer = None  # Observador principal para compatibilidade
         self.lock = threading.Lock()
+        self.system = platform.system()
+        
+        # Lista de diretórios a monitorar
+        self.pdf_dirs = self._get_pdf_directories()
+        
+        logger.info(f"Base de diretórios PDF configurada: {self.base_pdf_dir}")
+        logger.info(f"Diretórios a monitorar: {len(self.pdf_dirs)}")
+    
+    # Propriedade para compatibilidade com código existente
+    @property
+    def observer(self):
+        """
+        Propriedade de compatibilidade para código existente que espera um único observador
+        
+        Returns:
+            Observer: O primeiro observador na lista ou None se não houver observadores
+        """
+        if self._main_observer:
+            return self._main_observer
+        
+        if self.observers and len(self.observers) > 0:
+            return self.observers[0]
+        
+        return None
+    
+    def _get_pdf_directories(self):
+        """
+        Obtém a lista de diretórios de PDF a serem monitorados
+        
+        Returns:
+            list: Lista de diretórios
+        """
+        # Sempre incluir o diretório base de PDFs
+        directories = [self.base_pdf_dir]
+        
+        # Se estiver no Windows, adiciona os diretórios de usuários específicos
+        if self.system == 'Windows':
+            try:
+                # Diretório Users
+                users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
+                
+                if os.path.exists(users_dir):
+                    # Lista todos os usuários
+                    for username in os.listdir(users_dir):
+                        user_profile = os.path.join(users_dir, username)
+                        
+                        # Verifica se é um diretório de usuário válido (ignora .Default, Public, etc.)
+                        if os.path.isdir(user_profile) and not username.startswith('.') and username not in ['Public', 'Default', 'Default User', 'All Users', 'desktop.ini']:
+                            # Localização padrão AppData para o usuário
+                            app_data = os.path.join(user_profile, 'AppData', 'Local')
+                            
+                            if os.path.exists(app_data):
+                                user_pdf_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                                
+                                # Adiciona se o diretório existir
+                                if os.path.exists(user_pdf_dir):
+                                    # Só adiciona se não for o mesmo que o diretório base
+                                    if os.path.normpath(user_pdf_dir) != os.path.normpath(self.base_pdf_dir):
+                                        directories.append(user_pdf_dir)
+                                        logger.info(f"Monitorando diretório do usuário {username}: {user_pdf_dir}")
+                                else:
+                                    # Tenta criar o diretório, se tiver permissão
+                                    try:
+                                        os.makedirs(user_pdf_dir, exist_ok=True)
+                                        directories.append(user_pdf_dir)
+                                        logger.info(f"Criado e monitorando diretório do usuário {username}: {user_pdf_dir}")
+                                    except (PermissionError, OSError):
+                                        # Ignora se não puder criar o diretório
+                                        pass
+            except Exception as e:
+                logger.warning(f"Erro ao listar diretórios de usuários: {e}")
+        
+        # Garantir que não há duplicatas
+        unique_directories = []
+        for directory in directories:
+            normalized_path = os.path.normpath(directory)
+            if normalized_path not in [os.path.normpath(d) for d in unique_directories]:
+                unique_directories.append(normalized_path)
+        
+        logger.info(f"Total de diretórios a monitorar: {len(unique_directories)}")
+        return unique_directories
     
     def start(self):
-        """Inicia o monitoramento do diretório"""
-        if self.observer and self.observer.is_alive():
+        """Inicia o monitoramento dos diretórios"""
+        if self.observers:
+            logger.info("Monitor de arquivos já está ativo")
             return
         
-        logger.info(f"Iniciando monitoramento de arquivos no diretório: {self.pdf_dir}")
+        # Garante que estamos monitorando todos os diretórios possíveis
+        self.pdf_dirs = self._get_pdf_directories()
         
-        # Garante que o diretório existe
-        os.makedirs(self.pdf_dir, exist_ok=True)
+        logger.info(f"Iniciando monitoramento de arquivos em {len(self.pdf_dirs)} diretórios")
         
         # Carrega documentos iniciais
         self._load_initial_documents()
         
-        # Configura o observador
-        event_handler = PDFHandler(self)
-        self.observer = Observer()
-        self.observer.schedule(event_handler, self.pdf_dir, recursive=False)
-        self.observer.start()
+        # Configura os observadores para cada diretório
+        for i, pdf_dir in enumerate(self.pdf_dirs):
+            try:
+                # Garante que o diretório existe
+                os.makedirs(pdf_dir, exist_ok=True)
+                
+                # Configura o observador
+                event_handler = PDFHandler(self)
+                observer = Observer()
+                observer.schedule(event_handler, pdf_dir, recursive=False)
+                observer.start()
+                
+                # Armazena o observador
+                self.observers.append(observer)
+                
+                # Se for o primeiro observador, salva como principal para compatibilidade
+                if i == 0:
+                    self._main_observer = observer
+                
+                logger.info(f"Monitoramento iniciado para: {pdf_dir}")
+                
+            except Exception as e:
+                logger.error(f"Erro ao iniciar monitoramento para {pdf_dir}: {str(e)}")
+        
+        # Verifica se pelo menos um observador foi iniciado
+        if not self.observers:
+            logger.warning("Nenhum observador foi iniciado! Monitoramento de arquivos não está funcionando.")
+        else:
+            logger.info(f"{len(self.observers)} observadores iniciados com sucesso.")
     
     def stop(self):
-        """Para o monitoramento do diretório"""
-        if self.observer:
-            self.observer.stop()
-            self.observer.join()
-            self.observer = None
+        """Para o monitoramento dos diretórios"""
+        logger.info("Parando monitoramento de arquivos")
+        
+        for observer in self.observers:
+            if observer.is_alive():
+                observer.stop()
+                observer.join()
+        
+        self.observers = []
+        self._main_observer = None
     
     def _load_initial_documents(self):
-        """Carrega documentos existentes do diretório"""
+        """Carrega documentos existentes de todos os diretórios monitorados"""
         with self.lock:
             self.documents.clear()
             
-            try:
-                files = os.listdir(self.pdf_dir)
-                for filename in files:
-                    if filename.lower().endswith('.pdf'):
-                        filepath = os.path.join(self.pdf_dir, filename)
-                        self._add_document_internal(filepath)
-                
-                logger.info(f"Carregados {len(self.documents)} documentos iniciais")
-                
-                # Notifica sobre os documentos iniciais
-                if self.on_documents_changed:
-                    self.on_documents_changed(list(self.documents.values()))
+            # Garante que estamos monitorando todos os diretórios possíveis
+            self.pdf_dirs = self._get_pdf_directories()
             
-            except Exception as e:
-                logger.error(f"Erro ao carregar documentos iniciais: {str(e)}")
+            for pdf_dir in self.pdf_dirs:
+                try:
+                    if os.path.exists(pdf_dir):
+                        files = os.listdir(pdf_dir)
+                        for filename in files:
+                            if filename.lower().endswith('.pdf'):
+                                filepath = os.path.join(pdf_dir, filename)
+                                self._add_document_internal(filepath)
+                        logger.info(f"Carregados documentos do diretório: {pdf_dir}")
+                except Exception as e:
+                    logger.error(f"Erro ao carregar documentos de {pdf_dir}: {str(e)}")
+            
+            logger.info(f"Total de documentos carregados: {len(self.documents)}")
+            
+            # Notifica sobre os documentos iniciais
+            if self.on_documents_changed:
+                self.on_documents_changed(list(self.documents.values()))
     
     def add_document(self, filepath):
         """
@@ -367,6 +486,11 @@ class FileMonitor:
             
             # Armazena o documento
             self.documents[filepath] = doc
+            
+            # Notifica sobre a alteração
+            if self.on_documents_changed:
+                self.on_documents_changed(list(self.documents.values()))
+                
             return True
         
         except Exception as e:
@@ -425,3 +549,18 @@ class FileMonitor:
                 if doc.id == document_id:
                     return doc
             return None
+            
+    def refresh_directories(self):
+        """
+        Atualiza a lista de diretórios monitorados e reinicia o monitoramento
+        """
+        logger.info("Atualizando diretórios monitorados")
+        
+        # Para todos os observadores atuais
+        self.stop()
+        
+        # Atualiza a lista de diretórios
+        self.pdf_dirs = self._get_pdf_directories()
+        
+        # Reinicia o monitoramento
+        self.start()

@@ -8,6 +8,7 @@ Monitor integrado para impressora virtual
 import os
 import logging
 from datetime import datetime
+import platform
 
 from src.utils.file_monitor import FileMonitor
 from .printer_server import PrinterServer
@@ -40,6 +41,9 @@ class VirtualPrinterManager:
         # Estado
         self.is_running = False
         self.processed_ids = set()
+        
+        # Sistema
+        self.system = platform.system()
         
         # Inicializar componentes
         self._init_components()
@@ -100,6 +104,22 @@ class VirtualPrinterManager:
                 self.processed_ids.add(document.id)
                 
                 logger.info(f"Novo documento criado pela impressora virtual: {document.name}")
+                logger.info(f"Caminho do documento: {document.path}")
+                
+                # Verificar se o arquivo realmente existe
+                if not os.path.exists(document.path):
+                    logger.warning(f"O arquivo do documento não foi encontrado no caminho: {document.path}")
+                    return
+                
+                # Atualizar o monitor de arquivos para garantir que o diretório esteja sendo monitorado
+                if self.file_monitor:
+                    # Se o diretório do documento não estiver na lista de diretórios monitorados
+                    document_dir = os.path.dirname(document.path)
+                    monitored_dirs = getattr(self.file_monitor, 'pdf_dirs', [])
+                    
+                    if document_dir not in monitored_dirs:
+                        logger.info(f"Atualizando monitoramento para incluir: {document_dir}")
+                        self.refresh_pdf_directories()
                 
                 # Aplicar impressão automática se configurado
                 self._auto_print_if_enabled(document)
@@ -107,8 +127,10 @@ class VirtualPrinterManager:
                 # Chamar callback do usuário
                 if self.on_new_document:
                     self.on_new_document(document)
+            
         except Exception as e:
             logger.error(f"Erro ao processar documento do servidor: {e}")
+
     
     def start(self):
         """
@@ -148,7 +170,7 @@ class VirtualPrinterManager:
             # Log das informações do servidor
             server_info = self.printer_server.get_server_info()
             logger.info(f"Servidor rodando em {server_info['ip']}:{server_info['port']}")
-            logger.info(f"PDFs serão salvos em: {self.config.pdf_dir}")
+            logger.info(f"PDFs serão salvos para cada usuário conforme configurado")
             
             return True
             
@@ -212,7 +234,7 @@ class VirtualPrinterManager:
             return False
     
     def _start_file_monitoring(self):
-        """Inicia o monitoramento da pasta de PDFs"""
+        """Inicia o monitoramento das pastas de PDFs para todos os usuários"""
         try:
             def on_documents_changed(documents):
                 if self.on_new_document and documents:
@@ -233,6 +255,12 @@ class VirtualPrinterManager:
             # Criar e iniciar o monitor de arquivos
             self.file_monitor = FileMonitor(self.config, on_documents_changed)
             self.file_monitor.start()
+            
+            # Verificar se o monitoramento foi iniciado com sucesso
+            if hasattr(self.file_monitor, 'observers') and self.file_monitor.observers:
+                logger.info(f"Monitoramento de arquivos iniciado com {len(self.file_monitor.observers)} observadores")
+            else:
+                logger.warning("Monitoramento de arquivos pode não estar funcionando corretamente")
             
         except Exception as e:
             logger.error(f"Erro ao iniciar monitoramento de arquivos: {e}")
@@ -291,10 +319,14 @@ class VirtualPrinterManager:
             
             # Status do monitoramento
             if self.file_monitor:
-                status['monitoring_active'] = (
-                    self.file_monitor.observer and 
-                    self.file_monitor.observer.is_alive()
-                )
+                # Compatibilidade com o código existente
+                if hasattr(self.file_monitor, 'observer') and self.file_monitor.observer:
+                    status['monitoring_active'] = self.file_monitor.observer.is_alive()
+                # Novo código com múltiplos observadores
+                elif hasattr(self.file_monitor, 'observers'):
+                    status['monitoring_active'] = any(
+                        observer.is_alive() for observer in self.file_monitor.observers
+                    )
             
         except Exception as e:
             logger.error(f"Erro ao obter status: {e}")
@@ -328,6 +360,27 @@ class VirtualPrinterManager:
         except Exception as e:
             logger.error(f"Erro ao obter documentos recentes: {e}")
             return []
+    
+    def refresh_pdf_directories(self):
+        """
+        Atualiza a lista de diretórios monitorados
+        """
+        if self.file_monitor:
+            # Verifica se o método refresh_directories existe no file_monitor
+            if hasattr(self.file_monitor, 'refresh_directories'):
+                logger.info("Atualizando diretórios de PDF monitorados")
+                self.file_monitor.refresh_directories()
+                
+                # Verificar se a atualização foi bem-sucedida
+                if hasattr(self.file_monitor, 'observers'):
+                    logger.info(f"Monitoramento atualizado: {len(self.file_monitor.observers)} observadores ativos")
+                else:
+                    logger.warning("A atualização pode não ter sido bem-sucedida")
+            else:
+                # Reinicia o monitor para atualizar diretórios (compatibilidade)
+                logger.info("Reiniciando monitor de arquivos para atualizar diretórios")
+                self.file_monitor.stop()
+                self.file_monitor.start()
 
 # Para compatibilidade com código existente
 class PrintFolderMonitor(VirtualPrinterManager):
