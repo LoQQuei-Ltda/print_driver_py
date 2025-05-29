@@ -34,6 +34,7 @@ import ssl
 import requests
 import re
 import unicodedata
+from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -54,9 +55,10 @@ def normalize_filename(filename):
 # Instalação automática de dependências
 def install_package(package):
     try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
-                             stdout=subprocess.PIPE, 
-                             stderr=subprocess.PIPE)
+        result = run_hidden([sys.executable, "-m", "pip", "install", package],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True)
         logger.info(f"Pacote {package} instalado com sucesso")
         return True
     except subprocess.CalledProcessError as e:
@@ -101,6 +103,19 @@ def check_dependencies():
         return False
 
 # Gerencia o Poppler para conversão de PDF para imagem
+import os
+import platform
+import subprocess
+import urllib.request
+import zipfile
+import shutil
+import logging
+import tempfile
+import stat
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
 class PopplerManager:
     @staticmethod
     def get_poppler_path():
@@ -110,16 +125,18 @@ class PopplerManager:
         if system == "windows":
             # Verifica se poppler já está no PATH
             try:
-                result = subprocess.run(['pdftoppm', '-h'], 
-                                     capture_output=True, text=True, timeout=5)
+                result = run_hidden(['pdftoppm', '-h'],
+                    capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
+                    logger.info("Poppler encontrado no PATH do sistema")
                     return None  # Já está no PATH
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Poppler não encontrado no PATH: {e}")
             
             # Procura por instalação local do poppler
             possible_paths = [
                 os.path.join(os.getcwd(), "poppler", "bin"),
+                os.path.join(os.getcwd(), "poppler", "Library", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "Library", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "library", "bin"),
@@ -135,13 +152,57 @@ class PopplerManager:
             ]
             
             for path in possible_paths:
-                if os.path.exists(os.path.join(path, "pdftoppm.exe")):
+                pdftoppm_path = os.path.join(path, "pdftoppm.exe")
+                if os.path.exists(pdftoppm_path):
                     logger.info(f"Poppler encontrado em: {path}")
                     return path
             
+            logger.info("Poppler não encontrado em nenhum caminho conhecido")
             return None
         
         # Para Linux/Mac, geralmente está no PATH
+        return None
+
+    @staticmethod
+    def verify_permissions(directory):
+        """Verifica se temos permissões adequadas no diretório"""
+        try:
+            # Testa criação de arquivo temporário
+            test_file = os.path.join(directory, "test_permissions.tmp")
+            with open(test_file, 'w') as f:
+                f.write("test")
+            os.remove(test_file)
+            return True
+        except Exception as e:
+            logger.error(f"Sem permissões adequadas em {directory}: {e}")
+            return False
+
+    @staticmethod
+    def get_alternative_install_path():
+        """Retorna um caminho alternativo para instalação quando não há permissões"""
+        # Tenta usar o diretório do usuário
+        user_dir = os.path.expanduser("~")
+        poppler_dir = os.path.join(user_dir, ".poppler")
+        
+        if not os.path.exists(poppler_dir):
+            try:
+                os.makedirs(poppler_dir, exist_ok=True)
+                if PopplerManager.verify_permissions(poppler_dir):
+                    return poppler_dir
+            except Exception as e:
+                logger.error(f"Não foi possível criar diretório alternativo: {e}")
+        
+        # Tenta usar temp
+        temp_dir = tempfile.gettempdir()
+        poppler_temp = os.path.join(temp_dir, "poppler_portable")
+        
+        try:
+            os.makedirs(poppler_temp, exist_ok=True)
+            if PopplerManager.verify_permissions(poppler_temp):
+                return poppler_temp
+        except Exception as e:
+            logger.error(f"Não foi possível usar diretório temporário: {e}")
+        
         return None
 
     @staticmethod
@@ -153,42 +214,145 @@ class PopplerManager:
             # URL do Poppler para Windows (versão portável)
             poppler_url = "https://github.com/oschwartz10612/poppler-windows/releases/download/v23.08.0-0/Release-23.08.0-0.zip"
             
-            # Pasta de destino
+            # Determina pasta de destino
             script_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             poppler_dir = os.path.join(script_dir, "poppler")
-            zip_path = os.path.join(script_dir, "poppler.zip")
+            
+            # Verifica permissões no diretório do script
+            if not PopplerManager.verify_permissions(script_dir):
+                logger.warning("Sem permissões no diretório do script, usando alternativo...")
+                alternative_base = PopplerManager.get_alternative_install_path()
+                if alternative_base:
+                    poppler_dir = alternative_base
+                    script_dir = os.path.dirname(alternative_base)
+                else:
+                    logger.error("Não foi possível encontrar local adequado para instalação")
+                    return None
+            
+            zip_path = os.path.join(script_dir, "poppler_temp.zip")
+            
+            logger.info(f"Instalando Poppler em: {poppler_dir}")
             
             # Remove instalação anterior se existir
             if os.path.exists(poppler_dir):
-                shutil.rmtree(poppler_dir)
+                try:
+                    shutil.rmtree(poppler_dir)
+                    logger.info("Instalação anterior removida")
+                except Exception as e:
+                    logger.error(f"Erro ao remover instalação anterior: {e}")
+                    return None
             
             logger.info("Baixando Poppler...")
-            urllib.request.urlretrieve(poppler_url, zip_path)
+            # Adiciona headers para evitar bloqueios
+            request = urllib.request.Request(
+                poppler_url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            )
             
+            with urllib.request.urlopen(request, timeout=30) as response:
+                with open(zip_path, 'wb') as f:
+                    shutil.copyfileobj(response, f)
+            
+            # Verifica se o download foi bem-sucedido
+            if not os.path.exists(zip_path) or os.path.getsize(zip_path) < 1000:
+                logger.error("Download falhou ou arquivo corrompido")
+                return None
+            
+            logger.info(f"Arquivo baixado: {os.path.getsize(zip_path)} bytes")
             logger.info("Extraindo arquivos...")
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(script_dir)
             
-            # Renomeia a pasta extraída para "poppler"
+            # Extrai com tratamento de erro mais detalhado
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    # Lista o conteúdo do arquivo
+                    file_list = zip_ref.namelist()
+                    logger.info(f"Arquivos no ZIP: {len(file_list)}")
+                    
+                    # Extrai todos os arquivos
+                    zip_ref.extractall(script_dir)
+                    logger.info("Extração concluída")
+                    
+            except zipfile.BadZipFile:
+                logger.error("Arquivo ZIP corrompido")
+                return None
+            except Exception as e:
+                logger.error(f"Erro na extração: {e}")
+                return None
+            
+            # Encontra e renomeia a pasta extraída
             extracted_folders = [f for f in os.listdir(script_dir) 
                                if f.startswith("poppler-") and os.path.isdir(os.path.join(script_dir, f))]
             
+            if not extracted_folders:
+                # Tenta encontrar qualquer pasta que contenha bin/pdftoppm.exe
+                for item in os.listdir(script_dir):
+                    item_path = os.path.join(script_dir, item)
+                    if os.path.isdir(item_path):
+                        bin_path = os.path.join(item_path, "bin", "pdftoppm.exe")
+                        if os.path.exists(bin_path):
+                            extracted_folders = [item]
+                            break
+            
             if extracted_folders:
                 old_name = os.path.join(script_dir, extracted_folders[0])
-                os.rename(old_name, poppler_dir)
+                logger.info(f"Renomeando {old_name} para {poppler_dir}")
+                
+                try:
+                    os.rename(old_name, poppler_dir)
+                except Exception as e:
+                    logger.error(f"Erro ao renomear pasta: {e}")
+                    # Tenta copiar ao invés de renomear
+                    try:
+                        shutil.copytree(old_name, poppler_dir)
+                        shutil.rmtree(old_name)
+                        logger.info("Copiado com sucesso")
+                    except Exception as e2:
+                        logger.error(f"Erro ao copiar: {e2}")
+                        return None
+            else:
+                logger.error("Pasta extraída não encontrada")
+                return None
             
             # Remove o arquivo zip
-            os.remove(zip_path)
+            try:
+                os.remove(zip_path)
+            except Exception as e:
+                logger.warning(f"Não foi possível remover arquivo ZIP: {e}")
             
             # Verifica se a instalação foi bem-sucedida
-            bin_path = os.path.join(poppler_dir, "bin")
-            if os.path.exists(os.path.join(bin_path, "pdftoppm.exe")):
-                logger.info(f"Poppler instalado com sucesso em: {bin_path}")
-                return bin_path
-            else:
-                logger.error("Erro na instalação do Poppler")
-                return None
+            possible_bin_paths = [
+                os.path.join(poppler_dir, "bin"),
+                os.path.join(poppler_dir, "Library", "bin"),
+                os.path.join(poppler_dir, "library", "bin")
+            ]
+            
+            for bin_path in possible_bin_paths:
+                pdftoppm_path = os.path.join(bin_path, "pdftoppm.exe")
+                if os.path.exists(pdftoppm_path):
+                    logger.info(f"Poppler instalado com sucesso em: {bin_path}")
+                    
+                    # Testa se o executável funciona
+                    try:
+                        result = run_hidden([pdftoppm_path, '-h'],
+                            capture_output=True, text=True, timeout=5)
+                        if result.returncode == 0:
+                            logger.info("Poppler testado e funcionando")
+                            return bin_path
+                        else:
+                            logger.warning("Poppler instalado mas não está funcionando corretamente")
+                    except Exception as e:
+                        logger.warning(f"Erro ao testar Poppler: {e}")
+                    
+                    return bin_path
+            
+            logger.error("Executável pdftoppm.exe não encontrado após instalação")
+            return None
                 
+        except urllib.error.URLError as e:
+            logger.error(f"Erro de conexão ao baixar Poppler: {e}")
+            return None
         except Exception as e:
             logger.error(f"Erro ao instalar Poppler: {e}")
             return None
@@ -207,6 +371,10 @@ class PopplerManager:
                 
                 if poppler_path is None:
                     logger.error("Não foi possível instalar o Poppler automaticamente.")
+                    logger.error("Soluções alternativas:")
+                    logger.error("1. Instale o Poppler manualmente: https://github.com/oschwartz10612/poppler-windows/releases")
+                    logger.error("2. Adicione o Poppler ao PATH do sistema")
+                    logger.error("3. Execute o script como administrador")
                     return None
             
             return poppler_path
@@ -214,15 +382,55 @@ class PopplerManager:
         else:
             # Para Linux/Mac
             try:
-                result = subprocess.run(['pdftoppm', '-h'], 
-                                     capture_output=True, text=True, timeout=5)
+                result = run_hidden(['pdftoppm', '-h'],
+                    capture_output=True, text=True, timeout=5)
                 if result.returncode == 0:
                     return None  # Já está disponível
-            except:
-                pass
+            except Exception as e:
+                logger.debug(f"Poppler não encontrado: {e}")
             
             logger.error("Poppler não encontrado.")
+            logger.error("Instale com: sudo apt-get install poppler-utils (Ubuntu/Debian)")
+            logger.error("ou: brew install poppler (macOS)")
             return None
+
+    @staticmethod
+    def diagnose_poppler():
+        """Diagnóstica problemas com o Poppler"""
+        logger.info("=== DIAGNÓSTICO POPPLER ===")
+        
+        system = platform.system().lower()
+        logger.info(f"Sistema operacional: {system}")
+        
+        if system == "windows":
+            # Verifica PATH
+            try:
+                result = subprocess.run(['pdftoppm', '-h'], 
+                                     capture_output=True, text=True, timeout=5)
+                logger.info(f"Poppler no PATH: {'SIM' if result.returncode == 0 else 'NÃO'}")
+            except:
+                logger.info("Poppler no PATH: NÃO")
+            
+            # Verifica caminhos conhecidos
+            logger.info("Verificando caminhos conhecidos...")
+            possible_paths = [
+                os.path.join(os.getcwd(), "poppler", "bin"),
+                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "bin"),
+                r"C:\Program Files\poppler\bin",
+                r"C:\Program Files (x86)\poppler\bin",
+                r"C:\poppler\bin",
+            ]
+            
+            for path in possible_paths:
+                exists = os.path.exists(os.path.join(path, "pdftoppm.exe"))
+                logger.info(f"  {path}: {'ENCONTRADO' if exists else 'NÃO ENCONTRADO'}")
+            
+            # Verifica permissões
+            script_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+            has_perms = PopplerManager.verify_permissions(script_dir) if os.path.exists(script_dir) else False
+            logger.info(f"Permissões no diretório do script: {'OK' if has_perms else 'NEGADAS'}")
+            
+        logger.info("=== FIM DIAGNÓSTICO ===")
 
 # Constantes IPP
 class IPPVersion:
