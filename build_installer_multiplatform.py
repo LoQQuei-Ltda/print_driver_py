@@ -51,7 +51,12 @@ def install_dependencies():
     if system == "windows":
         dependencies.append("pywin32>=300")
     elif system == "darwin":  # macOS
-        dependencies.append("dmgbuild>=1.6.0")
+        dependencies.extend([
+            "dmgbuild>=1.6.0",
+            "biplist>=1.0.3",
+            "pyobjc-core>=9.0",
+            "pyobjc-framework-Cocoa>=9.0"
+        ])
     elif system == "linux":
         dependencies.append("stdeb>=0.10.0")  # Para criar pacotes DEB
     
@@ -66,6 +71,365 @@ def install_dependencies():
             return False
     
     return True
+
+def create_macos_app_bundle():
+    """Cria e corrige o bundle .app para macOS - VERSÃO MELHORADA"""
+    print_header("Corrigindo bundle macOS")
+    
+    app_path = "build/exe/PrintManagementSystem.app"
+    if not os.path.exists(app_path):
+        print("❌ Bundle .app não encontrado!")
+        return False
+    
+    contents_path = os.path.join(app_path, "Contents")
+    macos_path = os.path.join(contents_path, "MacOS")
+    resources_path = os.path.join(contents_path, "Resources")
+    
+    # Cria diretórios necessários
+    os.makedirs(macos_path, exist_ok=True)
+    os.makedirs(resources_path, exist_ok=True)
+    
+    # 1. Corrige/Cria Info.plist ADEQUADO
+    info_plist_path = os.path.join(contents_path, "Info.plist")
+    create_proper_info_plist(info_plist_path)
+    
+    # 2. Garante que o executável tenha permissões corretas
+    executable_path = os.path.join(macos_path, "PrintManagementSystem")
+    if os.path.exists(executable_path):
+        os.chmod(executable_path, 0o755)
+        print("✓ Permissões do executável corrigidas")
+    
+    # 3. Cria/Corrige o ícone da aplicação
+    create_macos_icon(resources_path)
+    
+    # 4. Copia recursos da aplicação para Resources
+    copy_app_resources_to_bundle(resources_path)
+    
+    # 5. Cria PkgInfo se não existir
+    pkginfo_path = os.path.join(contents_path, "PkgInfo")
+    if not os.path.exists(pkginfo_path):
+        with open(pkginfo_path, 'w') as f:
+            f.write("APPL????")
+        print("✓ PkgInfo criado")
+    
+    # 6. Força atualização do cache do Launchpad
+    force_launchpad_refresh()
+    
+    print("✓ Bundle macOS corrigido com sucesso!")
+    return True
+
+def create_proper_info_plist(plist_path):
+    """Cria um Info.plist COMPLETO e CORRETO para o macOS"""
+    plist_data = {
+        'CFBundleExecutable': 'PrintManagementSystem',
+        'CFBundleIdentifier': 'com.loqquei.printmanagement',
+        'CFBundleName': 'PrintManagementSystem',
+        'CFBundleDisplayName': 'Gerenciamento de Impressão LoQQuei',
+        'CFBundleVersion': '2.0.0',
+        'CFBundleShortVersionString': '2.0.0',
+        'CFBundlePackageType': 'APPL',
+        'CFBundleSignature': '????',
+        'CFBundleInfoDictionaryVersion': '6.0',
+        
+        # IMPORTANTE: Especifica o ícone
+        'CFBundleIconFile': 'AppIcon',
+        'CFBundleIconName': 'AppIcon',
+        
+        # Configurações de sistema
+        'LSMinimumSystemVersion': '10.13.0',
+        'LSRequiresCarbon': False,
+        'NSHighResolutionCapable': True,
+        'NSRequiresAquaSystemAppearance': False,
+        'NSSupportsAutomaticGraphicsSwitching': True,
+        
+        # Categoria da aplicação
+        'LSApplicationCategoryType': 'public.app-category.business',
+        'NSPrincipalClass': 'NSApplication',
+        'LSUIElement': False,
+        
+        # Permissões de rede (importante para IPP)
+        'NSAppTransportSecurity': {
+            'NSAllowsArbitraryLoads': True,
+            'NSAllowsArbitraryLoadsInWebContent': True,
+            'NSAllowsLocalNetworking': True
+        },
+        
+        # Tipos de arquivo suportados (opcional)
+        'CFBundleDocumentTypes': [
+            {
+                'CFBundleTypeName': 'PDF Document',
+                'CFBundleTypeExtensions': ['pdf'],
+                'CFBundleTypeRole': 'Viewer',
+                'LSHandlerRank': 'Alternate'
+            }
+        ],
+        
+        # Configurações de URL scheme (se necessário)
+        'CFBundleURLTypes': [
+            {
+                'CFBundleURLName': 'com.loqquei.printmanagement',
+                'CFBundleURLSchemes': ['loqquei-print']
+            }
+        ]
+    }
+    
+    # Escreve o plist usando o módulo plistlib (mais confiável)
+    try:
+        with open(plist_path, 'wb') as f:
+            plistlib.dump(plist_data, f)
+        print(f"✓ Info.plist criado/atualizado: {plist_path}")
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao criar Info.plist: {e}")
+        # Fallback para método manual
+        return create_info_plist_manual(plist_path, plist_data)
+
+def create_info_plist_manual(plist_path, plist_data):
+    """Método alternativo para criar Info.plist se plistlib falhar"""
+    plist_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>PrintManagementSystem</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.loqquei.printmanagement</string>
+    <key>CFBundleName</key>
+    <string>PrintManagementSystem</string>
+    <key>CFBundleDisplayName</key>
+    <string>Gerenciamento de Impressão LoQQuei</string>
+    <key>CFBundleVersion</key>
+    <string>2.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13.0</string>
+    <key>LSRequiresCarbon</key>
+    <false/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.business</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSUIElement</key>
+    <false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+        <key>NSAllowsArbitraryLoadsInWebContent</key>
+        <true/>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
+</dict>
+</plist>'''
+    
+    try:
+        with open(plist_path, 'w', encoding='utf-8') as f:
+            f.write(plist_content)
+        print(f"✓ Info.plist criado (método manual): {plist_path}")
+        return True
+    except Exception as e:
+        print(f"❌ Erro ao criar Info.plist manualmente: {e}")
+        return False
+
+def create_macos_icon(resources_path):
+    """Cria/Converte ícone para o formato adequado do macOS"""
+    print("Processando ícone para macOS...")
+    
+    # Procura por ícones existentes
+    possible_icons = [
+        "src/ui/resources/icon.icns",
+        "src/ui/resources/icon.png",
+        "src/ui/resources/icon.ico",
+        "resources/icon.icns",
+        "resources/icon.png",
+        "icon.icns",
+        "icon.png"
+    ]
+    
+    source_icon = None
+    for icon_path in possible_icons:
+        if os.path.exists(icon_path):
+            source_icon = icon_path
+            break
+    
+    target_icon = os.path.join(resources_path, "AppIcon.icns")
+    
+    if source_icon:
+        if source_icon.endswith('.icns'):
+            # Já é um ícone .icns, apenas copia
+            shutil.copy(source_icon, target_icon)
+            print(f"✓ Ícone .icns copiado: {target_icon}")
+        else:
+            # Tenta converter PNG/ICO para ICNS
+            try:
+                convert_to_icns(source_icon, target_icon)
+                print(f"✓ Ícone convertido para .icns: {target_icon}")
+            except Exception as e:
+                print(f"⚠ Erro ao converter ícone: {e}")
+                create_default_icon(target_icon)
+    else:
+        print("⚠ Nenhum ícone encontrado, criando ícone padrão...")
+        create_default_icon(target_icon)
+    
+    return os.path.exists(target_icon)
+
+def convert_to_icns(source_path, target_path):
+    """Converte imagem para formato .icns usando ferramentas do macOS"""
+    if not platform.system() == 'Darwin':
+        raise Exception("Conversão para .icns só funciona no macOS")
+    
+    # Cria um iconset temporário
+    iconset_path = target_path.replace('.icns', '.iconset')
+    os.makedirs(iconset_path, exist_ok=True)
+    
+    # Tamanhos necessários para o iconset
+    sizes = [16, 32, 64, 128, 256, 512, 1024]
+    
+    try:
+        from PIL import Image
+        
+        # Abre a imagem original
+        with Image.open(source_path) as img:
+            # Converte para RGBA se necessário
+            if img.mode != 'RGBA':
+                img = img.convert('RGBA')
+            
+            # Gera os diferentes tamanhos
+            for size in sizes:
+                # Tamanho normal
+                resized = img.resize((size, size), Image.Resampling.LANCZOS)
+                resized.save(os.path.join(iconset_path, f"icon_{size}x{size}.png"))
+                
+                # Tamanho @2x (exceto para os maiores)
+                if size <= 512:
+                    resized_2x = img.resize((size * 2, size * 2), Image.Resampling.LANCZOS)
+                    resized_2x.save(os.path.join(iconset_path, f"icon_{size}x{size}@2x.png"))
+        
+        # Converte iconset para icns usando iconutil
+        subprocess.run([
+            'iconutil', '-c', 'icns', iconset_path, '-o', target_path
+        ], check=True)
+        
+        # Remove iconset temporário
+        shutil.rmtree(iconset_path)
+        
+    except ImportError:
+        print("⚠ Pillow não encontrado, usando sips para conversão...")
+        # Fallback usando sips (ferramenta nativa do macOS)
+        subprocess.run([
+            'sips', '-s', 'format', 'icns', source_path, '--out', target_path
+        ], check=True)
+
+def create_default_icon(target_path):
+    """Cria um ícone padrão simples"""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        
+        # Cria uma imagem 1024x1024 com fundo azul
+        img = Image.new('RGBA', (1024, 1024), (70, 130, 180, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Desenha um círculo branco
+        margin = 100
+        draw.ellipse([margin, margin, 1024-margin, 1024-margin], 
+                     fill=(255, 255, 255, 255), outline=(200, 200, 200, 255), width=10)
+        
+        # Adiciona texto "PMS" (Print Management System)
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 200)
+        except:
+            font = ImageFont.load_default()
+        
+        text = "PMS"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+        
+        x = (1024 - text_width) // 2
+        y = (1024 - text_height) // 2 - 50
+        
+        draw.text((x, y), text, fill=(70, 130, 180, 255), font=font)
+        
+        # Salva como PNG temporário
+        temp_png = target_path.replace('.icns', '_temp.png')
+        img.save(temp_png)
+        
+        # Converte para ICNS
+        if platform.system() == 'Darwin':
+            try:
+                convert_to_icns(temp_png, target_path)
+                os.remove(temp_png)
+            except:
+                # Se conversão falhar, pelo menos copia o PNG
+                shutil.copy(temp_png, target_path.replace('.icns', '.png'))
+                os.remove(temp_png)
+        else:
+            # Em outras plataformas, usa PNG
+            shutil.move(temp_png, target_path.replace('.icns', '.png'))
+        
+        print("✓ Ícone padrão criado")
+        
+    except ImportError:
+        print("⚠ Pillow não disponível, pulando criação de ícone padrão")
+
+def copy_app_resources_to_bundle(resources_path):
+    """Copia recursos da aplicação para o bundle"""
+    source_paths = [
+        "src/ui/resources",
+        "resources",
+        "build/exe/resources"
+    ]
+    
+    for source_path in source_paths:
+        if os.path.exists(source_path):
+            target_path = os.path.join(resources_path, "app_resources")
+            if os.path.exists(target_path):
+                shutil.rmtree(target_path)
+            shutil.copytree(source_path, target_path)
+            print(f"✓ Recursos copiados de {source_path} para {target_path}")
+            break
+
+def force_launchpad_refresh():
+    """Força o Launchpad a atualizar seu cache"""
+    if platform.system() == 'Darwin':
+        try:
+            print("Atualizando cache do Launchpad...")
+            
+            # Mata o processo do Dock para forçar reinicialização
+            subprocess.run(['killall', 'Dock'], check=False)
+            
+            # Limpa o cache do Launch Services
+            subprocess.run([
+                '/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister',
+                '-kill', '-r', '-domain', 'local', '-domain', 'system', '-domain', 'user'
+            ], check=False)
+            
+            # Força reindexação do Spotlight
+            subprocess.run(['mdimport', 'build/exe/PrintManagementSystem.app'], check=False)
+            
+            print("✓ Cache do sistema atualizado")
+            
+        except Exception as e:
+            print(f"⚠ Aviso: Não foi possível atualizar o cache automaticamente: {e}")
+            print("  Reinicie o sistema ou faça logout/login para ver o ícone no Launchpad")
 
 def create_test_import_script():
     """Cria script para testar imports no executável"""
@@ -124,11 +488,16 @@ def build_executable():
     try:
         subprocess.run([sys.executable, "setup.py", "build_exe"], check=True)
         
+        if platform.system() == 'Darwin':
+            if create_macos_app_bundle():
+                print("✓ Bundle macOS corrigido com sucesso!")
+            else:
+                print("⚠ Houve problemas ao corrigir o bundle macOS")
+
         # Verifica se o executável foi criado
         exe_folder = "build/exe"
-        os.makedirs(exe_folder, exist_ok=True)
-        
         system = platform.system().lower()
+        
         if system == "windows":
             exe_path = os.path.join(exe_folder, "PrintManagementSystem.exe")
         elif system == "darwin":  # macOS
@@ -137,9 +506,11 @@ def build_executable():
             exe_path = os.path.join(exe_folder, "PrintManagementSystem")
         
         if os.path.exists(exe_path):
-            if os.path.isdir(exe_path):  # For macOS .app bundles
-                print(f"\n✓ Aplicação criada com sucesso!")
+            if system == "darwin":
+                print(f"\n✓ Aplicação macOS criada com sucesso!")
                 print(f"  Caminho: {exe_path}")
+                print(f"  O ícone deve aparecer no Launchpad após alguns segundos")
+                print(f"  Se não aparecer, reinicie o sistema ou faça logout/login")
             else:
                 size_mb = os.path.getsize(exe_path) / (1024 * 1024)
                 print(f"\n✓ Executável criado com sucesso!")
@@ -234,37 +605,27 @@ def build_windows_installer():
         return False
 
 def build_macos_installer():
-    """Constrói instalador para macOS (DMG) - VERSÃO CORRIGIDA"""
+    """Constrói instalador para macOS (DMG) - VERSÃO MELHORADA"""
     print_header("Construindo instalador macOS")
     
     try:
-        # 1. Primeiro, vamos verificar e corrigir o .app bundle
         app_path = "build/exe/PrintManagementSystem.app"
         if not os.path.exists(app_path):
             print("❌ Aplicação .app não encontrada!")
             return False
         
-        # 2. Corrige permissões do executável
-        executable_path = os.path.join(app_path, "Contents/MacOS/PrintManagementSystem")
-        if os.path.exists(executable_path):
-            os.chmod(executable_path, 0o755)
-            print("✓ Permissões do executável corrigidas")
+        # Garante que o bundle está correto antes de criar o DMG
+        if not create_macos_app_bundle():
+            print("⚠ Problemas ao corrigir o bundle, continuando mesmo assim...")
         
-        # 3. Verifica e corrige Info.plist
-        info_plist_path = os.path.join(app_path, "Contents/Info.plist")
-        if not os.path.exists(info_plist_path):
-            create_info_plist(info_plist_path)
-        
-        # 4. Instala biplist se necessário
+        # Instala dependências necessárias
         try:
             import biplist
             print("✓ biplist já está instalado")
         except ImportError:
             print("Instalando biplist...")
             subprocess.run([sys.executable, "-m", "pip", "install", "biplist"], check=True)
-            import biplist
         
-        # 5. Verifica se o dmgbuild está instalado
         try:
             subprocess.run(["dmgbuild", "--help"], check=True, capture_output=True)
             print("✓ dmgbuild encontrado")
@@ -272,7 +633,7 @@ def build_macos_installer():
             print("Instalando dmgbuild...")
             subprocess.run([sys.executable, "-m", "pip", "install", "dmgbuild"], check=True)
         
-        # 6. Cria um script de configuração CORRIGIDO para o dmgbuild
+        # Cria configuração melhorada para o dmgbuild
         dmg_settings = '''# -*- coding: utf-8 -*-
 from __future__ import unicode_literals
 import os.path
@@ -283,10 +644,13 @@ size = defines.get('size', None)
 files = [defines.get('app', 'build/exe/PrintManagementSystem.app')]
 symlinks = {'Applications': '/Applications'}
 badge_icon = defines.get('badge_icon', None)
+
+# Layout aprimorado
 icon_locations = {
     'PrintManagementSystem.app': (150, 120),
     'Applications': (350, 120),
 }
+
 background = 'builtin-arrow'
 show_status_bar = False
 show_tab_view = False
@@ -294,6 +658,7 @@ show_toolbar = False
 show_pathbar = False
 show_sidebar = False
 sidebar_width = 180
+
 arrange_by = None
 grid_offset = (0, 0)
 grid_spacing = 100
@@ -301,26 +666,45 @@ scroll_position = (0, 0)
 label_pos = 'bottom'
 text_size = 16
 icon_size = 128
+
 default_view = 'icon-view'
 include_icon_view_settings = 'auto'
 include_list_view_settings = 'auto'
+
+# Janela otimizada
 window_rect = ((200, 120), (640, 400))
+
+# Licença (opcional)
+# license = {
+#     'default-language': 'pt_BR',
+#     'licenses': {
+#         'pt_BR': 'LICENSE.txt',
+#     },
+#     'buttons': {
+#         'pt_BR': [
+#             'Português',
+#             'Concordo',
+#             'Discordo',
+#             'Imprimir',
+#             'Salvar...',
+#             'Se você concorda com os termos desta licença, pressione "Concordo" para instalar o software. Se você não concorda, pressione "Discordo".'
+#         ]
+#     }
+# }
 '''
         
         with open('dmg_settings.py', 'w', encoding='utf-8') as f:
             f.write(dmg_settings)
         
-        # 7. Cria o DMG
+        # Cria o DMG
         output_dir = "Output"
         os.makedirs(output_dir, exist_ok=True)
         
         dmg_path = os.path.join(output_dir, "LoQQuei_PrintManagement_V2.0.0.dmg")
         
-        # Remove DMG anterior se existir
         if os.path.exists(dmg_path):
             os.remove(dmg_path)
         
-        # Comando dmgbuild corrigido
         cmd = [
             "dmgbuild",
             "-s", "dmg_settings.py",
@@ -337,19 +721,6 @@ window_rect = ((200, 120), (640, 400))
             print(f"\n✓ Instalador macOS (DMG) criado com sucesso!")
             print(f"  Caminho: {dmg_path}")
             print(f"  Tamanho: {size_mb:.2f} MB")
-            
-            # 8. Instruções para o usuário
-            print("\n" + "="*60)
-            print("INSTRUÇÕES DE INSTALAÇÃO:")
-            print("="*60)
-            print("1. Abra o arquivo .dmg")
-            print("2. Arraste 'PrintManagementSystem.app' para a pasta 'Applications'")
-            print("3. Abra o Launchpad ou a pasta Applications")
-            print("4. Execute 'PrintManagementSystem'")
-            print("5. Se aparecer aviso de segurança:")
-            print("   - Vá em Preferências do Sistema > Segurança e Privacidade")
-            print("   - Clique em 'Abrir Mesmo Assim'")
-            print("="*60)
             
             return True
         else:
