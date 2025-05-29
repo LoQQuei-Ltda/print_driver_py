@@ -234,11 +234,37 @@ def build_windows_installer():
         return False
 
 def build_macos_installer():
-    """Constrói instalador para macOS (DMG)"""
+    """Constrói instalador para macOS (DMG) - VERSÃO CORRIGIDA"""
     print_header("Construindo instalador macOS")
     
     try:
-        # Verifica se o dmgbuild está instalado
+        # 1. Primeiro, vamos verificar e corrigir o .app bundle
+        app_path = "build/exe/PrintManagementSystem.app"
+        if not os.path.exists(app_path):
+            print("❌ Aplicação .app não encontrada!")
+            return False
+        
+        # 2. Corrige permissões do executável
+        executable_path = os.path.join(app_path, "Contents/MacOS/PrintManagementSystem")
+        if os.path.exists(executable_path):
+            os.chmod(executable_path, 0o755)
+            print("✓ Permissões do executável corrigidas")
+        
+        # 3. Verifica e corrige Info.plist
+        info_plist_path = os.path.join(app_path, "Contents/Info.plist")
+        if not os.path.exists(info_plist_path):
+            create_info_plist(info_plist_path)
+        
+        # 4. Instala biplist se necessário
+        try:
+            import biplist
+            print("✓ biplist já está instalado")
+        except ImportError:
+            print("Instalando biplist...")
+            subprocess.run([sys.executable, "-m", "pip", "install", "biplist"], check=True)
+            import biplist
+        
+        # 5. Verifica se o dmgbuild está instalado
         try:
             subprocess.run(["dmgbuild", "--help"], check=True, capture_output=True)
             print("✓ dmgbuild encontrado")
@@ -246,57 +272,85 @@ def build_macos_installer():
             print("Instalando dmgbuild...")
             subprocess.run([sys.executable, "-m", "pip", "install", "dmgbuild"], check=True)
         
-        # Cria um script de configuração para o dmgbuild
-        dmg_settings = '''
-# -*- coding: utf-8 -*-
+        # 6. Cria um script de configuração CORRIGIDO para o dmgbuild
+        dmg_settings = '''# -*- coding: utf-8 -*-
 from __future__ import unicode_literals
-
-import biplist
 import os.path
 
-# Informações da aplicação
-application = defines.get('app', 'build/exe/PrintManagementSystem.app')
-appname = os.path.basename(application)
-
 # Configurações do DMG
-title = 'Gerenciamento de Impressão LoQQuei'
-background = None  # Caminho para uma imagem de fundo, se desejar
-default_view = 'icon-view'
-icon_size = 80
-icon_locations = {
-    appname: (120, 100),
-    'Applications': (380, 100)
-}
-
-files = [application]
+format = defines.get('format', 'UDBZ')
+size = defines.get('size', None)
+files = [defines.get('app', 'build/exe/PrintManagementSystem.app')]
 symlinks = {'Applications': '/Applications'}
-
-# Personalização visual
-badge_icon = None  # Caminho para um ícone de badge, se desejar
-window_rect = ((100, 100), (500, 300))
-format = 'UDBZ'  # bzip2 para melhor compressão
+badge_icon = defines.get('badge_icon', None)
+icon_locations = {
+    'PrintManagementSystem.app': (150, 120),
+    'Applications': (350, 120),
+}
+background = 'builtin-arrow'
+show_status_bar = False
+show_tab_view = False
+show_toolbar = False
+show_pathbar = False
+show_sidebar = False
+sidebar_width = 180
+arrange_by = None
+grid_offset = (0, 0)
+grid_spacing = 100
+scroll_position = (0, 0)
+label_pos = 'bottom'
+text_size = 16
+icon_size = 128
+default_view = 'icon-view'
+include_icon_view_settings = 'auto'
+include_list_view_settings = 'auto'
+window_rect = ((200, 120), (640, 400))
 '''
         
         with open('dmg_settings.py', 'w', encoding='utf-8') as f:
             f.write(dmg_settings)
         
-        # Cria o DMG
+        # 7. Cria o DMG
         output_dir = "Output"
         os.makedirs(output_dir, exist_ok=True)
         
         dmg_path = os.path.join(output_dir, "LoQQuei_PrintManagement_V2.0.0.dmg")
-        subprocess.run([
+        
+        # Remove DMG anterior se existir
+        if os.path.exists(dmg_path):
+            os.remove(dmg_path)
+        
+        # Comando dmgbuild corrigido
+        cmd = [
             "dmgbuild",
             "-s", "dmg_settings.py",
+            "-D", f"app={app_path}",
             "Gerenciamento de Impressão LoQQuei",
             dmg_path
-        ], check=True)
+        ]
+        
+        print(f"Executando: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
         
         if os.path.exists(dmg_path):
             size_mb = os.path.getsize(dmg_path) / (1024 * 1024)
             print(f"\n✓ Instalador macOS (DMG) criado com sucesso!")
             print(f"  Caminho: {dmg_path}")
             print(f"  Tamanho: {size_mb:.2f} MB")
+            
+            # 8. Instruções para o usuário
+            print("\n" + "="*60)
+            print("INSTRUÇÕES DE INSTALAÇÃO:")
+            print("="*60)
+            print("1. Abra o arquivo .dmg")
+            print("2. Arraste 'PrintManagementSystem.app' para a pasta 'Applications'")
+            print("3. Abra o Launchpad ou a pasta Applications")
+            print("4. Execute 'PrintManagementSystem'")
+            print("5. Se aparecer aviso de segurança:")
+            print("   - Vá em Preferências do Sistema > Segurança e Privacidade")
+            print("   - Clique em 'Abrir Mesmo Assim'")
+            print("="*60)
+            
             return True
         else:
             print("\n❌ Instalador macOS (DMG) não foi criado!")
@@ -304,6 +358,124 @@ format = 'UDBZ'  # bzip2 para melhor compressão
             
     except Exception as e:
         print(f"\n❌ Erro ao criar instalador macOS: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def create_info_plist(plist_path):
+    """Cria um Info.plist adequado para a aplicação"""
+    plist_content = '''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>PrintManagementSystem</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.loqquei.printmanagement</string>
+    <key>CFBundleName</key>
+    <string>PrintManagementSystem</string>
+    <key>CFBundleDisplayName</key>
+    <string>Gerenciamento de Impressão LoQQuei</string>
+    <key>CFBundleVersion</key>
+    <string>2.0.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleSignature</key>
+    <string>????</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.business</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>LSUIElement</key>
+    <false/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>'''
+    
+    # Garante que o diretório existe
+    os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+    
+    with open(plist_path, 'w', encoding='utf-8') as f:
+        f.write(plist_content)
+    
+    print(f"✓ Info.plist criado em: {plist_path}")
+
+def test_macos_app():
+    """Testa a aplicação macOS e fornece informações de debug"""
+    print_header("Testando aplicação macOS")
+    
+    app_path = "build/exe/PrintManagementSystem.app"
+    executable_path = os.path.join(app_path, "Contents/MacOS/PrintManagementSystem")
+    
+    if not os.path.exists(app_path):
+        print("❌ Aplicação .app não encontrada!")
+        return False
+    
+    if not os.path.exists(executable_path):
+        print("❌ Executável não encontrado dentro do .app!")
+        return False
+    
+    # Verifica permissões
+    import stat
+    file_stat = os.stat(executable_path)
+    if not file_stat.st_mode & stat.S_IEXEC:
+        print("❌ Executável não tem permissões de execução!")
+        print("Corrigindo permissões...")
+        os.chmod(executable_path, 0o755)
+    
+    print("✓ Estrutura da aplicação parece correta")
+    
+    # Testa execução
+    print("\nTestando execução...")
+    try:
+        # Executa em background para não travar o terminal
+        process = subprocess.Popen([executable_path], 
+                                 stdout=subprocess.PIPE, 
+                                 stderr=subprocess.PIPE)
+        
+        print("✓ Aplicação iniciada")
+        print(f"  PID: {process.pid}")
+        print("  Verificando se está rodando...")
+        
+        # Aguarda um pouco para ver se não fecha imediatamente
+        import time
+        time.sleep(2)
+        
+        poll_result = process.poll()
+        if poll_result is None:
+            print("✓ Aplicação ainda está rodando")
+            
+            # Pergunta se quer terminar o processo
+            response = input("\nDeseja parar a aplicação de teste? (s/n): ")
+            if response.lower() == 's':
+                process.terminate()
+                process.wait()
+                print("✓ Aplicação parada")
+        else:
+            print(f"❌ Aplicação fechou com código: {poll_result}")
+            
+            # Mostra erros se houver
+            stdout, stderr = process.communicate()
+            if stderr:
+                print("Erros encontrados:")
+                print(stderr.decode('utf-8'))
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro ao testar aplicação: {e}")
         return False
 
 def build_linux_deb_package():
