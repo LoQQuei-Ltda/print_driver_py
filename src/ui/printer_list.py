@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Componente de listagem de impressoras com detalhes aprimorados
+Componente de listagem de impressoras com detalhes aprimorados - Versão com Notificações do Sistema
 """
 
 import os
@@ -15,8 +15,781 @@ from src.utils.resource_manager import ResourceManager
 from src.ui.custom_button import create_styled_button
 import re
 import traceback
+import platform
 
 logger = logging.getLogger("PrintManagementSystem.UI.PrinterList")
+
+# Classe para notificações do sistema
+class SystemNotification:
+    """Classe para gerenciar notificações do sistema operacional - Compatibilidade Universal"""
+    
+    def __init__(self):
+        self.system = platform.system().lower()
+        self.windows_version = self._detect_windows_version()
+        self.notification_methods = self._detect_available_methods()
+        logger.info(f"Sistema detectado: {self.system}, Métodos disponíveis: {list(self.notification_methods.keys())}")
+    
+    def _detect_windows_version(self):
+        """Detecta versão específica do Windows"""
+        if self.system != "windows":
+            return None
+            
+        try:
+            version = platform.version()
+            release = platform.release()
+            
+            # Detecta se é Windows Server
+            is_server = "server" in platform.platform().lower()
+            
+            # Versões principais
+            major_version = int(version.split('.')[0])
+            
+            return {
+                'version': version,
+                'release': release,
+                'major': major_version,
+                'is_server': is_server,
+                'is_win7_plus': major_version >= 6,  # Windows 7 = 6.1
+                'is_win8_plus': major_version >= 6 and float('.'.join(version.split('.')[:2])) >= 6.2,
+                'is_win10_plus': major_version >= 10
+            }
+        except Exception:
+            return {'version': 'unknown', 'major': 0, 'is_server': False, 'is_win7_plus': True, 'is_win8_plus': False, 'is_win10_plus': False}
+    
+    def _detect_available_methods(self):
+        """Detecta métodos de notificação disponíveis para o sistema atual"""
+        methods = {}
+        
+        if self.system == "windows":
+            methods.update(self._detect_windows_methods())
+        elif self.system == "darwin":
+            methods.update(self._detect_macos_methods())
+        elif self.system == "linux":
+            methods.update(self._detect_linux_methods())
+        
+        # Método universal sempre disponível
+        methods['console'] = True
+        
+        return methods
+    
+    def _detect_windows_methods(self):
+        """Detecta métodos disponíveis no Windows"""
+        methods = {}
+        
+        # Método 1: plyer (biblioteca universal mais robusta)
+        try:
+            import plyer
+            methods['plyer'] = True
+            logger.info("plyer disponível - método preferencial para notificações")
+        except ImportError:
+            methods['plyer'] = False
+        
+        # Método 2: win10toast (funciona desde Windows 7, apesar do nome)
+        try:
+            import win10toast
+            methods['win10toast'] = True
+            logger.info("win10toast disponível")
+        except ImportError:
+            methods['win10toast'] = False
+        
+        # Método 3: PowerShell (Windows 7+)
+        if self.windows_version and self.windows_version['is_win7_plus']:
+            methods['powershell'] = self._test_powershell()
+        
+        # Método 4: Windows API Balloon Tips (Windows 7+)
+        methods['balloon_tip'] = self._test_balloon_tip()
+        
+        # Método 5: Windows API MessageBox (sempre disponível)
+        methods['messagebox'] = True
+        
+        return methods
+    
+    def _detect_macos_methods(self):
+        """Detecta métodos disponíveis no macOS"""
+        methods = {}
+        
+        # Método 1: plyer
+        try:
+            import plyer
+            methods['plyer'] = True
+        except ImportError:
+            methods['plyer'] = False
+        
+        # Método 2: terminal-notifier
+        methods['terminal_notifier'] = self._test_command(['which', 'terminal-notifier'])
+        
+        # Método 3: osascript (sempre disponível no macOS)
+        methods['osascript'] = self._test_command(['osascript', '-e', 'return 1'])
+        
+        return methods
+    
+    def _detect_linux_methods(self):
+        """Detecta métodos disponíveis no Linux"""
+        methods = {}
+        
+        # Método 1: plyer
+        try:
+            import plyer
+            methods['plyer'] = True
+        except ImportError:
+            methods['plyer'] = False
+        
+        # Método 2: notify-send (libnotify)
+        methods['notify_send'] = self._test_command(['which', 'notify-send'])
+        
+        # Método 3: zenity (GNOME)
+        methods['zenity'] = self._test_command(['which', 'zenity'])
+        
+        # Método 4: kdialog (KDE)
+        methods['kdialog'] = self._test_command(['which', 'kdialog'])
+        
+        return methods
+    
+    def _test_command(self, cmd):
+        """Testa se um comando está disponível"""
+        try:
+            import subprocess
+            result = subprocess.run(cmd, capture_output=True, timeout=5)
+            return result.returncode == 0
+        except Exception:
+            return False
+    
+    def _test_powershell(self):
+        """Testa se PowerShell está disponível e funcionando"""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["powershell.exe", "-Command", "echo 'test'"],
+                capture_output=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+    
+    def _test_balloon_tip(self):
+        """Testa se balloon tips estão disponíveis"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            # Apenas verifica se as DLLs necessárias estão presentes
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+            return True
+        except Exception:
+            return False
+    
+    def show_notification(self, title, message, duration=5, notification_type="info"):
+        """
+        Exibe uma notificação do sistema com compatibilidade universal
+        
+        Args:
+            title: Título da notificação
+            message: Mensagem da notificação
+            duration: Duração em segundos
+            notification_type: Tipo da notificação (info, success, warning, error)
+        """
+        # Log da notificação sempre
+        log_message = f"[{notification_type.upper()}] {title}: {message}"
+        
+        if notification_type == "error":
+            logger.error(log_message)
+        elif notification_type == "warning":
+            logger.warning(log_message)
+        else:
+            logger.info(log_message)
+        
+        # Limita o tamanho para evitar problemas
+        title = self._truncate_text(title, 60)
+        message = self._truncate_text(message, 200)
+        
+        # Ordem de preferência por sistema
+        success = False
+        
+        if self.system == "windows":
+            success = self._show_windows_notification_universal(title, message, duration, notification_type)
+        elif self.system == "darwin":
+            success = self._show_macos_notification_universal(title, message, duration, notification_type)
+        elif self.system == "linux":
+            success = self._show_linux_notification_universal(title, message, duration, notification_type)
+        
+        if not success:
+            logger.warning(f"Todas as tentativas de notificação falharam para: {title}")
+            self._show_console_notification(title, message, notification_type)
+        
+        return success
+    
+    def _truncate_text(self, text, max_length):
+        """Trunca texto se for muito longo"""
+        if len(text) > max_length:
+            return text[:max_length-3] + "..."
+        return text
+    
+    def _show_windows_notification_universal(self, title, message, duration, notification_type):
+        """Exibe notificação no Windows com máxima compatibilidade (Windows 7+)"""
+        
+        # Ordem de preferência para Windows
+        methods_to_try = [
+            ('plyer', self._try_plyer_notification),
+            ('win10toast', self._try_win10toast_notification),
+            ('powershell', self._try_powershell_notification),
+            ('balloon_tip', self._try_balloon_tip_notification),
+            ('messagebox', self._try_messagebox_notification)
+        ]
+        
+        for method_name, method_func in methods_to_try:
+            if self.notification_methods.get(method_name, False):
+                try:
+                    logger.debug(f"Tentando notificação via {method_name}")
+                    if method_func(title, message, duration, notification_type):
+                        logger.info(f"Notificação exibida com sucesso via {method_name}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Falha no método {method_name}: {str(e)}")
+                    continue
+        
+        return False
+    
+    def _show_macos_notification_universal(self, title, message, duration, notification_type):
+        """Exibe notificação no macOS"""
+        
+        methods_to_try = [
+            ('plyer', self._try_plyer_notification),
+            ('terminal_notifier', self._try_terminal_notifier_notification),
+            ('osascript', self._try_osascript_notification)
+        ]
+        
+        for method_name, method_func in methods_to_try:
+            if self.notification_methods.get(method_name, False):
+                try:
+                    logger.debug(f"Tentando notificação macOS via {method_name}")
+                    if method_func(title, message, duration, notification_type):
+                        logger.info(f"Notificação macOS exibida via {method_name}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Falha no método macOS {method_name}: {str(e)}")
+                    continue
+        
+        return False
+    
+    def _show_linux_notification_universal(self, title, message, duration, notification_type):
+        """Exibe notificação no Linux"""
+        
+        methods_to_try = [
+            ('plyer', self._try_plyer_notification),
+            ('notify_send', self._try_notify_send_notification),
+            ('zenity', self._try_zenity_notification),
+            ('kdialog', self._try_kdialog_notification)
+        ]
+        
+        for method_name, method_func in methods_to_try:
+            if self.notification_methods.get(method_name, False):
+                try:
+                    logger.debug(f"Tentando notificação Linux via {method_name}")
+                    if method_func(title, message, duration, notification_type):
+                        logger.info(f"Notificação Linux exibida via {method_name}")
+                        return True
+                except Exception as e:
+                    logger.debug(f"Falha no método Linux {method_name}: {str(e)}")
+                    continue
+        
+        return False
+    
+    # =============================================================================
+    # MÉTODOS ESPECÍFICOS DE NOTIFICAÇÃO
+    # =============================================================================
+    
+    def _try_plyer_notification(self, title, message, duration, notification_type):
+        """Método universal usando plyer (funciona em todos os sistemas)"""
+        try:
+            from plyer import notification
+            
+            # Mapeamento de ícones para plyer
+            app_icon = None  # plyer detecta automaticamente
+            
+            # Executa notificação em thread separada
+            def show_plyer():
+                try:
+                    notification.notify(
+                        title=title,
+                        message=message,
+                        app_icon=app_icon,
+                        timeout=duration
+                    )
+                except Exception as e:
+                    logger.debug(f"Erro interno do plyer: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=show_plyer)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except ImportError:
+            logger.debug("plyer não está instalado")
+            return False
+        except Exception as e:
+            logger.debug(f"Erro no plyer: {str(e)}")
+            return False
+    
+    # MÉTODOS WINDOWS
+    def _try_win10toast_notification(self, title, message, duration, notification_type):
+        """Notificação usando win10toast (Windows 7+)"""
+        try:
+            from win10toast import ToastNotifier
+            
+            def show_toast():
+                try:
+                    toaster = ToastNotifier()
+                    toaster.show_toast(
+                        title,
+                        message,
+                        icon_path=None,
+                        duration=duration,
+                        threaded=False
+                    )
+                except Exception as e:
+                    logger.debug(f"Erro interno win10toast: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=show_toast)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except ImportError:
+            return False
+        except Exception as e:
+            logger.debug(f"Erro win10toast: {str(e)}")
+            return False
+    
+    def _try_powershell_notification(self, title, message, duration, notification_type):
+        """Notificação usando PowerShell (Windows 7+)"""
+        try:
+            import subprocess
+            
+            # Script PowerShell para criar balloon tip
+            ps_script = f'''
+            Add-Type -AssemblyName System.Windows.Forms
+            try {{
+                $notification = New-Object System.Windows.Forms.NotifyIcon
+                $notification.Icon = [System.Drawing.SystemIcons]::Information
+                
+                $balloonIcon = switch ("{notification_type}") {{
+                    "error" {{ [System.Windows.Forms.ToolTipIcon]::Error }}
+                    "warning" {{ [System.Windows.Forms.ToolTipIcon]::Warning }}
+                    default {{ [System.Windows.Forms.ToolTipIcon]::Info }}
+                }}
+                
+                $notification.BalloonTipIcon = $balloonIcon
+                $notification.BalloonTipTitle = "{title}"
+                $notification.BalloonTipText = "{message}"
+                $notification.Visible = $true
+                $notification.ShowBalloonTip({duration * 1000})
+                
+                Start-Sleep -Seconds {duration}
+                $notification.Dispose()
+            }} catch {{
+                Write-Host "Erro na notificação: $_"
+            }}
+            '''
+            
+            # Executa PowerShell em background
+            def run_powershell():
+                try:
+                    subprocess.run([
+                        "powershell.exe", 
+                        "-WindowStyle", "Hidden",
+                        "-ExecutionPolicy", "Bypass",
+                        "-Command", ps_script
+                    ], creationflags=subprocess.CREATE_NO_WINDOW, timeout=duration + 5)
+                except Exception as e:
+                    logger.debug(f"Erro executando PowerShell: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=run_powershell)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro PowerShell: {str(e)}")
+            return False
+    
+    def _try_balloon_tip_notification(self, title, message, duration, notification_type):
+        """Notificação usando Windows API diretamente (Windows 7+)"""
+        try:
+            import ctypes
+            from ctypes import wintypes, Structure, c_int, c_uint, c_char_p, c_wchar_p
+            
+            # Estruturas necessárias para a API
+            class NOTIFYICONDATA(Structure):
+                _fields_ = [
+                    ("cbSize", c_uint),
+                    ("hWnd", wintypes.HWND),
+                    ("uID", c_uint),
+                    ("uFlags", c_uint),
+                    ("uCallbackMessage", c_uint),
+                    ("hIcon", wintypes.HICON),
+                    ("szTip", c_wchar_p),
+                    ("dwState", c_uint),
+                    ("dwStateMask", c_uint),
+                    ("szInfo", c_wchar_p),
+                    ("uVersion", c_uint),
+                    ("szInfoTitle", c_wchar_p),
+                    ("dwInfoFlags", c_uint),
+                ]
+            
+            def show_balloon():
+                try:
+                    # Constantes
+                    NIF_MESSAGE = 0x01
+                    NIF_ICON = 0x02
+                    NIF_TIP = 0x04
+                    NIF_INFO = 0x10
+                    NIM_ADD = 0x00
+                    NIM_DELETE = 0x02
+                    
+                    # Ícones baseados no tipo
+                    icon_flags = {
+                        "info": 0x01,      # NIIF_INFO
+                        "warning": 0x02,   # NIIF_WARNING  
+                        "error": 0x03,     # NIIF_ERROR
+                        "success": 0x01    # NIIF_INFO
+                    }
+                    
+                    shell32 = ctypes.windll.shell32
+                    user32 = ctypes.windll.user32
+                    
+                    # Cria estrutura
+                    nid = NOTIFYICONDATA()
+                    nid.cbSize = ctypes.sizeof(NOTIFYICONDATA)
+                    nid.hWnd = user32.GetConsoleWindow()
+                    nid.uID = 1
+                    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+                    nid.szTip = "Print Management System"
+                    nid.szInfo = message[:255]  # Limita tamanho
+                    nid.szInfoTitle = title[:63]  # Limita tamanho
+                    nid.dwInfoFlags = icon_flags.get(notification_type, 0x01)
+                    
+                    # Adiciona ícone
+                    shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+                    
+                    # Aguarda e remove
+                    import time
+                    time.sleep(duration)
+                    shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+                    
+                except Exception as e:
+                    logger.debug(f"Erro interno balloon tip: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=show_balloon)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro balloon tip: {str(e)}")
+            return False
+    
+    def _try_messagebox_notification(self, title, message, duration, notification_type):
+        """Último recurso: MessageBox temporário"""
+        try:
+            import ctypes
+            
+            # Tipos de ícone
+            icon_types = {
+                "info": 0x40,      # MB_ICONINFORMATION
+                "warning": 0x30,   # MB_ICONWARNING
+                "error": 0x10,     # MB_ICONERROR
+                "success": 0x40    # MB_ICONINFORMATION
+            }
+            
+            icon = icon_types.get(notification_type, 0x40)
+            
+            def show_msgbox():
+                try:
+                    # MessageBox com timeout (só funciona em algumas versões)
+                    try:
+                        ctypes.windll.user32.MessageBoxTimeoutW(
+                            None,
+                            message,
+                            title,
+                            icon | 0x40000,  # MB_TOPMOST
+                            0,
+                            duration * 1000
+                        )
+                    except AttributeError:
+                        # Fallback para MessageBox normal
+                        ctypes.windll.user32.MessageBoxW(
+                            None,
+                            f"{message}\n\n(Esta janela deve ser fechada manualmente)",
+                            title,
+                            icon
+                        )
+                except Exception as e:
+                    logger.debug(f"Erro MessageBox: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=show_msgbox)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro geral MessageBox: {str(e)}")
+            return False
+    
+    # MÉTODOS MACOS
+    def _try_terminal_notifier_notification(self, title, message, duration, notification_type):
+        """Notificação usando terminal-notifier (macOS)"""
+        try:
+            import subprocess
+            
+            cmd = [
+                "terminal-notifier",
+                "-title", title,
+                "-message", message,
+                "-timeout", str(duration)
+            ]
+            
+            # Adiciona som baseado no tipo
+            if notification_type == "error":
+                cmd.extend(["-sound", "Basso"])
+            elif notification_type == "warning":
+                cmd.extend(["-sound", "Sosumi"])
+            else:
+                cmd.extend(["-sound", "default"])
+            
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro terminal-notifier: {str(e)}")
+            return False
+    
+    def _try_osascript_notification(self, title, message, duration, notification_type):
+        """Notificação usando osascript (macOS nativo)"""
+        try:
+            import subprocess
+            
+            # Script AppleScript para notificação
+            script = f'display notification "{message}" with title "{title}"'
+            
+            subprocess.run([
+                "osascript", "-e", script
+            ], capture_output=True, timeout=10)
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro osascript: {str(e)}")
+            return False
+    
+    # MÉTODOS LINUX
+    def _try_notify_send_notification(self, title, message, duration, notification_type):
+        """Notificação usando notify-send (Linux libnotify)"""
+        try:
+            import subprocess
+            
+            # Ícones baseados no tipo
+            icons = {
+                "info": "dialog-information",
+                "success": "dialog-information",
+                "warning": "dialog-warning",
+                "error": "dialog-error"
+            }
+            
+            icon = icons.get(notification_type, "dialog-information")
+            
+            cmd = [
+                "notify-send",
+                "--expire-time", str(duration * 1000),
+                "--icon", icon,
+                title,
+                message
+            ]
+            
+            subprocess.run(cmd, capture_output=True, timeout=10)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro notify-send: {str(e)}")
+            return False
+    
+    def _try_zenity_notification(self, title, message, duration, notification_type):
+        """Notificação usando zenity (GNOME)"""
+        try:
+            import subprocess
+            
+            # Tipos de zenity
+            zenity_types = {
+                "info": "--info",
+                "success": "--info",
+                "warning": "--warning",
+                "error": "--error"
+            }
+            
+            zenity_type = zenity_types.get(notification_type, "--info")
+            
+            cmd = [
+                "zenity",
+                zenity_type,
+                "--title", title,
+                "--text", message,
+                "--timeout", str(duration)
+            ]
+            
+            subprocess.run(cmd, capture_output=True, timeout=duration + 5)
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro zenity: {str(e)}")
+            return False
+    
+    def _try_kdialog_notification(self, title, message, duration, notification_type):
+        """Notificação usando kdialog (KDE)"""
+        try:
+            import subprocess
+            
+            # Tipos do kdialog
+            kdialog_types = {
+                "info": "--msgbox",
+                "success": "--msgbox", 
+                "warning": "--sorry",
+                "error": "--error"
+            }
+            
+            kdialog_type = kdialog_types.get(notification_type, "--msgbox")
+            
+            cmd = [
+                "kdialog",
+                kdialog_type,
+                f"{title}\n\n{message}",
+                "--title", title
+            ]
+            
+            # kdialog não tem timeout nativo, então executa em background
+            def run_kdialog():
+                try:
+                    process = subprocess.Popen(cmd)
+                    import time
+                    time.sleep(duration)
+                    try:
+                        process.terminate()
+                    except:
+                        pass
+                except Exception as e:
+                    logger.debug(f"Erro interno kdialog: {str(e)}")
+            
+            import threading
+            thread = threading.Thread(target=run_kdialog)
+            thread.daemon = True
+            thread.start()
+            
+            return True
+            
+        except Exception as e:
+            logger.debug(f"Erro kdialog: {str(e)}")
+            return False
+    
+    # MÉTODO CONSOLE (UNIVERSAL)
+    def _show_console_notification(self, title, message, notification_type):
+        """Exibe notificação no console como último recurso"""
+        try:
+            # Caracteres Unicode para diferentes tipos
+            icons = {
+                "info": "ℹ️",
+                "success": "✅", 
+                "warning": "⚠️",
+                "error": "❌"
+            }
+            
+            icon = icons.get(notification_type, "•")
+            
+            # Cria uma moldura para destacar
+            border = "=" * 60
+            print(f"\n{border}")
+            print(f"{icon} {title.upper()}")
+            print(f"{border}")
+            print(f"{message}")
+            print(f"{border}\n")
+            
+        except UnicodeError:
+            # Fallback para sistemas que não suportam Unicode
+            try:
+                simple_icons = {
+                    "info": "[INFO]",
+                    "success": "[OK]", 
+                    "warning": "[WARNING]",
+                    "error": "[ERROR]"
+                }
+                
+                icon = simple_icons.get(notification_type, "[NOTIFICATION]")
+                
+                border = "-" * 50
+                print(f"\n{border}")
+                print(f"{icon} {title}")
+                print(f"{border}")
+                print(f"{message}")
+                print(f"{border}\n")
+                
+            except Exception:
+                # Último recurso absoluto
+                logger.info(f"NOTIFICATION: [{notification_type.upper()}] {title} - {message}")
+    
+    # MÉTODO PARA INSTALAR DEPENDÊNCIAS OPCIONAIS
+    def install_optional_dependencies(self):
+        """Tenta instalar dependências opcionais para melhorar as notificações"""
+        try:
+            import subprocess
+            import sys
+            
+            packages_to_try = []
+            
+            if self.system == "windows":
+                # Para Windows, tenta instalar as melhores opções
+                if not self.notification_methods.get('plyer', False):
+                    packages_to_try.append('plyer')
+                if not self.notification_methods.get('win10toast', False):
+                    packages_to_try.append('win10toast')
+            
+            elif self.system in ["darwin", "linux"]:
+                # Para macOS e Linux, plyer é geralmente suficiente
+                if not self.notification_methods.get('plyer', False):
+                    packages_to_try.append('plyer')
+            
+            for package in packages_to_try:
+                try:
+                    logger.info(f"Tentando instalar {package} para melhorar notificações...")
+                    result = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", package],
+                        capture_output=True,
+                        text=True,
+                        timeout=60
+                    )
+                    
+                    if result.returncode == 0:
+                        logger.info(f"{package} instalado com sucesso")
+                        # Atualiza métodos disponíveis
+                        self.notification_methods = self._detect_available_methods()
+                    else:
+                        logger.warning(f"Falha ao instalar {package}: {result.stderr}")
+                        
+                except Exception as e:
+                    logger.warning(f"Erro ao instalar {package}: {str(e)}")
+            
+            return len(packages_to_try) > 0
+            
+        except Exception as e:
+            logger.error(f"Erro ao instalar dependências opcionais: {str(e)}")
+            return False
 
 class PrinterCardPanel(wx.Panel):
     """Painel de card para exibir uma impressora"""
@@ -1570,6 +2343,17 @@ class PrinterListPanel(wx.ScrolledWindow):
                        "text_color": wx.WHITE,
                        "text_secondary": wx.Colour(180, 180, 180)}
         
+        # Inicializa o sistema de notificações com instalação opcional
+        self.notification_system = SystemNotification()
+        
+        # Tenta instalar dependências opcionais em background se necessário
+        if not any(self.notification_system.notification_methods.values()):
+            logger.info("Nenhum método de notificação avançado disponível, tentando instalar dependências...")
+            import threading
+            install_thread = threading.Thread(target=self.notification_system.install_optional_dependencies)
+            install_thread.daemon = True
+            install_thread.start()
+        
         self._init_ui()
         
         # Configura scrolling - valor alterado para ter scroll horizontal e vertical
@@ -1664,6 +2448,9 @@ class PrinterListPanel(wx.ScrolledWindow):
         self.SetSizer(self.main_sizer)
         
         self.load_printers()
+        
+        # Mostra notificação de inicialização para testar o sistema
+        self._show_startup_notification()
     
     def load_printers(self):
         """Carrega as impressoras da configuração"""
@@ -1673,18 +2460,8 @@ class PrinterListPanel(wx.ScrolledWindow):
                 if isinstance(child, PrinterCardPanel):
                     child.Destroy()
             
-            # Adiciona um indicador de carregamento
-            loading_text = wx.StaticText(self.content_panel, label="Carregando impressoras...")
-            loading_text.SetForegroundColour(self.colors["text_color"])
-            self.content_sizer.Insert(0, loading_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
-            self.content_panel.Layout()
-            wx.GetApp().Yield()
-            
             printers_data = self.config.get_printers()
             logger.info(f"Carregadas {len(printers_data)} impressoras da configuração")
-            
-            # Remove o indicador de carregamento
-            loading_text.Destroy()
             
             if printers_data and len(printers_data) > 0:
                 self.printers = []
@@ -1729,137 +2506,188 @@ class PrinterListPanel(wx.ScrolledWindow):
         except Exception as e:
             logger.error(f"Erro ao carregar impressoras: {str(e)}")
             
-            # Exibe mensagem de erro
-            error_text = wx.StaticText(self.content_panel, label=f"Erro ao carregar impressoras: {str(e)}")
-            error_text.SetForegroundColour(wx.Colour(220, 53, 69))  # Vermelho
-            self.content_sizer.Add(error_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
+            # Exibe mensagem de erro via notificação
+            self.notification_system.show_notification(
+                "Erro ao Carregar Impressoras",
+                f"Erro: {str(e)}",
+                duration=8,
+                notification_type="error"
+            )
             
             self.content_panel.Layout()
             self.Layout()
     
     def on_update_printers(self, event=None):
-        """Atualiza impressoras com o servidor principal - Versão Melhorada"""
+        """Atualiza impressoras com o servidor principal - Versão com Notificações do Sistema"""
         try:
             # Desabilita o botão para evitar cliques múltiplos
             self.update_button.Disable()
             self.update_button.SetLabel("Atualizando...")
             wx.GetApp().Yield()
             
-            # Mostra um indicador de progresso mais detalhado
-            progress_dialog = wx.ProgressDialog(
+            # Notificação de início
+            self.notification_system.show_notification(
                 "Atualizando Impressoras",
-                "Iniciando descoberta de impressoras...",
-                maximum=100,
-                parent=self,
-                style=wx.PD_CAN_ABORT | wx.PD_ELAPSED_TIME | wx.PD_REMAINING_TIME | wx.PD_AUTO_HIDE
+                "Iniciando descoberta de impressoras na rede...",
+                duration=3,
+                notification_type="info"
             )
             
-            try:
-                # Fase 1: Verificar conectividade
-                progress_dialog.Update(10, "Verificando conectividade...")
-                wx.GetApp().Yield()
-                
-                if not hasattr(self.api_client, 'get_printers_with_discovery'):
-                    wx.MessageBox("Cliente API não possui método de descoberta", "Erro", wx.OK | wx.ICON_ERROR)
-                    return
-                
-                # Fase 2: Obter impressoras do servidor
-                progress_dialog.Update(20, "Conectando ao servidor...")
-                wx.GetApp().Yield()
-                
-                logger.info("Iniciando atualização de impressoras...")
-                
-                # Usa o método melhorado que já inclui descoberta
-                updated_printers = self.api_client.get_printers_with_discovery()
-                
-                # Fase 3: Processamento
-                progress_dialog.Update(80, "Processando impressoras encontradas...")
-                wx.GetApp().Yield()
-                
-                logger.info(f"Método get_printers_with_discovery retornou {len(updated_printers)} impressoras")
-                
-                # Fase 4: Validação e limpeza dos dados
-                validated_printers = self._validate_and_clean_printers(updated_printers)
-                
-                progress_dialog.Update(90, "Salvando configurações...")
-                wx.GetApp().Yield()
-                
-                # Salva as impressoras no config
-                if validated_printers:
-                    logger.info(f"Salvando {len(validated_printers)} impressoras validadas no config")
-                    self.config.set_printers(validated_printers)
+            # Executa a descoberta em uma thread separada para não travar a UI
+            def discovery_thread():
+                try:
+                    logger.info("Iniciando atualização de impressoras...")
                     
-                    # Recarrega a lista na interface
-                    self.load_printers()
-                    
-                    # Chama o callback se existir
-                    if self.on_update:
-                        self.on_update(validated_printers)
-                    
-                    progress_dialog.Update(100, "Concluído!")
-                    
-                    # Mostra mensagem de sucesso
-                    wx.MessageBox(
-                        f"{len(validated_printers)} impressoras atualizadas com sucesso!\n\n"
-                        f"Impressoras online: {sum(1 for p in validated_printers if p.get('is_online', False))}\n"
-                        f"Impressoras offline: {sum(1 for p in validated_printers if not p.get('is_online', False))}",
-                        "Atualização Concluída", 
-                        wx.OK | wx.ICON_INFORMATION
+                    # Notificação de progresso
+                    wx.CallAfter(
+                        self.notification_system.show_notification,
+                        "Descoberta de Impressoras",
+                        "Verificando conectividade e escaneando rede...",
+                        duration=4,
+                        notification_type="info"
                     )
-                else:
-                    progress_dialog.Update(100, "Nenhuma impressora encontrada")
                     
-                    # Mostra mensagem de aviso
-                    wx.MessageBox(
-                        "Não foi possível encontrar impressoras na rede.\n\n"
-                        "Possíveis causas:\n"
-                        "• Impressoras desligadas ou em modo de economia\n"
-                        "• Firewall bloqueando descoberta de rede\n"
-                        "• Impressoras em sub-rede diferente\n"
-                        "• Problemas de conectividade de rede\n\n"
-                        "Tente novamente em alguns minutos ou verifique as configurações de rede.",
-                        "Nenhuma Impressora Encontrada", 
-                        wx.OK | wx.ICON_WARNING
-                    )
+                    # Verifica se o método existe
+                    if not hasattr(self.api_client, 'get_printers_with_discovery'):
+                        wx.CallAfter(
+                            self.notification_system.show_notification,
+                            "Erro de Configuração",
+                            "Cliente API não possui método de descoberta",
+                            duration=6,
+                            notification_type="error"
+                        )
+                        return
+                    
+                    # Obter impressoras do servidor
+                    updated_printers = self.api_client.get_printers_with_discovery()
+                    logger.info(f"Método get_printers_with_discovery retornou {len(updated_printers)} impressoras")
+                    
+                    # Validação e limpeza dos dados
+                    validated_printers = self._validate_and_clean_printers(updated_printers)
+                    
+                    # Atualiza a UI no thread principal
+                    if validated_printers:
+                        wx.CallAfter(self._update_printers_success, validated_printers)
+                    else:
+                        wx.CallAfter(self._update_printers_no_results)
+                        
+                except Exception as e:
+                    logger.error(f"Erro ao atualizar impressoras: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    wx.CallAfter(self._update_printers_error, e)
+                finally:
+                    # Reabilita o botão no thread principal
+                    wx.CallAfter(self._restore_update_button)
             
-            finally:
-                progress_dialog.Destroy()
-                
+            # Inicia a thread de descoberta
+            thread = threading.Thread(target=discovery_thread)
+            thread.daemon = True
+            thread.start()
+            
         except Exception as e:
-            logger.error(f"Erro ao atualizar impressoras: {str(e)}")
-            logger.error(traceback.format_exc())
+            logger.error(f"Erro ao iniciar atualização de impressoras: {str(e)}")
+            self.notification_system.show_notification(
+                "Erro Crítico",
+                f"Falha ao iniciar processo de atualização: {str(e)}",
+                duration=8,
+                notification_type="error"
+            )
+            self._restore_update_button()
+    
+    def _update_printers_success(self, validated_printers):
+        """Processa sucesso na atualização de impressoras"""
+        try:
+            logger.info(f"Salvando {len(validated_printers)} impressoras validadas no config")
+            self.config.set_printers(validated_printers)
             
-            # Mostra erro específico baseado no tipo de exceção
-            if "ConnectionError" in str(type(e)) or "requests" in str(e).lower():
-                error_msg = (
-                    "Erro de conectividade ao atualizar impressoras.\n\n"
-                    "Verifique:\n"
-                    "• Conexão com a internet\n"
-                    "• Configurações de proxy/firewall\n"
-                    "• Status do servidor"
-                )
-            elif "timeout" in str(e).lower():
-                error_msg = (
-                    "Tempo limite excedido ao descobrir impressoras.\n\n"
-                    "A rede pode estar lenta ou congestionada.\n"
-                    "Tente novamente em alguns minutos."
-                )
-            elif "permission" in str(e).lower() or "admin" in str(e).lower():
-                error_msg = (
-                    "Erro de permissões ao descobrir impressoras.\n\n"
-                    "No Windows, alguns comandos de rede requerem\n"
-                    "privilégios de administrador.\n\n"
-                    "Tente executar o programa como administrador."
-                )
-            else:
-                error_msg = f"Erro ao atualizar impressoras:\n\n{str(e)}"
+            # Recarrega a lista na interface
+            self.load_printers()
             
-            wx.MessageBox(error_msg, "Erro", wx.OK | wx.ICON_ERROR)
+            # Chama o callback se existir
+            if self.on_update:
+                self.on_update(validated_printers)
             
-        finally:
-            # Reabilita o botão
-            self.update_button.Enable()
-            self.update_button.SetLabel("Atualizar Impressoras")
+            # Calcula estatísticas
+            online_count = sum(1 for p in validated_printers if p.get('is_online', False))
+            offline_count = len(validated_printers) - online_count
+            
+            # Notificação de sucesso com detalhes
+            success_message = f"Atualização concluída com sucesso!\n\n{len(validated_printers)} impressoras encontradas\n{online_count} online • {offline_count} offline"
+            
+            self.notification_system.show_notification(
+                "Impressoras Atualizadas",
+                success_message,
+                duration=6,
+                notification_type="success"
+            )
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar sucesso da atualização: {str(e)}")
+            self.notification_system.show_notification(
+                "Erro ao Salvar",
+                f"Erro ao salvar impressoras: {str(e)}",
+                duration=6,
+                notification_type="error"
+            )
+    
+    def _update_printers_no_results(self):
+        """Processa caso onde nenhuma impressora foi encontrada"""
+        warning_message = (
+            "Nenhuma impressora encontrada na rede.\n\n"
+            "Possíveis causas:\n"
+            "• Impressoras desligadas\n"
+            "• Firewall bloqueando descoberta\n"
+            "• Impressoras em sub-rede diferente\n"
+            "• Problemas de conectividade"
+        )
+        
+        self.notification_system.show_notification(
+            "Nenhuma Impressora Encontrada",
+            warning_message,
+            duration=8,
+            notification_type="warning"
+        )
+    
+    def _update_printers_error(self, error):
+        """Processa erro na atualização de impressoras"""
+        error_str = str(error)
+        
+        # Determina tipo de erro e mensagem apropriada
+        if "ConnectionError" in str(type(error)) or "requests" in error_str.lower():
+            error_message = (
+                "Erro de conectividade ao atualizar impressoras.\n\n"
+                "Verifique:\n"
+                "• Conexão com a internet\n"
+                "• Configurações de proxy/firewall\n"
+                "• Status do servidor"
+            )
+        elif "timeout" in error_str.lower():
+            error_message = (
+                "Tempo limite excedido ao descobrir impressoras.\n\n"
+                "A rede pode estar lenta ou congestionada.\n"
+                "Tente novamente em alguns minutos."
+            )
+        elif "permission" in error_str.lower() or "admin" in error_str.lower():
+            error_message = (
+                "Erro de permissões ao descobrir impressoras.\n\n"
+                "No Windows, alguns comandos de rede requerem\n"
+                "privilégios de administrador.\n\n"
+                "Tente executar o programa como administrador."
+            )
+        else:
+            error_message = f"Erro ao atualizar impressoras:\n\n{error_str}"
+        
+        self.notification_system.show_notification(
+            "Erro na Atualização",
+            error_message,
+            duration=10,
+            notification_type="error"
+        )
+    
+    def _restore_update_button(self):
+        """Restaura o estado normal do botão de atualizar"""
+        self.update_button.Enable()
+        self.update_button.SetLabel("Atualizar Impressoras")
     
     def _validate_and_clean_printers(self, printers):
         """
@@ -1977,6 +2805,67 @@ class PrinterListPanel(wx.ScrolledWindow):
         
         return cleaned
     
+    def _show_startup_notification(self):
+        """Mostra notificação de inicialização e testa o sistema"""
+        try:
+            # Espera um pouco para a interface carregar
+            def delayed_notification():
+                import time
+                time.sleep(2)  # Aguarda 2 segundos
+                
+                # Determina quais métodos estão disponíveis
+                available_methods = [method for method, available in 
+                                   self.notification_system.notification_methods.items() if available]
+                
+                if available_methods:
+                    primary_method = available_methods[0]
+                    methods_text = ", ".join(available_methods[:3])  # Mostra até 3 métodos
+                    if len(available_methods) > 3:
+                        methods_text += "..."
+                    
+                    wx.CallAfter(
+                        self.notification_system.show_notification,
+                        "Sistema de Impressão Iniciado",
+                        "",
+                        duration=4,
+                        notification_type="success"
+                    )
+                else:
+                    wx.CallAfter(
+                        self.notification_system.show_notification,
+                        "Sistema de Impressão Iniciado",
+                        f"Usando notificações via console\nSistema: {self.notification_system.system.title()}",
+                        duration=4,
+                        notification_type="info"
+                    )
+            
+            import threading
+            thread = threading.Thread(target=delayed_notification)
+            thread.daemon = True
+            thread.start()
+            
+        except Exception as e:
+            logger.warning(f"Erro ao mostrar notificação de inicialização: {str(e)}")
+    
+    def get_notification_status(self):
+        """Retorna status do sistema de notificações"""
+        try:
+            available = [method for method, status in 
+                        self.notification_system.notification_methods.items() if status]
+            return {
+                'system': self.notification_system.system,
+                'available_methods': available,
+                'primary_method': available[0] if available else 'console',
+                'total_methods': len(available)
+            }
+        except Exception:
+            return {
+                'system': 'unknown',
+                'available_methods': ['console'],
+                'primary_method': 'console',
+                'total_methods': 0
+            }
+
     def on_printer_selected(self, printer):
         """
         Manipula a seleção de uma impressora
@@ -1985,7 +2874,7 @@ class PrinterListPanel(wx.ScrolledWindow):
             printer: Impressora selecionada
         """
         try:
-            # Cria e exibe o diálogo de detalhes
+            # Notificação discreta ao abrir detalhes
             dialog = PrinterDetailsDialog(self, printer, self.api_client)
             dialog.ShowModal()
             dialog.Destroy()
@@ -1995,5 +2884,9 @@ class PrinterListPanel(wx.ScrolledWindow):
             
         except Exception as e:
             logger.error(f"Erro ao exibir detalhes da impressora: {str(e)}")
-            wx.MessageBox(f"Erro ao exibir detalhes da impressora: {str(e)}", 
-                         "Erro", wx.OK | wx.ICON_ERROR)
+            self.notification_system.show_notification(
+                "Erro ao Abrir Detalhes",
+                f"Não foi possível abrir detalhes da impressora: {str(e)}",
+                duration=6,
+                notification_type="error"
+            )

@@ -118,7 +118,7 @@ class PrintSyncManager:
             
             if not jobs_to_sync:
                 logger.info("Nenhum trabalho para sincronizar")
-                self._cleanup_old_jobs()
+                # self._cleanup_old_jobs()
                 self.is_syncing = False
                 if on_complete:
                     on_complete(True)
@@ -168,7 +168,7 @@ class PrintSyncManager:
             self.config.set("print_jobs", print_history)
             
             # Limpa trabalhos antigos
-            self._cleanup_old_jobs()
+            # self._cleanup_old_jobs()
             
             logger.info("Sincronização de trabalhos concluída")
             
@@ -181,49 +181,49 @@ class PrintSyncManager:
             if on_complete:
                 on_complete(True)
     
-    def _cleanup_old_jobs(self):
-        """Limpa trabalhos antigos (mais de 72 horas)"""
-        try:
-            # Obtém o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
-            print_history = self.config.get("print_jobs", [])
+    # def _cleanup_old_jobs(self):
+    #     """Limpa trabalhos antigos (mais de 72 horas)"""
+    #     try:
+    #         # Obtém o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
+    #         print_history = self.config.get("print_jobs", [])
             
-            # Filtra apenas os trabalhos com mais de 72 horas
-            now = datetime.now()
-            cutoff = now - timedelta(hours=72)
+    #         # Filtra apenas os trabalhos com mais de 72 horas
+    #         now = datetime.now()
+    #         cutoff = now - timedelta(hours=72)
             
-            # Novos trabalhos (mantem apenas os recentes)
-            new_history = []
+    #         # Novos trabalhos (mantem apenas os recentes)
+    #         new_history = []
             
-            for job in print_history:
-                try:
-                    # Obtém a data de conclusão ou criação
-                    job_date_str = job.get("end_time") or job.get("completed_at") or job.get("start_time") or job.get("created_at")
+    #         for job in print_history:
+    #             try:
+    #                 # Obtém a data de conclusão ou criação
+    #                 job_date_str = job.get("end_time") or job.get("completed_at") or job.get("start_time") or job.get("created_at")
                     
-                    if not job_date_str:
-                        # Se não tiver data, mantém o trabalho (não sabemos quando foi criado)
-                        new_history.append(job)
-                        continue
+    #                 if not job_date_str:
+    #                     # Se não tiver data, mantém o trabalho (não sabemos quando foi criado)
+    #                     new_history.append(job)
+    #                     continue
                     
-                    # Converte para datetime
-                    job_date = datetime.fromisoformat(job_date_str.replace("Z", "+00:00"))
+    #                 # Converte para datetime
+    #                 job_date = datetime.fromisoformat(job_date_str.replace("Z", "+00:00"))
                     
-                    # Verifica se o trabalho é recente
-                    if job_date > cutoff:
-                        new_history.append(job)
-                    else:
-                        logger.info(f"Removendo trabalho antigo: {job.get('job_id')} ({job_date_str})")
-                except Exception as e:
-                    # Se houver erro ao processar a data, mantém o trabalho
-                    logger.error(f"Erro ao processar data do trabalho: {str(e)}")
-                    new_history.append(job)
+    #                 # Verifica se o trabalho é recente
+    #                 if job_date > cutoff:
+    #                     new_history.append(job)
+    #                 else:
+    #                     logger.info(f"Removendo trabalho antigo: {job.get('job_id')} ({job_date_str})")
+    #             except Exception as e:
+    #                 # Se houver erro ao processar a data, mantém o trabalho
+    #                 logger.error(f"Erro ao processar data do trabalho: {str(e)}")
+    #                 new_history.append(job)
             
-            # Atualiza o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
-            if len(new_history) != len(print_history):
-                logger.info(f"Removidos {len(print_history) - len(new_history)} trabalhos antigos")
-                self.config.set("print_jobs", new_history)
+    #         # Atualiza o histórico - CORRIGIDO: usa a mesma chave que PrintQueueManager
+    #         if len(new_history) != len(print_history):
+    #             logger.info(f"Removidos {len(print_history) - len(new_history)} trabalhos antigos")
+    #             self.config.set("print_jobs", new_history)
             
-        except Exception as e:
-            logger.error(f"Erro ao limpar trabalhos antigos: {str(e)}")
+    #     except Exception as e:
+    #         logger.error(f"Erro ao limpar trabalhos antigos: {str(e)}")
     
     def sync_and_wait(self, timeout=30):
         """
