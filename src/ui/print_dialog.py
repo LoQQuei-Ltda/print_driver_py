@@ -210,20 +210,107 @@ class SelectPrinterDialog(wx.Dialog):
         separator = wx.StaticLine(list_panel)
         list_sizer.Add(separator, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         
-        # Lista de impressoras
+        # Container para cabeçalho com scroll
+        header_container = wx.Panel(list_panel)
+        header_container.SetBackgroundColour(self.colors["panel_bg"])
+        header_container_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # ScrolledWindow para o cabeçalho
+        self.header_scroll = wx.ScrolledWindow(header_container, style=wx.HSCROLL)
+        self.header_scroll.SetBackgroundColour(self.colors["panel_bg"])
+        self.header_scroll.SetScrollRate(10, 0)  # Apenas scroll horizontal
+        self.header_scroll.ShowScrollbars(wx.SHOW_SB_NEVER, wx.SHOW_SB_NEVER)  # Esconde as scrollbars do header
+        
+        # Painel do cabeçalho dentro do ScrolledWindow
+        header_table_panel = wx.Panel(self.header_scroll)
+        header_table_panel.SetBackgroundColour(self.colors["panel_bg"])
+        header_table_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Define as larguras das colunas
+        self.column_widths = [200, 120, 100, 150]
+        column_labels = ["Nome", "IP", "Status", "Local"]
+        
+        # Cria os cabeçalhos customizados
+        self.header_labels = []  # Armazena referências para os labels
+        for i, (label, width) in enumerate(zip(column_labels, self.column_widths)):
+            header_label = wx.StaticText(header_table_panel, label=label, size=(width, 30))
+            header_label.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+            header_label.SetForegroundColour(self.colors["text_color"])
+            header_label.SetBackgroundColour(self.colors["panel_bg"])
+            
+            # Adiciona uma borda sutil
+            def on_header_paint(event, ctrl=header_label, col_index=i):
+                dc = wx.PaintDC(ctrl)
+                dc.SetBackground(wx.Brush(self.colors["panel_bg"]))
+                dc.Clear()
+                
+                # Desenha o texto
+                dc.SetTextForeground(self.colors["text_color"])
+                dc.SetFont(ctrl.GetFont())
+                text_size = dc.GetTextExtent(ctrl.GetLabel())
+                rect = ctrl.GetClientRect()
+                
+                # Centraliza o texto verticalmente
+                y = (rect.height - text_size.height) // 2
+                dc.DrawText(ctrl.GetLabel(), 8, y)
+                
+                # Desenha borda inferior
+                dc.SetPen(wx.Pen(self.colors["border_color"], 1))
+                dc.DrawLine(0, rect.height - 1, rect.width, rect.height - 1)
+                
+                # Desenha borda direita (exceto no último)
+                if col_index < len(column_labels) - 1:
+                    dc.DrawLine(rect.width - 1, 0, rect.width - 1, rect.height)
+            
+            header_label.Bind(wx.EVT_PAINT, on_header_paint)
+            header_label.Bind(wx.EVT_ERASE_BACKGROUND, lambda evt: None)
+            
+            header_table_sizer.Add(header_label, 0, wx.EXPAND)
+            self.header_labels.append(header_label)
+        
+        header_table_panel.SetSizer(header_table_sizer)
+        
+        # Calcula o tamanho total do cabeçalho
+        total_width = sum(self.column_widths)
+        header_table_panel.SetSize((total_width, 30))
+        
+        # Configura o ScrolledWindow
+        self.header_scroll.SetVirtualSize((total_width, 30))
+        
+        header_container_sizer.Add(self.header_scroll, 1, wx.EXPAND)
+        header_container.SetSizer(header_container_sizer)
+        
+        list_sizer.Add(header_container, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        
+        # Lista de impressoras sem cabeçalho nativo
         self.printer_listbox = wx.ListCtrl(
             list_panel,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.BORDER_NONE
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_NO_HEADER | wx.BORDER_NONE
         )
         
         self.printer_listbox.SetBackgroundColour(self.colors["card_bg"])
         self.printer_listbox.SetForegroundColour(self.colors["text_color"])
         
-        # Adiciona colunas
-        self.printer_listbox.InsertColumn(0, "Nome", width=200)
-        self.printer_listbox.InsertColumn(1, "IP", width=120)
-        self.printer_listbox.InsertColumn(2, "Status", width=100)
-        self.printer_listbox.InsertColumn(3, "Local", width=150)
+        # Adiciona eventos para sincronização de scroll horizontal
+        self.printer_listbox.Bind(wx.EVT_SCROLLWIN, self._on_list_scroll)
+        self.printer_listbox.Bind(wx.EVT_SIZE, self._on_list_size)
+        
+        # Personaliza a scrollbar
+        if wx.Platform == '__WXMSW__':
+            try:
+                import win32gui
+                import win32con
+                
+                def customize_scrollbar():
+                    wx.CallAfter(self._customize_scrollbar_colors)
+                
+                wx.CallLater(100, customize_scrollbar)
+            except ImportError:
+                pass  # win32gui não disponível
+        
+        # Adiciona colunas com larguras específicas
+        for i, (label, width) in enumerate(zip(column_labels, self.column_widths)):
+            self.printer_listbox.InsertColumn(i, label, width=width)
         
         # Preenche com as impressoras
         for i, printer in enumerate(self.printers):
@@ -249,6 +336,9 @@ class SelectPrinterDialog(wx.Dialog):
             # Local
             location = getattr(printer, 'location', '')
             self.printer_listbox.SetItem(index, 3, location)
+            
+            # Define cor de fundo padrão
+            self.printer_listbox.SetItemBackgroundColour(index, self.colors["card_bg"])
         
         # Bind do evento de seleção
         self.printer_listbox.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_printer_selected)
@@ -283,6 +373,184 @@ class SelectPrinterDialog(wx.Dialog):
         
         return list_panel
     
+    def _on_list_scroll(self, event):
+        """Sincroniza o scroll do cabeçalho com o scroll da lista"""
+        try:
+            # Processa o evento original primeiro
+            event.Skip()
+            
+            # Aguarda um pouco para o scroll ser processado
+            wx.CallAfter(self._sync_header_scroll)
+            
+        except Exception as e:
+            logger.error(f"Erro ao sincronizar scroll: {str(e)}")
+
+    def _on_list_size(self, event):
+        """Gerencia o redimensionamento da lista"""
+        try:
+            event.Skip()
+            # Sincroniza o cabeçalho após redimensionamento
+            wx.CallAfter(self._sync_header_scroll)
+        except Exception as e:
+            logger.error(f"Erro ao gerenciar redimensionamento: {str(e)}")
+
+    def _sync_header_scroll(self):
+        """Sincroniza a posição de scroll do cabeçalho com a lista"""
+        try:
+            if not hasattr(self, 'header_scroll'):
+                return
+                
+            # Obtém a posição de scroll horizontal atual da lista
+            list_scroll_pos = self.printer_listbox.GetScrollPos(wx.HORIZONTAL)
+            
+            # Converte a posição do scroll da lista (em pixels) para a posição do ScrolledWindow
+            # O ScrolledWindow usa unidades de scroll (scroll_rate = 10)
+            header_scroll_pos = list_scroll_pos // 10
+            
+            # Obtém a posição atual do cabeçalho para evitar scroll desnecessário
+            current_header_pos = self.header_scroll.GetViewStart()[0]
+            
+            # Aplica o scroll apenas se a posição for diferente
+            if current_header_pos != header_scroll_pos:
+                self.header_scroll.Scroll(header_scroll_pos, 0)
+                    
+        except Exception as e:
+            logger.error(f"Erro ao sincronizar scroll do cabeçalho: {str(e)}")
+
+    def _customize_scrollbar_colors(self):
+        """Personaliza as cores da scrollbar para tema escuro"""
+        try:
+            if wx.Platform == '__WXMSW__':
+                # Tenta aplicar tema escuro via win32
+                try:
+                    import win32gui
+                    import win32con
+                    import win32api
+                    import ctypes
+                    from ctypes import wintypes
+                    
+                    hwnd = self.printer_listbox.GetHandle()
+                    
+                    # Tenta habilitar tema escuro no controle
+                    # Este é o método mais moderno para Windows 10/11
+                    DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                    DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
+                    
+                    def try_set_dark_mode(attribute):
+                        try:
+                            dwmapi = ctypes.windll.dwmapi
+                            value = ctypes.c_int(1)
+                            dwmapi.DwmSetWindowAttribute(
+                                hwnd,
+                                attribute,
+                                ctypes.byref(value),
+                                ctypes.sizeof(value)
+                            )
+                            return True
+                        except:
+                            return False
+                    
+                    # Tenta ambas as versões do atributo
+                    if not try_set_dark_mode(DWMWA_USE_IMMERSIVE_DARK_MODE):
+                        try_set_dark_mode(DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1)
+                    
+                    # Método alternativo: força tema escuro via SetWindowTheme
+                    try:
+                        uxtheme = ctypes.windll.uxtheme
+                        uxtheme.SetWindowTheme(hwnd, "DarkMode_Explorer", None)
+                    except:
+                        pass
+                    
+                    # Força atualização da janela
+                    try:
+                        user32 = ctypes.windll.user32
+                        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 
+                                        0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+                    except:
+                        pass
+                        
+                except ImportError:
+                    # Se win32 não estiver disponível, tenta método alternativo
+                    pass
+            
+            elif wx.Platform == '__WXGTK__':
+                # Para GTK, tenta aplicar estilo escuro
+                try:
+                    import gi
+                    gi.require_version('Gtk', '3.0')
+                    from gi.repository import Gtk
+                    
+                    # Aplica tema escuro no GTK
+                    settings = Gtk.Settings.get_default()
+                    settings.set_property('gtk-application-prefer-dark-theme', True)
+                except:
+                    pass
+            
+            elif wx.Platform == '__WXMAC__':
+                # Para macOS, o tema escuro é controlado pelo sistema
+                # Força refresh do controle
+                self.printer_listbox.Refresh()
+                
+        except Exception as e:
+            # Falha silenciosa para não quebrar a aplicação
+            pass
+        
+        # Método adicional: tenta personalizar via CSS no Windows
+        if wx.Platform == '__WXMSW__':
+            try:
+                # Aplica estilo personalizado ao ListCtrl
+                self.printer_listbox.SetBackgroundColour(self.colors["card_bg"])
+                
+                # Força o refresh para aplicar as mudanças
+                self.printer_listbox.Refresh()
+                self.printer_listbox.Update()
+                
+                # Agenda uma segunda tentativa
+                wx.CallLater(500, self._apply_scrollbar_theme)
+                
+            except:
+                pass
+
+    def _apply_scrollbar_theme(self):
+        """Segunda tentativa de aplicar tema na scrollbar"""
+        try:
+            if wx.Platform == '__WXMSW__':
+                import ctypes
+                from ctypes import wintypes
+                
+                hwnd = self.printer_listbox.GetHandle()
+                
+                # Obtém todos os controles filhos (incluindo scrollbars)
+                def enum_child_proc(child_hwnd, lparam):
+                    try:
+                        # Obtém informações da janela
+                        user32 = ctypes.windll.user32
+                        
+                        # Aplica tema escuro
+                        try:
+                            uxtheme = ctypes.windll.uxtheme
+                            uxtheme.SetWindowTheme(child_hwnd, "DarkMode_CFD", None)
+                        except:
+                            try:
+                                uxtheme.SetWindowTheme(child_hwnd, "DarkMode_Explorer", None)
+                            except:
+                                pass
+                        
+                        # Força redraw
+                        user32.InvalidateRect(child_hwnd, None, True)
+                        user32.UpdateWindow(child_hwnd)
+                        
+                    except:
+                        pass
+                    return True
+                
+                # Enumera e aplica tema em todos os filhos
+                enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+                ctypes.windll.user32.EnumChildWindows(hwnd, enum_proc(enum_child_proc), 0)
+                
+        except Exception as e:
+            pass
+        
     def on_printer_selected(self, event):
         """Manipula o evento de seleção de impressora"""
         index = event.GetIndex()

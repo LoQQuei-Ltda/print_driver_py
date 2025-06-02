@@ -1982,6 +1982,7 @@ class PrintProgressDialog(wx.Dialog):
         self.job_id = job_id
         self.document_name = document_name
         self.printer_name = printer_name
+        self._is_destroyed = False  # Flag para controlar se o diálogo foi destruído
         
         # Cores para temas
         self.colors = {
@@ -2001,9 +2002,21 @@ class PrintProgressDialog(wx.Dialog):
         
         self._init_ui()
         
+        # Bind eventos de fechamento
+        self.Bind(wx.EVT_CLOSE, self.on_close_event)
+        
         # Centraliza o diálogo
         self.CenterOnParent()
     
+    def _is_control_valid(self, control):
+        """Verifica se um controle ainda é válido e pode ser acessado"""
+        try:
+            if self._is_destroyed:
+                return False
+            return control and hasattr(control, 'GetParent') and control.GetParent() is not None
+        except:
+            return False
+
     def _init_ui(self):
         """Inicializa a interface do usuário"""
         # Configura o painel principal
@@ -2155,47 +2168,107 @@ class PrintProgressDialog(wx.Dialog):
         self.panel.SetSizer(main_sizer)
     
     def add_log(self, message):
-        """Adiciona uma mensagem ao log"""
-        # Adiciona timestamp
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_message = f"[{timestamp}] {message}\n"
-        
-        # Adiciona ao controle de log
-        self.log_ctrl.AppendText(log_message)
-        
-        # Atualiza o status
-        self.status_text.SetLabel(message)
-        
-        # Incrementa a barra de progresso
-        current = self.gauge.GetValue()
-        if current < 95:  # Deixa um espaço para o final
-            self.gauge.SetValue(current + 5)
+        """Adiciona uma mensagem ao log com verificação de segurança"""
+        if self._is_destroyed:
+            return
+            
+        try:
+            # Verifica se os controles ainda existem antes de acessá-los
+            if not self._is_control_valid(self.log_ctrl) or not self._is_control_valid(self.status_text):
+                return
+                
+            # Adiciona timestamp
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            log_message = f"[{timestamp}] {message}\n"
+            
+            # Adiciona ao controle de log
+            self.log_ctrl.AppendText(log_message)
+            
+            # Atualiza o status
+            self.status_text.SetLabel(message)
+            
+            # Incrementa a barra de progresso
+            if self._is_control_valid(self.gauge):
+                current = self.gauge.GetValue()
+                if current < 95:  # Deixa um espaço para o final
+                    self.gauge.SetValue(current + 5)
+                    
+        except RuntimeError as e:
+            # Controle foi destruído, marca como destruído
+            if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
+                self._is_destroyed = True
+            logger.warning(f"Controle do diálogo foi destruído: {e}")
+        except Exception as e:
+            logger.error(f"Erro ao adicionar log: {e}")
     
     def set_success(self, message="Impressão concluída com sucesso"):
-        """Define o status como sucesso"""
-        self.status_text.SetLabel(message)
-        self.status_text.SetForegroundColour(self.colors["success_color"])
-        self.gauge.SetValue(100)
-        self.close_button.Enable()
-        self.close_button.SetFocus()
-        
-        # Adiciona ao log
-        self.add_log(message)
+        """Define o status como sucesso com verificação de segurança"""
+        if self._is_destroyed:
+            return
+            
+        try:
+            if self._is_control_valid(self.status_text):
+                self.status_text.SetLabel(message)
+                self.status_text.SetForegroundColour(self.colors["success_color"])
+                
+            if self._is_control_valid(self.gauge):
+                self.gauge.SetValue(100)
+                
+            if self._is_control_valid(self.close_button):
+                self.close_button.Enable()
+                self.close_button.SetFocus()
+            
+            # Adiciona ao log
+            self.add_log(message)
+            
+        except RuntimeError as e:
+            if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
+                self._is_destroyed = True
+            logger.warning(f"Controle do diálogo foi destruído: {e}")
+        except Exception as e:
+            logger.error(f"Erro ao definir sucesso: {e}")
     
     def set_error(self, message="Falha na impressão"):
-        """Define o status como erro"""
-        self.status_text.SetLabel(message)
-        self.status_text.SetForegroundColour(self.colors["error_color"])
-        self.gauge.SetValue(100)
-        self.close_button.Enable()
-        self.close_button.SetFocus()
-        
-        # Adiciona ao log
-        self.add_log(f"ERRO: {message}")
+        """Define o status como erro com verificação de segurança"""
+        if self._is_destroyed:
+            return
+            
+        try:
+            if self._is_control_valid(self.status_text):
+                self.status_text.SetLabel(message)
+                self.status_text.SetForegroundColour(self.colors["error_color"])
+                
+            if self._is_control_valid(self.gauge):
+                self.gauge.SetValue(100)
+                
+            if self._is_control_valid(self.close_button):
+                self.close_button.Enable()
+                self.close_button.SetFocus()
+            
+            # Adiciona ao log
+            self.add_log(f"ERRO: {message}")
+            
+        except RuntimeError as e:
+            if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
+                self._is_destroyed = True
+            logger.warning(f"Controle do diálogo foi destruído: {e}")
+        except Exception as e:
+            logger.error(f"Erro ao definir erro: {e}")
+    
+    def on_close_event(self, event):
+        """Manipula o evento de fechamento do diálogo"""
+        self._is_destroyed = True
+        event.Skip()
     
     def on_close(self, event):
         """Manipula o evento de fechar"""
+        self._is_destroyed = True
         self.EndModal(wx.ID_CLOSE)
+
+    def Destroy(self):
+        """Override do método Destroy para marcar como destruído"""
+        self._is_destroyed = True
+        super().Destroy()
 
 class PrintSystem:
     """Sistema integrado de impressão"""
@@ -2289,7 +2362,9 @@ class PrintSystem:
             # Define o callback para atualização de progresso
             def print_callback(job_id, status, data):
                 """Callback para atualização de progresso de impressão"""
-                wx.CallAfter(self._update_progress_dialog, progress_dialog, status, data)
+                # Usa wx.CallAfter para garantir thread safety, mas com verificação de validade
+                if progress_dialog and not progress_dialog._is_destroyed:
+                    wx.CallAfter(self._update_progress_dialog, progress_dialog, status, data)
             
             # Adiciona o trabalho à fila
             self.print_queue_manager.add_job(
@@ -2354,17 +2429,37 @@ class PrintSystem:
             return []
     
     def _update_progress_dialog(self, dialog, status, data):
-        """Atualiza o diálogo de progresso"""
-        if status == "progress":
-            # Mensagem de progresso
-            dialog.add_log(data)
-        elif status == "complete":
-            # Trabalho concluído com sucesso
-            dialog.set_success("Impressão concluída com sucesso")
-        elif status == "error":
-            # Erro no trabalho
-            error_message = data.get("error", "Erro desconhecido")
-            dialog.set_error(f"Falha na impressão: {error_message}")
+        """Atualiza o diálogo de progresso com verificação de segurança"""
+        try:
+            # Verifica se o diálogo ainda existe e não foi destruído
+            if not dialog or dialog._is_destroyed:
+                return
+                
+            # Verifica se o diálogo ainda tem parent válido
+            if not hasattr(dialog, 'GetParent') or dialog.GetParent() is None:
+                return
+                
+            if status == "progress":
+                # Mensagem de progresso
+                dialog.add_log(data)
+            elif status == "complete":
+                # Trabalho concluído com sucesso
+                dialog.set_success("Impressão concluída com sucesso")
+            elif status == "error":
+                # Erro no trabalho
+                error_message = data.get("error", "Erro desconhecido") if isinstance(data, dict) else str(data)
+                dialog.set_error(f"Falha na impressão: {error_message}")
+                
+        except RuntimeError as e:
+            # Controle foi destruído
+            if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
+                logger.warning("Tentativa de atualizar diálogo já destruído")
+                if dialog:
+                    dialog._is_destroyed = True
+            else:
+                logger.error(f"Erro ao atualizar diálogo de progresso: {e}")
+        except Exception as e:
+            logger.error(f"Erro inesperado ao atualizar diálogo de progresso: {e}")
     
     def test_printer_connection(self, printer_ip: str, use_https: bool = False) -> Dict[str, Any]:
         """Testa conexão com uma impressora (baseado no código de teste)"""
