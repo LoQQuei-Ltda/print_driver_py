@@ -66,10 +66,10 @@ class AppUpdater:
                         if "APP_VERSION" in line:
                             return line.split("=")[1].strip().strip('"\'')
             
-            return "2.0.0"  # Versão padrão
+            return "2.0.1"  # Versão padrão
         except Exception as e:
             logger.error(f"Erro ao obter versão atual: {str(e)}")
-            return "2.0.0"
+            return "2.0.1"
     
     def check_for_update(self, silent=True):
         """
@@ -276,12 +276,12 @@ class AppUpdater:
         Returns:
             str: Caminho para o arquivo de atualização ou None
         """
-        if not self.update_info or not self.update_info.get('download_url'):
+        if not self.update_info or not self.update_info.get('url'):
             logger.error("Informações de atualização indisponíveis ou incompletas")
             return None
         
         try:
-            download_url = self.update_info['download_url']
+            download_url = self.update_info['url']
             download_dir = os.path.join(self.config.temp_dir, "updates")
             os.makedirs(download_dir, exist_ok=True)
             

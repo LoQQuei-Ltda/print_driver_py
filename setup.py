@@ -207,7 +207,7 @@ app = BUNDLE(exe,
                  'NSHighResolutionCapable': True,
                  'NSRequiresAquaSystemAppearance': False,
              }})
-""".format(icon_path=icon_path, version="2.0.0")
+""".format(icon_path=icon_path, version="2.0.1")
         
         spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 import os
@@ -275,6 +275,7 @@ all_hiddenimports = [
     'wx', 'wx._core', 'wx._adv', 'wx._html', 'wx._xml',
     'requests', 'pypdf', 'appdirs', 'yaml', 'watchdog',
     'watchdog.observers', 'watchdog.events', 'flask', 'flask_cors',
+    'zeroconf', 'python-nmap', 'pysnmp', 'netifaces', 'wsdiscovery', 
     
     # pyipp e suas dependências
     'pyipp', 'pyipp.client', 'pyipp.enums', 'pyipp.exceptions',
@@ -394,7 +395,7 @@ exe = EXE(
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências básicas
@@ -412,6 +413,11 @@ install_requires = [
     'flask_cors>=6.0.0',
     "pyinstaller>=5.0.0",
     "certifi>=2023.7.22",  # Importante para HTTPS no macOS
+    "zeroconf >=0.147.0",
+    "python-nmap>=0.7.1",
+    "pysnmp>=7.1.20",
+    "netifaces>=0.11.0",
+    "wsdiscovery>=2.1.2"
 ]
 
 # Adiciona dependências específicas por plataforma
