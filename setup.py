@@ -93,7 +93,7 @@ class PyInstallerCommand(Command):
         import subprocess
         
         # Dependências básicas
-        deps = ['pyipp', 'aiohttp', 'wxPython', 'pypdf', 'watchdog', 'pyyaml', 'requests']
+        deps = ['pyipp', 'aiohttp', 'wxPython', 'pypdf', 'watchdog', 'pyyaml', 'requests', 'zeroconf', 'pysnmp', 'netifaces', 'flask', 'flask_cors']
         
         # Dependências específicas por plataforma
         system = platform.system().lower()
@@ -177,6 +177,10 @@ try:
     import asyncio
     import ssl
     import certifi
+    import zeroconf
+    import pysnmp
+    import netifaces
+    import requests
 except Exception as e:
     print(f"Erro ao importar módulos no runtime hook: {e}")
 '''
@@ -207,7 +211,7 @@ app = BUNDLE(exe,
                  'NSHighResolutionCapable': True,
                  'NSRequiresAquaSystemAppearance': False,
              }})
-""".format(icon_path=icon_path, version="2.0.1")
+""".format(icon_path=icon_path, version="2.0.2")
         
         spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 import os
@@ -275,7 +279,10 @@ all_hiddenimports = [
     'wx', 'wx._core', 'wx._adv', 'wx._html', 'wx._xml',
     'requests', 'pypdf', 'appdirs', 'yaml', 'watchdog',
     'watchdog.observers', 'watchdog.events', 'flask', 'flask_cors',
-    'zeroconf', 'python-nmap', 'pysnmp', 'netifaces', 'wsdiscovery', 
+    'zeroconf', 'zeroconf._utils', 'zeroconf._services',
+    'pysnmp', 'pysnmp.hlapi', 'pysnmp.smi',
+    'netifaces', 'requests', 'urllib3',
+    'certifi', 'charset_normalizer', 
     
     # pyipp e suas dependências
     'pyipp', 'pyipp.client', 'pyipp.enums', 'pyipp.exceptions',
@@ -395,7 +402,7 @@ exe = EXE(
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências básicas
@@ -413,11 +420,11 @@ install_requires = [
     'flask_cors>=6.0.0',
     "pyinstaller>=5.0.0",
     "certifi>=2023.7.22",  # Importante para HTTPS no macOS
-    "zeroconf >=0.147.0",
     "python-nmap>=0.7.1",
     "pysnmp>=7.1.20",
     "netifaces>=0.11.0",
-    "wsdiscovery>=2.1.2"
+    "wsdiscovery>=2.1.2",
+    "zeroconf>=0.147.0",
 ]
 
 # Adiciona dependências específicas por plataforma

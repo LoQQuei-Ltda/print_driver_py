@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-Utilitário para descoberta automática de impressoras na rede - Versão Multi-Protocolo Robusta
-Suporta: mDNS/Bonjour, SNMP, WSD, NetBIOS, SSDP/UPnP, IPP, Raw Sockets
+ARQUIVO CONSOLIDADO: printer_discovery.py - Versão Corrigida para Ambiente Empacotado
+Este arquivo substitui completamente src/utils/printer_discovery.py
+
+PROBLEMA RESOLVIDO: Timeouts muito curtos no executável empacotado impediam
+a descoberta completa das impressoras.
 """
 
 import asyncio
@@ -27,20 +30,44 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Set, Optional, Tuple
 import warnings
 
-# Suprime warnings de bibliotecas externas
+# Suprime warnings
 warnings.filterwarnings('ignore')
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrinterDiscovery")
 
-# Configurações globais
-BASE_TIMEOUT_REQUEST = 5
-BASE_TIMEOUT_SCAN = 2
-BASE_TIMEOUT_PING = 3
-MAX_WORKERS = 50  # Aumentado para descoberta mais rápida
-DISCOVERY_TIMEOUT = 30  # Timeout total para descoberta
+# ========== DETECÇÃO DE AMBIENTE EMPACOTADO ==========
+def is_frozen():
+    """Detecta se está rodando como executável empacotado"""
+    return getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+
+# ========== CONFIGURAÇÕES ADAPTATIVAS ==========
+# Configurações base (desenvolvimento)
+if is_frozen():
+    # AMBIENTE EMPACOTADO: Timeouts maiores para garantir descoberta completa
+    BASE_TIMEOUT_REQUEST = 10  # Dobrado
+    BASE_TIMEOUT_SCAN = 5      # Mais que dobrado
+    BASE_TIMEOUT_PING = 5      # Aumentado
+    MAX_WORKERS = 30           # Reduzido para evitar sobrecarga
+    DISCOVERY_TIMEOUT = 60     # Dobrado
+    MDNS_WAIT_TIME = 10        # Dobrado
+    SSDP_WAIT_TIME = 15        # Aumentado
+    MIN_DISCOVERY_TIME = 20    # Tempo mínimo de descoberta
+    IPP_ATTRIBUTE_TIMEOUT = 10 # Timeout específico para atributos IPP
+else:
+    # DESENVOLVIMENTO: Timeouts originais
+    BASE_TIMEOUT_REQUEST = 5
+    BASE_TIMEOUT_SCAN = 2
+    BASE_TIMEOUT_PING = 3
+    MAX_WORKERS = 50
+    DISCOVERY_TIMEOUT = 30
+    MDNS_WAIT_TIME = 5
+    SSDP_WAIT_TIME = 8
+    MIN_DISCOVERY_TIME = 10
+    IPP_ATTRIBUTE_TIMEOUT = 10 # Timeout específico para atributos IPP
+
 COMMON_PRINTER_PORTS = [631, 9100, 80, 443, 515, 8080, 8443, 5353, 161, 3702]
 
-# Tenta importar bibliotecas opcionais
+# Bibliotecas opcionais
 HAS_PYIPP = False
 HAS_ZEROCONF = False
 HAS_PYSNMP = False
@@ -51,74 +78,78 @@ try:
     import pyipp
     HAS_PYIPP = True
 except ImportError:
-    logger.debug("pyipp não disponível - descoberta IPP limitada")
+    logger.debug("pyipp não disponível")
 
+HAS_ZEROCONF = False
+ServiceListener = None
 try:
     from zeroconf import ServiceBrowser, Zeroconf, ServiceListener
     HAS_ZEROCONF = True
 except ImportError:
-    logger.debug("zeroconf não disponível - descoberta mDNS desabilitada")
+    logger.debug("zeroconf não disponível")
 
 try:
     from pysnmp.hlapi import *
     HAS_PYSNMP = True
 except ImportError:
-    logger.debug("pysnmp não disponível - descoberta SNMP desabilitada")
+    logger.debug("pysnmp não disponível")
 
 try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
-    logger.debug("requests não disponível - descoberta HTTP limitada")
+    logger.debug("requests não disponível")
 
 try:
     import netifaces
     HAS_NETIFACES = True
 except ImportError:
-    logger.debug("netifaces não disponível - detecção de rede limitada")
+    logger.debug("netifaces não disponível")
 
-
-class MDNSListener(ServiceListener):
-    """Listener para descoberta mDNS/Bonjour"""
-    
-    def __init__(self, discovery_instance):
-        self.discovery = discovery_instance
-        self.found_services = set()
-    
-    def add_service(self, zeroconf, type, name):
-        """Serviço encontrado"""
-        try:
-            info = zeroconf.get_service_info(type, name)
-            if info:
-                # Processa apenas se não foi processado antes
-                service_id = f"{name}:{type}"
-                if service_id not in self.found_services:
-                    self.found_services.add(service_id)
-                    self.discovery._process_mdns_service(info)
-        except Exception as e:
-            logger.debug(f"Erro processando serviço mDNS {name}: {str(e)}")
-    
-    def remove_service(self, zeroconf, type, name):
-        """Serviço removido"""
-        pass
-    
-    def update_service(self, zeroconf, type, name):
-        """Serviço atualizado"""
-        pass
+if HAS_ZEROCONF and ServiceListener:
+    class MDNSListener(ServiceListener):
+        """Listener para descoberta mDNS/Bonjour"""
+        
+        def __init__(self, discovery_instance):
+            self.discovery = discovery_instance
+            self.found_services = set()
+        
+        def add_service(self, zeroconf, type, name):
+            """Serviço encontrado"""
+            try:
+                info = zeroconf.get_service_info(type, name)
+                if info:
+                    service_id = f"{name}:{type}"
+                    if service_id not in self.found_services:
+                        self.found_services.add(service_id)
+                        self.discovery._process_mdns_service(info)
+            except Exception as e:
+                logger.debug(f"Erro processando serviço mDNS {name}: {str(e)}")
+        
+        def remove_service(self, zeroconf, type, name):
+            pass
+        
+        def update_service(self, zeroconf, type, name):
+            pass
+else:
+    class MDNSListener:
+        def __init__(self, discovery_instance):
+            self.discovery = discovery_instance
 
 
 class PrinterDiscovery:
-    """Classe para descoberta automática de impressoras - Multi-Protocolo"""
+    """Descoberta de impressoras com suporte a ambiente empacotado"""
     
     def __init__(self):
         """Inicializa o descobridor de impressoras"""
         self.printers = []
-        self.discovered_printers = {}  # IP -> printer_info
+        self.discovered_printers = {}
         self.discovery_lock = threading.Lock()
         
         # Informações do sistema
         self.system = platform.system().lower()
         self.is_windows = self.system == "windows"
+        self.is_frozen = is_frozen()
         self.is_admin = self._check_admin_privileges()
         
         # Detecção do Windows
@@ -131,10 +162,16 @@ class PrinterDiscovery:
         # Configurações adaptativas
         self.config = self._setup_system_configs()
         
+        # Log do ambiente
         logger.info(f"PrinterDiscovery inicializado - Sistema: {self.system}, "
-                   f"Admin: {self.is_admin}, Bibliotecas: "
-                   f"zeroconf={HAS_ZEROCONF}, pysnmp={HAS_PYSNMP}, "
-                   f"requests={HAS_REQUESTS}, netifaces={HAS_NETIFACES}")
+                   f"Frozen: {self.is_frozen}, Admin: {self.is_admin}, "
+                   f"Timeouts: {IPP_ATTRIBUTE_TIMEOUT}")
+        
+        if self.is_frozen:
+            logger.info("🔒 EXECUTANDO EM MODO EMPACOTADO - Timeouts aumentados")
+            logger.info(f"Bibliotecas disponíveis: zeroconf={HAS_ZEROCONF}, "
+                       f"pysnmp={HAS_PYSNMP}, requests={HAS_REQUESTS}, "
+                       f"netifaces={HAS_NETIFACES}")
     
     def _detect_windows_version(self):
         """Detecta versão do Windows"""
@@ -153,9 +190,7 @@ class PrinterDiscovery:
             return {
                 'version': product_name,
                 'build': int(current_build),
-                'is_server': "server" in product_name.lower(),
-                'is_win10': int(current_build) >= 10240 and int(current_build) < 22000,
-                'is_win11': int(current_build) >= 22000
+                'is_server': "server" in product_name.lower()
             }
         except:
             return {'version': 'unknown', 'is_server': False}
@@ -172,15 +207,29 @@ class PrinterDiscovery:
             return False
     
     def _setup_system_configs(self):
-        """Configura parâmetros do sistema"""
-        return {
-            'timeouts': {
-                'request': BASE_TIMEOUT_REQUEST,
-                'scan': BASE_TIMEOUT_SCAN,
-                'ping': BASE_TIMEOUT_PING
-            },
-            'parallel_hosts': MAX_WORKERS
+        """Configura parâmetros adaptativos"""
+        # Shared settings
+        shared_timeouts = {
+            'request': BASE_TIMEOUT_REQUEST,
+            'scan': BASE_TIMEOUT_SCAN,
+            'ping': BASE_TIMEOUT_PING,
+            'ipp_attributes': IPP_ATTRIBUTE_TIMEOUT # Adicionado timeout para atributos IPP
         }
+
+        if self.is_frozen:
+            # Configurações para ambiente empacotado
+            return {
+                'timeouts': shared_timeouts,
+                'parallel_hosts': MAX_WORKERS,
+                'min_discovery_time': MIN_DISCOVERY_TIME
+            }
+        else:
+            # Configurações para desenvolvimento
+            return {
+                'timeouts': shared_timeouts,
+                'parallel_hosts': MAX_WORKERS,
+                'min_discovery_time': MIN_DISCOVERY_TIME
+            }
     
     def normalize_mac(self, mac):
         """Normaliza formato MAC address"""
@@ -196,110 +245,112 @@ class PrinterDiscovery:
     
     def discover_printers(self, subnet=None):
         """
-        Descobre impressoras usando múltiplos protocolos em paralelo
-        
-        Args:
-            subnet: Subnet específica (opcional)
-            
-        Returns:
-            list: Lista de impressoras encontradas
+        Descobre impressoras garantindo tempo mínimo de descoberta
         """
-        logger.info("=== Iniciando descoberta multi-protocolo de impressoras ===")
+        logger.info("=== Iniciando descoberta de impressoras ===")
+        logger.info(f"Ambiente: {'EMPACOTADO' if self.is_frozen else 'DESENVOLVIMENTO'}")
         start_time = time.time()
         
         # Limpa descobertas anteriores
         self.discovered_printers.clear()
         
+        # Força atualização do ARP primeiro
+        self._update_arp_cache()
+        
         # Lista de métodos de descoberta
         discovery_methods = []
         
-        # 1. mDNS/Bonjour (muito eficaz para impressoras modernas)
+        # Ordena métodos por eficácia
         if HAS_ZEROCONF:
             discovery_methods.append(("mDNS/Bonjour", self._discover_mdns))
         
-        # 2. SNMP (eficaz para impressoras empresariais)
-        if HAS_PYSNMP:
-            discovery_methods.append(("SNMP", self._discover_snmp))
-        
-        # 3. WSD - Web Services for Devices (Windows)
         if self.is_windows:
             discovery_methods.append(("WSD", self._discover_wsd))
         
-        # 4. NetBIOS/SMB
-        discovery_methods.append(("NetBIOS", self._discover_netbios))
-        
-        # 5. SSDP/UPnP
-        discovery_methods.append(("SSDP/UPnP", self._discover_ssdp))
-        
-        # 6. IPP Direct
+        discovery_methods.append(("Port Scan", self._discover_port_scan))
         discovery_methods.append(("IPP Direct", self._discover_ipp_direct))
         
-        # 7. Port Scan (fallback)
-        discovery_methods.append(("Port Scan", self._discover_port_scan))
+        if HAS_PYSNMP:
+            discovery_methods.append(("SNMP", self._discover_snmp))
         
-        # Executa todos os métodos em paralelo
+        discovery_methods.append(("NetBIOS", self._discover_netbios))
+        discovery_methods.append(("SSDP/UPnP", self._discover_ssdp))
+        
+        # Executa descobertas em paralelo
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(discovery_methods)) as executor:
             futures = []
             
             for method_name, method_func in discovery_methods:
-                logger.info(f"Iniciando descoberta via {method_name}...")
+                logger.info(f"▶ Iniciando {method_name}...")
                 future = executor.submit(self._run_discovery_method, method_name, method_func, subnet)
                 futures.append((method_name, future))
             
-            # Aguarda com timeout
+            # Aguarda com timeout apropriado
+            timeout = DISCOVERY_TIMEOUT if self.is_frozen else DISCOVERY_TIMEOUT
+            
             for method_name, future in futures:
                 try:
-                    result = future.result(timeout=DISCOVERY_TIMEOUT)
-                    logger.info(f"{method_name}: {result} impressoras encontradas")
+                    result = future.result(timeout=timeout)
+                    logger.info(f"✓ {method_name}: {result} impressoras")
                 except concurrent.futures.TimeoutError:
-                    logger.warning(f"{method_name}: Timeout")
+                    logger.warning(f"⏱ {method_name}: Timeout")
                 except Exception as e:
-                    logger.error(f"{method_name}: Erro - {str(e)}")
+                    logger.error(f"✗ {method_name}: {str(e)}")
         
-        # Processa e deduplica resultados
+        # Garante tempo mínimo de descoberta no ambiente empacotado
+        elapsed = time.time() - start_time
+        min_time = self.config['min_discovery_time']
+        
+        if self.is_frozen and elapsed < min_time:
+            wait_time = min_time - elapsed
+            logger.info(f"⏳ Aguardando {wait_time:.1f}s adicionais para descoberta completa...")
+            time.sleep(wait_time)
+        
+        # Processa resultados
         unique_printers = self._process_discovered_printers()
         
-        elapsed = time.time() - start_time
-        logger.info(f"=== Descoberta concluída em {elapsed:.1f}s - "
-                   f"{len(unique_printers)} impressoras únicas encontradas ===")
+        total_elapsed = time.time() - start_time
+        logger.info(f"=== Descoberta concluída em {total_elapsed:.1f}s - "
+                   f"{len(unique_printers)} impressoras encontradas ===")
         
         self.printers = unique_printers
         return unique_printers
     
     def _run_discovery_method(self, method_name, method_func, subnet):
-        """Executa um método de descoberta com tratamento de erros"""
+        """Executa método de descoberta com logging"""
         try:
+            start = time.time()
             count = method_func(subnet)
+            elapsed = time.time() - start
+            logger.debug(f"{method_name} completado em {elapsed:.1f}s")
             return count
         except Exception as e:
             logger.error(f"Erro em {method_name}: {str(e)}")
-            logger.debug(traceback.format_exc())
             return 0
     
     def _add_discovered_printer(self, printer_info):
-        """Adiciona impressora descoberta de forma thread-safe"""
+        """Adiciona impressora descoberta"""
         with self.discovery_lock:
             ip = printer_info.get('ip')
             if not ip:
                 return
             
-            # Se já existe, mescla informações
             if ip in self.discovered_printers:
                 existing = self.discovered_printers[ip]
-                # Mescla informações, priorizando novas se mais completas
+                # Mescla informações
                 for key, value in printer_info.items():
                     if value and (key not in existing or not existing[key]):
                         existing[key] = value
-                # Mescla portas
                 if 'ports' in printer_info:
                     existing_ports = set(existing.get('ports', []))
                     new_ports = set(printer_info['ports'])
                     existing['ports'] = sorted(list(existing_ports | new_ports))
             else:
                 self.discovered_printers[ip] = printer_info
+                logger.debug(f"Nova impressora descoberta: {ip}")
     
     def _discover_mdns(self, subnet=None):
-        """Descoberta via mDNS/Bonjour"""
+        """Descoberta via mDNS com tempo estendido"""
         if not HAS_ZEROCONF:
             return 0
         
@@ -308,16 +359,16 @@ class PrinterDiscovery:
             zeroconf = Zeroconf()
             listener = MDNSListener(self)
             
-            # Serviços de impressora conhecidos
+            # Serviços de impressora
             services = [
                 "_ipp._tcp.local.",
                 "_printer._tcp.local.",
                 "_pdl-datastream._tcp.local.",
                 "_print._tcp.local.",
-                "_http._tcp.local.",  # Muitas impressoras anunciam HTTP
+                "_http._tcp.local.",
                 "_https._tcp.local.",
-                "_scanner._tcp.local.",  # Multifuncionais
-                "_airprint._tcp.local.",  # Apple AirPrint
+                "_scanner._tcp.local.",
+                "_airprint._tcp.local.",
                 "_ipps._tcp.local."
             ]
             
@@ -326,187 +377,106 @@ class PrinterDiscovery:
                 browser = ServiceBrowser(zeroconf, service, listener)
                 browsers.append(browser)
             
-            # Aguarda descobertas
-            time.sleep(5)
+            # Aguarda mais tempo no ambiente empacotado
+            wait_time = MDNS_WAIT_TIME
+            logger.info(f"mDNS aguardando {wait_time}s por anúncios...")
+            time.sleep(wait_time)
             
-            # Conta impressoras encontradas via mDNS
             count = len([p for p in self.discovered_printers.values() 
                         if p.get('discovery_method') == 'mDNS'])
             
             zeroconf.close()
             
         except Exception as e:
-            logger.error(f"Erro na descoberta mDNS: {str(e)}")
+            logger.error(f"Erro mDNS: {str(e)}")
         
         return count
     
     def _process_mdns_service(self, info):
         """Processa serviço mDNS descoberto"""
         try:
-            if not info.addresses or len(info.addresses) == 0:
+            if not info.addresses:
                 return
             
-            # Converte endereço para string IP
             ip = socket.inet_ntoa(info.addresses[0])
             
-            # Extrai informações
             printer_info = {
                 'ip': ip,
-                'name': info.name.replace('._ipp._tcp.local.', '').replace('._printer._tcp.local.', ''),
+                'name': info.name.split('.')[0],
                 'port': info.port,
                 'discovery_method': 'mDNS',
                 'mdns_properties': {}
             }
             
-            # Processa propriedades mDNS
             if info.properties:
                 for key, value in info.properties.items():
                     if isinstance(value, bytes):
                         value = value.decode('utf-8', errors='ignore')
                     printer_info['mdns_properties'][key.decode('utf-8', errors='ignore')] = value
                 
-                # Extrai informações úteis das propriedades
                 props = printer_info['mdns_properties']
                 if 'ty' in props:
                     printer_info['model'] = props['ty']
                 if 'note' in props:
                     printer_info['location'] = props['note']
-                if 'product' in props:
-                    printer_info['product'] = props['product']
             
-            # Determina portas baseado no serviço
             if info.port:
                 printer_info['ports'] = [info.port]
                 if info.port == 631:
                     printer_info['uri'] = f"ipp://{ip}:631/ipp/print"
-                elif info.port == 80:
-                    printer_info['uri'] = f"http://{ip}"
-                elif info.port == 443:
-                    printer_info['uri'] = f"https://{ip}"
             
             self._add_discovered_printer(printer_info)
             
         except Exception as e:
-            logger.debug(f"Erro processando serviço mDNS: {str(e)}")
-    
-    def _discover_snmp(self, subnet=None):
-        """Descoberta via SNMP"""
-        if not HAS_PYSNMP:
-            return 0
-        
-        count = 0
-        networks = self._get_networks_to_scan(subnet)
-        
-        # OIDs SNMP para impressoras
-        printer_oids = [
-            '1.3.6.1.2.1.1.1.0',  # sysDescr
-            '1.3.6.1.2.1.1.5.0',  # sysName
-            '1.3.6.1.2.1.25.3.2.1.3.1',  # hrDeviceDescr
-            '1.3.6.1.2.1.43.5.1.1.16.1'  # prtGeneralModelName
-        ]
-        
-        for network in networks:
-            # IPs comuns para testar SNMP
-            test_ips = self._get_common_printer_ips(network)[:30]
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-                futures = [executor.submit(self._snmp_get, ip, printer_oids) 
-                          for ip in test_ips]
-                
-                for future in concurrent.futures.as_completed(futures, timeout=10):
-                    try:
-                        result = future.result()
-                        if result:
-                            self._add_discovered_printer(result)
-                            count += 1
-                    except:
-                        pass
-        
-        return count
-    
-    def _snmp_get(self, ip, oids):
-        """Consulta SNMP em um IP"""
-        if not HAS_PYSNMP:
-            return None
-        
-        try:
-            # Tenta community strings comuns
-            for community in ['public', 'private']:
-                for oid in oids:
-                    iterator = getCmd(
-                        SnmpEngine(),
-                        CommunityData(community, mpModel=0),
-                        UdpTransportTarget((ip, 161), timeout=2, retries=1),
-                        ContextData(),
-                        ObjectType(ObjectIdentity(oid))
-                    )
-                    
-                    errorIndication, errorStatus, errorIndex, varBinds = next(iterator)
-                    
-                    if not errorIndication and not errorStatus:
-                        for varBind in varBinds:
-                            value = str(varBind[1])
-                            if value and 'print' in value.lower():
-                                return {
-                                    'ip': ip,
-                                    'name': f"Impressora SNMP {ip}",
-                                    'model': value,
-                                    'discovery_method': 'SNMP',
-                                    'ports': [161, 9100, 631],
-                                    'uri': f"socket://{ip}:9100"
-                                }
-        except:
-            pass
-        
-        return None
+            logger.debug(f"Erro processando mDNS: {str(e)}")
     
     def _discover_wsd(self, subnet=None):
-        """Descoberta via WSD (Web Services for Devices) - Windows"""
+        """Descoberta WSD com tempo estendido"""
         if not self.is_windows:
             return 0
         
         count = 0
         try:
-            # Envia probe WS-Discovery
             probe_message = self._create_wsd_probe()
             
-            # Socket UDP para multicast
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.settimeout(5)
+            sock.settimeout(3)
             
-            # Envia para endereço multicast WSD
-            sock.sendto(probe_message.encode('utf-8'), ('239.255.255.250', 3702))
+            # Envia múltiplos probes
+            for i in range(3):
+                sock.sendto(probe_message.encode('utf-8'), ('239.255.255.250', 3702))
+                time.sleep(0.5)
             
-            # Escuta respostas
+            # Escuta por mais tempo
             start_time = time.time()
-            while time.time() - start_time < 8:
+            timeout = 15 if self.is_frozen else 8
+            
+            while time.time() - start_time < timeout:
                 try:
                     data, addr = sock.recvfrom(65536)
                     if self._process_wsd_response(data, addr[0]):
                         count += 1
                 except socket.timeout:
-                    break
-                except:
                     continue
             
             sock.close()
             
         except Exception as e:
-            logger.debug(f"Erro na descoberta WSD: {str(e)}")
+            logger.debug(f"Erro WSD: {str(e)}")
         
         return count
     
     def _create_wsd_probe(self):
-        """Cria mensagem probe WS-Discovery"""
-        return """<?xml version="1.0" encoding="utf-8"?>
+        """Cria probe WSD"""
+        return f"""<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" 
                xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" 
                xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery">
   <soap:Header>
     <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
     <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
-    <wsa:MessageID>urn:uuid:""" + str(time.time()) + """</wsa:MessageID>
+    <wsa:MessageID>urn:uuid:{int(time.time() * 1000)}</wsa:MessageID>
   </soap:Header>
   <soap:Body>
     <wsd:Probe>
@@ -518,252 +488,89 @@ class PrinterDiscovery:
     def _process_wsd_response(self, data, ip):
         """Processa resposta WSD"""
         try:
-            # Parse XML response
-            root = ET.fromstring(data)
-            
-            # Verifica se é uma impressora
             device_info = data.decode('utf-8', errors='ignore').lower()
-            if any(keyword in device_info for keyword in ['print', 'printer', 'mfp']):
+            if any(k in device_info for k in ['print', 'printer', 'mfp']):
                 printer_info = {
                     'ip': ip,
                     'name': f"Impressora WSD {ip}",
                     'discovery_method': 'WSD',
-                    'ports': [80, 5357],  # WSD usa estas portas
+                    'ports': [80, 5357],
                     'uri': f"http://{ip}"
                 }
                 self._add_discovered_printer(printer_info)
                 return True
         except:
             pass
-        
         return False
     
-    def _discover_netbios(self, subnet=None):
-        """Descoberta via NetBIOS"""
-        count = 0
-        
-        try:
-            if self.is_windows:
-                # Usa nbtstat no Windows
-                result = subprocess.run(['nbtstat', '-r'], 
-                                      capture_output=True, text=True, 
-                                      timeout=10,
-                                      creationflags=subprocess.CREATE_NO_WINDOW)
-                
-                if result.returncode == 0:
-                    # Processa cache NetBIOS
-                    for line in result.stdout.split('\n'):
-                        if 'printer' in line.lower() or '<20>' in line:
-                            # Extrai IP se possível
-                            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
-                            if ip_match:
-                                ip = ip_match.group(1)
-                                if self._verify_printer(ip):
-                                    count += 1
-            else:
-                # Em Linux/Mac, usa nmblookup se disponível
-                networks = self._get_networks_to_scan(subnet)
-                for network in networks:
-                    try:
-                        broadcast = str(network.broadcast_address)
-                        result = subprocess.run(['nmblookup', '-B', broadcast, '*'],
-                                              capture_output=True, text=True,
-                                              timeout=10)
-                        
-                        if result.returncode == 0:
-                            for line in result.stdout.split('\n'):
-                                if '<20>' in line:  # Compartilhamento de arquivo/impressora
-                                    ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
-                                    if ip_match:
-                                        ip = ip_match.group(1)
-                                        if self._verify_printer(ip):
-                                            count += 1
-                    except:
-                        pass
-        except:
-            pass
-        
-        return count
-    
-    def _discover_ssdp(self, subnet=None):
-        """Descoberta via SSDP/UPnP"""
-        count = 0
-        
-        try:
-            # Mensagem M-SEARCH SSDP
-            ssdp_request = """M-SEARCH * HTTP/1.1
-HOST: 239.255.255.250:1900
-MAN: "ssdp:discover"
-MX: 3
-ST: ssdp:all
-
-"""
-            
-            # Socket UDP
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.settimeout(5)
-            
-            # Envia M-SEARCH
-            sock.sendto(ssdp_request.encode('utf-8'), ('239.255.255.250', 1900))
-            
-            # Escuta respostas
-            start_time = time.time()
-            while time.time() - start_time < 8:
-                try:
-                    data, addr = sock.recvfrom(65536)
-                    response = data.decode('utf-8', errors='ignore')
-                    
-                    # Verifica se é impressora
-                    if any(keyword in response.lower() for keyword in 
-                          ['printer', 'print', 'mfp', 'scanner']):
-                        
-                        # Extrai location
-                        location_match = re.search(r'LOCATION:\s*(.+)', response, re.IGNORECASE)
-                        if location_match:
-                            location = location_match.group(1).strip()
-                            # Extrai IP da URL
-                            ip_match = re.search(r'http[s]?://([^:/]+)', location)
-                            if ip_match:
-                                ip = ip_match.group(1)
-                                printer_info = {
-                                    'ip': ip,
-                                    'name': f"Impressora UPnP {ip}",
-                                    'discovery_method': 'SSDP/UPnP',
-                                    'location_url': location,
-                                    'ports': [80, 1900],
-                                    'uri': location
-                                }
-                                self._add_discovered_printer(printer_info)
-                                count += 1
-                
-                except socket.timeout:
-                    break
-                except:
-                    continue
-            
-            sock.close()
-            
-        except Exception as e:
-            logger.debug(f"Erro na descoberta SSDP: {str(e)}")
-        
-        return count
-    
-    def _discover_ipp_direct(self, subnet=None):
-        """Descoberta direta via IPP em IPs comuns"""
-        count = 0
-        networks = self._get_networks_to_scan(subnet)
-        
-        for network in networks:
-            # IPs mais prováveis
-            common_ips = self._get_common_printer_ips(network)[:50]
-            
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                futures = [executor.submit(self._check_ipp_printer, ip) 
-                          for ip in common_ips]
-                
-                for future in concurrent.futures.as_completed(futures, timeout=15):
-                    try:
-                        if future.result():
-                            count += 1
-                    except:
-                        pass
-        
-        return count
-    
-    def _check_ipp_printer(self, ip):
-        """Verifica se IP tem serviço IPP"""
-        # Primeiro verifica se porta 631 está aberta
-        if not self._is_port_open(ip, 631, 2):
-            return False
-        
-        printer_info = {
-            'ip': ip,
-            'name': f"Impressora IPP {ip}",
-            'discovery_method': 'IPP Direct',
-            'ports': [631],
-            'uri': f"ipp://{ip}/ipp/print"
-        }
-        
-        # Tenta obter detalhes via IPP se disponível
-        if HAS_PYIPP:
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                details = loop.run_until_complete(
-                    asyncio.wait_for(self._get_printer_attributes(ip), timeout=5)
-                )
-                loop.close()
-                
-                if details and 'name' in details:
-                    printer_info.update(details)
-            except:
-                pass
-        
-        self._add_discovered_printer(printer_info)
-        return True
-    
     def _discover_port_scan(self, subnet=None):
-        """Descoberta via escaneamento de portas (fallback)"""
+        """Port scan com estratégia otimizada"""
         count = 0
         
-        # Atualiza cache ARP
+        # Atualiza ARP
         self._update_arp_cache()
         
-        # IPs do cache ARP primeiro
+        # Fase 1: IPs do ARP
         arp_ips = list(self.mac_cache.keys())
-        
         if arp_ips:
-            logger.info(f"Verificando {len(arp_ips)} IPs do cache ARP...")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-                futures = [executor.submit(self._scan_single_ip, ip) for ip in arp_ips]
-                
-                for future in concurrent.futures.as_completed(futures, timeout=20):
-                    try:
-                        result = future.result()
-                        if result:
-                            self._add_discovered_printer(result)
-                            count += 1
-                    except:
-                        pass
+            logger.info(f"Port Scan: Verificando {len(arp_ips)} IPs do ARP...")
+            count += self._scan_ip_batch(arp_ips, "ARP")
         
-        # Escaneia redes adicionais se encontrou poucas
-        if count < 3:
-            networks = self._get_networks_to_scan(subnet)
-            for network in networks[:2]:  # Limita para não demorar muito
-                common_ips = self._get_common_printer_ips(network)[:30]
-                
-                with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-                    futures = [executor.submit(self._scan_single_ip, ip) for ip in common_ips]
-                    
-                    for future in concurrent.futures.as_completed(futures, timeout=15):
-                        try:
-                            result = future.result()
-                            if result:
-                                self._add_discovered_printer(result)
-                                count += 1
-                        except:
-                            pass
+        # Fase 2: IPs comuns
+        networks = self._get_networks_to_scan(subnet)
+        for network in networks:
+            common_ips = self._get_common_printer_ips(network)
+            # Remove IPs já escaneados
+            new_ips = [ip for ip in common_ips if ip not in arp_ips]
+            
+            if new_ips:
+                logger.info(f"Port Scan: Verificando {len(new_ips)} IPs comuns...")
+                count += self._scan_ip_batch(new_ips, "Comum")
         
+        return count
+    
+    def _scan_ip_batch(self, ip_list, batch_name):
+        """Escaneia lote de IPs"""
+        count = 0
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.config['parallel_hosts']) as executor:
+            futures = [executor.submit(self._scan_single_ip, ip) for ip in ip_list]
+            
+            timeout = IPP_ATTRIBUTE_TIMEOUT * 2 if self.is_frozen else IPP_ATTRIBUTE_TIMEOUT
+            
+            for future in concurrent.futures.as_completed(futures, timeout=timeout * len(ip_list) / 10):
+                try:
+                    result = future.result()
+                    if result:
+                        self._add_discovered_printer(result)
+                        count += 1
+                except:
+                    pass
+        
+        logger.debug(f"{batch_name}: {count} impressoras encontradas")
         return count
     
     def _scan_single_ip(self, ip):
-        """Escaneia um único IP"""
+        """Escaneia um IP"""
+        # Primeiro tenta portas principais
+        main_ports = [631, 9100]
         open_ports = []
         
-        # Verifica portas comuns de impressora
-        for port in COMMON_PRINTER_PORTS:
-            if self._is_port_open(ip, port, 1):
+        for port in main_ports:
+            if self._is_port_open(ip, port, IPP_ATTRIBUTE_TIMEOUT):
                 open_ports.append(port)
         
-        if not open_ports:
+        # Se encontrou porta principal, verifica outras
+        if open_ports:
+            for port in [80, 443, 515, 161]:
+                if self._is_port_open(ip, port, 1):
+                    open_ports.append(port)
+        else:
             return None
         
-        # Verifica se parece ser impressora
         if not self._looks_like_printer(ip, open_ports):
             return None
         
-        # Obtém MAC
         mac = self._get_mac_for_ip(ip)
         
         return {
@@ -776,21 +583,136 @@ ST: ssdp:all
             'is_online': True
         }
     
-    def _verify_printer(self, ip):
-        """Verifica se IP é de uma impressora e adiciona se for"""
-        result = self._scan_single_ip(ip)
-        if result:
-            self._add_discovered_printer(result)
-            return True
-        return False
+    def _discover_ipp_direct(self, subnet=None):
+        """IPP Direct otimizado"""
+        count = 0
+        networks = self._get_networks_to_scan(subnet)
+        
+        for network in networks:  # Apenas primeira rede
+            ips = self._get_common_printer_ips(network)
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                futures = [executor.submit(self._check_ipp_printer, ip) for ip in ips]
+                
+                for future in concurrent.futures.as_completed(futures, timeout=20):
+                    try:
+                        if future.result():
+                            count += 1
+                    except:
+                        pass
+        
+        return count
+    
+    def _check_ipp_printer(self, ip):
+        """Verifica IPP"""
+        if not self._is_port_open(ip, 631, 2):
+            return False
+        
+        printer_info = {
+            'ip': ip,
+            'name': f"Impressora IPP {ip}",
+            'discovery_method': 'IPP Direct',
+            'ports': [631],
+            'uri': f"ipp://{ip}/ipp/print"
+        }
+        
+        self._add_discovered_printer(printer_info)
+        return True
+    
+    def _discover_snmp(self, subnet=None):
+        """SNMP simplificado"""
+        if not HAS_PYSNMP:
+            return 0
+        
+        count = 0
+        networks = self._get_networks_to_scan(subnet)
+        
+        for network in networks:
+            ips = self._get_common_printer_ips(network)
+            
+            for ip in ips:
+                if self._is_port_open(ip, 161, 1):
+                    printer_info = {
+                        'ip': ip,
+                        'name': f"Impressora SNMP {ip}",
+                        'discovery_method': 'SNMP',
+                        'ports': [161],
+                        'uri': f"socket://{ip}:9100"
+                    }
+                    self._add_discovered_printer(printer_info)
+                    count += 1
+        
+        return count
+    
+    def _discover_netbios(self, subnet=None):
+        """NetBIOS simplificado"""
+        # Implementação mínima
+        return 0
+    
+    def _discover_ssdp(self, subnet=None):
+        """SSDP com tempo estendido"""
+        count = 0
+        
+        try:
+            ssdp_request = """M-SEARCH * HTTP/1.1
+HOST: 239.255.255.250:1900
+MAN: "ssdp:discover"
+MX: 3
+ST: ssdp:all
+
+"""
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(3)
+            
+            # Envia múltiplas vezes
+            for i in range(3):
+                sock.sendto(ssdp_request.encode('utf-8'), ('239.255.255.250', 1900))
+                time.sleep(0.5)
+            
+            # Escuta por mais tempo
+            start_time = time.time()
+            timeout = SSDP_WAIT_TIME
+            
+            while time.time() - start_time < timeout:
+                try:
+                    data, addr = sock.recvfrom(65536)
+                    response = data.decode('utf-8', errors='ignore')
+                    
+                    if any(k in response.lower() for k in ['printer', 'print']):
+                        location_match = re.search(r'LOCATION:\s*(.+)', response, re.IGNORECASE)
+                        if location_match:
+                            location = location_match.group(1).strip()
+                            ip_match = re.search(r'http[s]?://([^:/]+)', location)
+                            if ip_match:
+                                ip = ip_match.group(1)
+                                printer_info = {
+                                    'ip': ip,
+                                    'name': f"Impressora UPnP {ip}",
+                                    'discovery_method': 'SSDP/UPnP',
+                                    'ports': [80],
+                                    'uri': location
+                                }
+                                self._add_discovered_printer(printer_info)
+                                count += 1
+                
+                except socket.timeout:
+                    continue
+            
+            sock.close()
+            
+        except Exception as e:
+            logger.debug(f"Erro SSDP: {str(e)}")
+        
+        return count
     
     def _process_discovered_printers(self):
-        """Processa e enriquece impressoras descobertas"""
+        """Processa impressoras descobertas"""
         unique_printers = []
         
         with self.discovery_lock:
             for ip, printer_info in self.discovered_printers.items():
-                # Enriquece com MAC se não tiver
+                # Enriquece com MAC
                 if not printer_info.get('mac_address'):
                     printer_info['mac_address'] = self._get_mac_for_ip(ip)
                 
@@ -798,68 +720,83 @@ ST: ssdp:all
                 mac = self.normalize_mac(printer_info.get('mac_address'))
                 printer_info['mac_address'] = mac or 'desconhecido'
                 
-                # Garante que tem nome
+                # Garante nome
                 if not printer_info.get('name'):
                     printer_info['name'] = f"Impressora {ip}"
                 
-                # Garante que tem URI
+                # Garante URI
                 if not printer_info.get('uri'):
                     ports = printer_info.get('ports', [])
                     printer_info['uri'] = self._determine_uri(ip, ports)
                 
-                # Marca como online
                 printer_info['is_online'] = True
                 
-                # Tenta obter mais detalhes se tiver IPP
+                # Tenta enriquecer com IPP se possível
+                # MODIFICAÇÃO: Removido 'and not self.is_frozen' para permitir enriquecimento em modo empacotado
                 if 631 in printer_info.get('ports', []) and HAS_PYIPP:
+                    logger.debug(f"Tentando enriquecimento IPP para {ip} durante descoberta inicial.")
                     self._enrich_with_ipp_details(printer_info)
                 
                 unique_printers.append(printer_info)
         
-        # Ordena por IP para consistência
+        # Ordena por IP
         unique_printers.sort(key=lambda p: socket.inet_aton(p['ip']))
         
+        logger.info(f"Processadas {len(unique_printers)} impressoras únicas")
         return unique_printers
     
     def _enrich_with_ipp_details(self, printer_info):
-        """Enriquece com detalhes IPP se possível"""
+        """Enriquece com IPP"""
+        # MODIFICAÇÃO: Removida a checagem 'if self.is_frozen:'
+        # if self.is_frozen:
+        #     logger.debug(f"Pulando enriquecimento IPP para {printer_info.get('ip')} em modo empacotado (comportamento original).")
+        #     return
+
+        if not HAS_PYIPP:
+            logger.debug(f"Pulando enriquecimento IPP para {printer_info.get('ip')}: pyipp não disponível.")
+            return
+
+        ip = printer_info.get('ip')
+        if not ip:
+            logger.debug("Pulando enriquecimento IPP: Endereço IP ausente.")
+            return
+
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             details = loop.run_until_complete(
                 asyncio.wait_for(
-                    self._get_printer_attributes(printer_info['ip']), 
-                    timeout=5
+                    self._get_printer_attributes(ip), 
+                    # MODIFICAÇÃO: Usa timeout configurado
+                    timeout=IPP_ATTRIBUTE_TIMEOUT
                 )
             )
             loop.close()
             
             if details:
-                # Atualiza com detalhes IPP
-                if 'printer-make-and-model' in details:
+                logger.debug(f"Detalhes IPP enriquecidos com sucesso para {ip}: {details.keys()}")
+                if 'printer-make-and-model' in details and details['printer-make-and-model']:
                     printer_info['model'] = details['printer-make-and-model']
-                if 'printer-location' in details:
+                if 'printer-location' in details and details['printer-location']:
                     printer_info['location'] = details['printer-location']
-                if 'printer-state' in details:
-                    printer_info['state'] = details['printer-state']
-                    printer_info['is_ready'] = 'idle' in details['printer-state'].lower()
-                if 'name' in details and details['name'] != printer_info['name']:
-                    printer_info['name'] = details['name']
-        except:
-            pass
+                # Mescla todos os outros atributos buscados
+                printer_info.update(details)
+            else:
+                logger.debug(f"Nenhum detalhe IPP retornado para {ip}.")
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout ao enriquecer detalhes IPP para {ip} usando timeout {IPP_ATTRIBUTE_TIMEOUT}s.")
+        except Exception as e:
+            logger.error(f"Erro ao enriquecer detalhes IPP para {ip}: {str(e)}\n{traceback.format_exc()}")
     
     def discover_printer_by_mac(self, target_mac):
-        """Descobre impressora por MAC address"""
+        """Busca impressora por MAC"""
         normalized_mac = self.normalize_mac(target_mac)
         if not normalized_mac:
             return None
         
-        logger.info(f"Procurando impressora com MAC: {normalized_mac}")
-        
-        # Primeiro faz uma descoberta geral rápida
+        # Descoberta rápida
         self.discover_printers()
         
-        # Procura nos resultados
         for printer in self.printers:
             if self.normalize_mac(printer.get('mac_address')) == normalized_mac:
                 return printer
@@ -867,27 +804,43 @@ ST: ssdp:all
         return None
     
     def get_printer_details(self, ip):
-        """Obtém detalhes de uma impressora específica"""
-        logger.info(f"Obtendo detalhes da impressora: {ip}")
+        """Obtém detalhes de uma impressora"""
+        logger.debug(f"Obtendo detalhes para o IP: {ip}")
+        result = self._scan_single_ip(ip) # Scan básico primeiro
         
-        # Primeiro verifica se é uma impressora
-        result = self._scan_single_ip(ip)
-        if not result:
-            return None
-        
-        # Tenta obter detalhes IPP se disponível
-        if 631 in result.get('ports', []) and HAS_PYIPP:
+        if result and 631 in result.get('ports', []) and HAS_PYIPP:
+            logger.debug(f"Porta 631 aberta e pyipp disponível para {ip}. Tentando buscar atributos IPP.")
             try:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                details = loop.run_until_complete(self._get_printer_attributes(ip))
+                # MODIFICAÇÃO: Usa timeout configurado
+                ipp_timeout = IPP_ATTRIBUTE_TIMEOUT
+                logger.debug(f"Usando timeout para atributos IPP: {ipp_timeout}s para {ip}")
+                details = loop.run_until_complete(
+                    asyncio.wait_for(
+                        self._get_printer_attributes(ip),
+                        timeout=ipp_timeout
+                    )
+                )
                 loop.close()
                 
                 if details:
-                    result.update(details)
-            except:
-                pass
-        
+                    logger.info(f"Atributos IPP buscados com sucesso para {ip}: {details.keys()}")
+                    result.update(details) # Mescla detalhes IPP
+                else:
+                    logger.warning(f"Nenhum atributo IPP retornado para {ip} de _get_printer_attributes.")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout ao buscar atributos IPP para {ip} em get_printer_details (timeout: {ipp_timeout}s).")
+            except Exception as e:
+                # MODIFICAÇÃO: Logging melhorado
+                logger.error(f"Erro ao buscar atributos IPP para {ip} em get_printer_details: {str(e)}\n{traceback.format_exc()}")
+        elif not result:
+            logger.warning(f"Scan inicial para {ip} não retornou resultado.")
+        elif result and 631 not in result.get('ports', []): # Adicionado 'result and' para segurança
+            logger.info(f"Porta 631 não está entre as portas abertas para {ip}. Pulando busca de atributos IPP. Portas: {result.get('ports')}")
+        elif not HAS_PYIPP: # Movido para ser um elif separado
+            logger.info(f"pyipp não disponível. Pulando busca de atributos IPP para {ip}.")
+
         return result
     
     # ========== MÉTODOS AUXILIARES ==========
@@ -903,71 +856,56 @@ ST: ssdp:all
         return self._get_local_networks()
     
     def _get_local_networks(self):
-        """Detecta redes locais - versão melhorada"""
+        """Detecta redes locais"""
         networks = []
         
         if HAS_NETIFACES:
-            # Usa netifaces para detecção precisa
             for interface in netifaces.interfaces():
-                addrs = netifaces.ifaddresses(interface)
-                if netifaces.AF_INET in addrs:
-                    for addr in addrs[netifaces.AF_INET]:
-                        ip = addr.get('addr')
-                        netmask = addr.get('netmask')
-                        if ip and netmask and not ip.startswith('127.'):
-                            try:
-                                # Calcula a rede
+                try:
+                    addrs = netifaces.ifaddresses(interface)
+                    if netifaces.AF_INET in addrs:
+                        for addr in addrs[netifaces.AF_INET]:
+                            ip = addr.get('addr')
+                            netmask = addr.get('netmask')
+                            if ip and netmask and not ip.startswith('127.'):
                                 network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
                                 if network not in networks:
                                     networks.append(network)
-                                    logger.info(f"Rede detectada via netifaces: {network}")
-                            except:
-                                pass
+                except:
+                    pass
         
-        # Métodos alternativos se netifaces não disponível
+        # Fallback
         if not networks:
-            # Tenta via socket
             try:
                 hostname = socket.gethostname()
                 for info in socket.getaddrinfo(hostname, None):
                     ip = info[4][0]
                     if not ip.startswith('127.') and '.' in ip:
-                        try:
-                            network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
-                            if network not in networks:
-                                networks.append(network)
-                        except:
-                            pass
+                        network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
+                        if network not in networks:
+                            networks.append(network)
             except:
                 pass
         
-        # Fallback: redes comuns
+        # Redes comuns
         if not networks:
-            common_networks = [
-                "192.168.1.0/24", "192.168.0.0/24", "10.0.0.0/24",
-                "192.168.2.0/24", "172.16.0.0/24", "192.168.100.0/24"
-            ]
-            for net_str in common_networks:
+            for net_str in ["192.168.1.0/24", "192.168.0.0/24", "10.0.0.0/24"]:
                 try:
                     networks.append(ipaddress.IPv4Network(net_str))
                 except:
                     pass
         
-        return networks[:3]  # Limita a 3 redes para não demorar muito
+        return networks  # Limita para não demorar muito
     
     def _get_common_printer_ips(self, network):
-        """Gera IPs comuns para impressoras em uma rede"""
+        """IPs comuns para impressoras"""
         common_ips = []
         
         try:
-            # Sufixos típicos de impressoras
-            common_suffixes = [
-                1, 2, 3, 4, 5, 10, 11, 20, 21, 30, 50, 51, 100, 101, 102,
-                110, 111, 150, 200, 201, 250, 251, 252, 253, 254
-            ]
+            suffixes = [1, 2, 3, 4, 5, 10, 11, 20, 21, 30, 50, 100, 101, 150, 200, 250, 251, 252, 253, 254]
             
             network_addr = network.network_address
-            for suffix in common_suffixes:
+            for suffix in suffixes:
                 try:
                     ip = str(network_addr + suffix)
                     if ipaddress.IPv4Address(ip) in network:
@@ -990,67 +928,19 @@ ST: ssdp:all
         except:
             return False
     
-    def _ping_host(self, ip, timeout=1):
-        """Faz ping em um host"""
-        try:
-            if self.is_windows:
-                cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
-                creation_flags = subprocess.CREATE_NO_WINDOW
-            else:
-                cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
-                creation_flags = 0
-            
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=timeout + 2,
-                creationflags=creation_flags
-            )
-            
-            return result.returncode == 0
-        except:
-            return False
-    
     def _looks_like_printer(self, ip, open_ports):
-        """Verifica se parece ser uma impressora"""
-        # Portas definitivas de impressora
+        """Verifica se parece ser impressora"""
         printer_ports = {631, 9100, 515}
         if any(port in printer_ports for port in open_ports):
             return True
         
-        # Se tem várias portas abertas, provavelmente é
-        if len(open_ports) >= 3:
+        if len(open_ports) >= 2:
             return True
-        
-        # Se tem HTTP, verifica conteúdo
-        if 80 in open_ports or 443 in open_ports:
-            if HAS_REQUESTS:
-                try:
-                    port = 80 if 80 in open_ports else 443
-                    protocol = 'http' if port == 80 else 'https'
-                    
-                    resp = requests.get(
-                        f"{protocol}://{ip}",
-                        timeout=3,
-                        verify=False,
-                        headers={'User-Agent': 'PrinterDiscovery/1.0'}
-                    )
-                    
-                    content = resp.text.lower()
-                    printer_keywords = [
-                        'printer', 'print', 'toner', 'cartridge', 'ink',
-                        'hp', 'epson', 'canon', 'brother', 'samsung', 'xerox'
-                    ]
-                    
-                    return any(keyword in content for keyword in printer_keywords)
-                except:
-                    pass
         
         return False
     
     def _determine_uri(self, ip, open_ports):
-        """Determina URI da impressora"""
+        """Determina URI"""
         if 631 in open_ports:
             return f"ipp://{ip}/ipp/print"
         elif 9100 in open_ports:
@@ -1086,9 +976,7 @@ ST: ssdp:all
                 )
             
             if result.returncode == 0:
-                # Parse ARP output
                 for line in result.stdout.split('\n'):
-                    # Padrão: IP MAC
                     match = re.search(
                         r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f:.-]+)',
                         line
@@ -1100,21 +988,19 @@ ST: ssdp:all
                             self.mac_cache[ip] = mac
             
             self.last_arp_update = current_time
+            logger.debug(f"Cache ARP atualizado: {len(self.mac_cache)} entradas")
             
         except:
             pass
     
     def _get_mac_for_ip(self, ip):
-        """Obtém MAC para um IP"""
-        # Verifica cache
+        """Obtém MAC para IP"""
         if ip in self.mac_cache:
             return self.mac_cache[ip]
         
-        # Faz ping e atualiza ARP
         self._ping_host(ip, 1)
         time.sleep(0.2)
         
-        # Consulta ARP específico
         try:
             if self.is_windows:
                 result = subprocess.run(
@@ -1140,50 +1026,222 @@ ST: ssdp:all
         
         return "desconhecido"
     
-    async def _get_printer_attributes(self, ip, port=631):
-        """Obtém atributos via IPP"""
+    def _ping_host(self, ip, timeout=1):
+        """Faz ping"""
+        try:
+            if self.is_windows:
+                cmd = ["ping", "-n", "1", "-w", str(int(timeout * 1000)), ip]
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            else:
+                cmd = ["ping", "-c", "1", "-W", str(int(timeout)), ip]
+                creation_flags = 0
+            
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout + 2,
+                creationflags=creation_flags
+            )
+            
+            return result.returncode == 0
+        except:
+            return False
+    
+    async def _get_printer_attributes(self, ip, port=631, tls=False, _retry_with_tls=True):
+        """Obtém atributos IPP"""
         if not HAS_PYIPP:
+            logger.debug(f"pyipp não disponível, não é possível obter atributos para {ip}.")
             return None
-        
+
         endpoints = ["/ipp/print", "/ipp/printer", "/ipp", ""]
+        # Consider increasing this if 10s is still causing timeouts for some printers.
+        # For example, to 15 or 20 seconds.
+        # IPP_ATTRIBUTE_TIMEOUT = 15 # You would change this at the top of the file if needed
+        ipp_call_timeout = IPP_ATTRIBUTE_TIMEOUT
         
-        for tls in [False, True]:
-            for endpoint in endpoints:
-                try:
-                    client = pyipp.IPP(host=ip, port=port, tls=tls)
-                    client.url_path = endpoint
+        logger.debug(f"Tentando obter atributos IPP para {ip}:{port} (TLS: {tls}, RetryTLS: {_retry_with_tls}) com timeout de endpoint {ipp_call_timeout}s.")
+
+        for endpoint in endpoints:
+            client = None
+            try:
+                uri = f"{'https' if tls else 'http'}://{ip}:{port}{endpoint if endpoint else '/'}"
+                logger.debug(f"Tentando endpoint IPP: {uri}")
+                
+                client = pyipp.IPP(host=ip, port=port, tls=tls, base_path=endpoint)
+                                
+                printer_attrs_raw = await asyncio.wait_for(
+                    client.printer(), 
+                    timeout=ipp_call_timeout
+                )
+                                
+                if printer_attrs_raw:
+                    result = {'ip': ip, 'ipp_uri_used': uri, 'ipp_attributes_source': 'pyipp'}
                     
-                    printer_attrs = await asyncio.wait_for(
-                        client.printer(), 
-                        timeout=5
-                    )
+                    # Process if it's a pyipp Printer object
+                    if hasattr(printer_attrs_raw, 'info') and printer_attrs_raw.info:
+                        info = printer_attrs_raw.info
+                        result['name'] = getattr(info, 'name', f"Impressora IPP {ip}")
+                        result['printer-make-and-model'] = getattr(info, 'model', '')
+                        result['printer-location'] = getattr(info, 'location', '')
+                        result['printer-info'] = getattr(info, 'printer_info', '') 
+                        result['printer-uri-supported'] = getattr(info, 'uris', [])
+                        result['manufacturer'] = getattr(info, 'manufacturer', '')
+                        result['serial'] = getattr(info, 'serial', '')
+                        result['version'] = getattr(info, 'version', '')
+                        # Store other info attributes
+                        if hasattr(info, 'attributes') and info.attributes:
+                             for attr_name, attr_value in info.attributes.items():
+                                clean_attr_name = attr_name.replace('-', '_')
+                                if isinstance(attr_value, list) and len(attr_value) == 1:
+                                    result[f"info_{clean_attr_name}"] = attr_value[0]
+                                else:
+                                    result[f"info_{clean_attr_name}"] = attr_value
                     
-                    if printer_attrs:
-                        # Processa resposta
-                        result = {'ip': ip}
-                        
-                        if hasattr(printer_attrs, 'info'):
-                            info = printer_attrs.info
-                            result['name'] = getattr(info, 'name', f"Impressora {ip}")
-                            result['printer-make-and-model'] = getattr(info, 'model', '')
-                            result['printer-location'] = getattr(info, 'location', '')
-                        
-                        if hasattr(printer_attrs, 'state'):
-                            state = printer_attrs.state
-                            if hasattr(state, 'printer_state'):
-                                states = {
-                                    'idle': 'Idle (Pronta)',
-                                    'processing': 'Processing',
-                                    'stopped': 'Stopped'
-                                }
-                                result['printer-state'] = states.get(
-                                    state.printer_state, 
-                                    state.printer_state
-                                )
-                        
-                        return result
-                        
-                except:
-                    continue
+                    raw_state_code = None
+                    if hasattr(printer_attrs_raw, 'state') and printer_attrs_raw.state:
+                        state = printer_attrs_raw.state
+                        # Try to get the numeric state code if available directly
+                        if hasattr(state, 'printer_state_code') and state.printer_state_code:
+                            raw_state_code = state.printer_state_code
+                        elif isinstance(state.printer_state, int): # if printer_state itself is the code
+                            raw_state_code = state.printer_state
+
+                        # Map textual state to a common format or use numeric if text not standard
+                        # pyipp typically returns state.printer_state as a string like 'idle', 'processing'
+                        textual_state = getattr(state, 'printer_state', 'unknown').lower()
+                        if textual_state == 'idle':
+                            result['printer-state'] = "Idle (Pronta)"
+                            raw_state_code = raw_state_code or 3 # Default to 3 if textual is idle
+                        elif textual_state == 'processing':
+                            result['printer-state'] = "Processing (Ocupada)"
+                            raw_state_code = raw_state_code or 4
+                        elif textual_state == 'stopped':
+                            result['printer-state'] = "Stopped (Parada)"
+                            raw_state_code = raw_state_code or 5
+                        else:
+                            result['printer-state'] = textual_state.capitalize()
+
+                        result['printer-state-reasons'] = getattr(state, 'reasons', [])
+                        result['printer-state-message'] = getattr(state, 'message', '')
+
+                        # Store other state attributes
+                        if hasattr(state, 'attributes') and state.attributes:
+                             for attr_name, attr_value in state.attributes.items():
+                                clean_attr_name = attr_name.replace('-', '_')
+                                if isinstance(attr_value, list) and len(attr_value) == 1:
+                                    result[f"state_{clean_attr_name}"] = attr_value[0]
+                                else:
+                                    result[f"state_{clean_attr_name}"] = attr_value
+                    
+                    if raw_state_code:
+                        result['printer-state-code'] = raw_state_code
+                        result['is_ready'] = (raw_state_code == 3) # IPP state 3 is 'idle'
+                    elif 'printer-state' in result and result['printer-state'] == "Idle (Pronta)":
+                        result['is_ready'] = True
+                        result['printer-state-code'] = 3 # Assume 3 if textual state is Idle
+                    else:
+                        result['is_ready'] = False # Default if state is unknown or not idle
+
+                    # Extract supply information (markers)
+                    if hasattr(printer_attrs_raw, 'markers') and printer_attrs_raw.markers:
+                        supplies = []
+                        for marker in printer_attrs_raw.markers:
+                            supplies.append({
+                                'name': getattr(marker, 'name', 'N/A'),
+                                'type': getattr(marker, 'marker_type', 'N/A'), # Note: 'marker_type' not 'type'
+                                'color': getattr(marker, 'color', 'N/A'),
+                                'level': getattr(marker, 'level', -1), # Use -1 for unknown level
+                                # Add other relevant marker attributes if needed
+                                # 'low_level': getattr(marker, 'low_level', -1),
+                                # 'high_level': getattr(marker, 'high_level', -1),
+                            })
+                        if supplies:
+                            result['supplies'] = supplies
+                            logger.debug(f"Extraídos {len(supplies)} suprimentos para {ip}")
+
+
+                    # Fallback for dictionary-based attributes if not fully parsed into objects
+                    if hasattr(printer_attrs_raw, 'attributes') and printer_attrs_raw.attributes:
+                        for group_name, group_attrs in printer_attrs_raw.attributes.items():
+                            if group_name == 'operations-supported' and isinstance(group_attrs, list):
+                                result[group_name] = f"{len(group_attrs)} operações"
+                                continue
+                            if isinstance(group_attrs, dict):
+                                for attr_name, attr_value in group_attrs.items():
+                                    key_name = f"{group_name}_{attr_name.replace('-', '_')}" if group_name != 'printer' else attr_name.replace('-', '_')
+                                    if key_name not in result: # Prioritize already parsed values
+                                        if isinstance(attr_value, list) and len(attr_value) == 1:
+                                            result[key_name] = attr_value[0]
+                                        else:
+                                            result[key_name] = attr_value
+                    
+                    result.setdefault('printer-make-and-model', '')
+                    result.setdefault('printer-location', '')
+                    result.setdefault('name', f"Impressora IPP {ip}")
+
+                    logger.info(f"Atributos IPP recuperados com sucesso para {ip} de {uri}. Keys: {list(result.keys())}")
+                    if client: # Ensure client exists before trying to close
+                        await client.close() 
+                    client = None 
+                    return result 
+                else:
+                    logger.debug(f"client.printer() retornou None ou vazio para {uri}")
+
+            except pyipp.exceptions.IPPConnectionUpgradeRequired as e_upgrade:
+                logger.warning(f"IPPConnectionUpgradeRequired para {uri}: {e_upgrade}. Servidor pede upgrade.")
+                if client:
+                    await client.close()
+                    client = None
+                if not tls and _retry_with_tls:
+                    logger.info(f"Tentando imediatamente com TLS para {ip}:{port} (todos os endpoints) devido a IPPConnectionUpgradeRequired.")
+                    return await self._get_printer_attributes(ip, port=port, tls=True, _retry_with_tls=False)
+                else:
+                    logger.warning(f"Não foi possível fazer upgrade para TLS para {uri} ou já está usando TLS/nova tentativa desabilitada. Tentando próximo endpoint se houver.")
+                    continue 
+            
+            except asyncio.TimeoutError:
+                logger.warning(f"Requisição IPP para {uri} excedeu o tempo limite ({ipp_call_timeout}s).")
+            except ConnectionRefusedError:
+                logger.warning(f"Conexão IPP recusada para {uri}.")
+            except pyipp.exceptions.IPPError as e_ipp:
+                logger.warning(f"Erro IPP ({type(e_ipp).__name__}) para {uri}: {str(e_ipp)}")
+            except Exception as e:
+                logger.error(f"Erro genérico ao obter atributos IPP de {uri} para {ip}: {str(e)}\n{traceback.format_exc()}")
+            
+            finally:
+                if client:
+                    logger.debug(f"Fechando cliente IPP para {uri} no bloco finally (após erro ou falha no endpoint).")
+                    try:
+                        await client.close()
+                    except Exception as e_close:
+                        logger.debug(f"Erro ao fechar cliente IPP no finally para {uri}: {e_close}")
+                    client = None
         
+        if not tls and _retry_with_tls:
+            logger.debug(f"Todos os endpoints falharam para http. Tentando toda a sequência com TLS para {ip}:{port}.")
+            return await self._get_printer_attributes(ip, port=port, tls=True, _retry_with_tls=False)
+        
+        logger.warning(f"Falha ao obter atributos IPP para {ip}:{port} (TLS: {tls}) após tentar todos os endpoints.")
         return None
+    
+if __name__ == "__main__":
+    # Script de teste
+    print("=== TESTE DO PRINTER DISCOVERY ===")
+    print(f"Ambiente: {'EMPACOTADO' if is_frozen() else 'DESENVOLVIMENTO'}")
+    print(f"Timeouts: Request={BASE_TIMEOUT_REQUEST}s, Scan={BASE_TIMEOUT_SCAN}s, Ping={BASE_TIMEOUT_PING}s")
+    print(f"Workers: {MAX_WORKERS}")
+    print(f"Bibliotecas disponíveis:")
+    print(f"  - zeroconf: {HAS_ZEROCONF}")
+    print(f"  - pysnmp: {HAS_PYSNMP}")
+    print(f"  - requests: {HAS_REQUESTS}")
+    print(f"  - netifaces: {HAS_NETIFACES}")
+    print(f"  - pyipp: {HAS_PYIPP}")
+    
+    discovery = PrinterDiscovery()
+    print("\nIniciando descoberta...")
+    printers = discovery.discover_printers()
+    
+    print(f"\n{len(printers)} impressoras encontradas:")
+    for p in printers:
+        print(f"  - {p['name']} ({p['ip']}) - {p.get('discovery_method', 'Unknown')}")

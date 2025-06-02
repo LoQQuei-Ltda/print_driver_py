@@ -527,6 +527,7 @@ async def get_ipp_attributes(ip, port=631):
             url = f"{url_base}{endpoint}"
             print(f"Tentando conectar via {protocol_name}: {url}...")
             
+            client = None
             try:
                 # Cria cliente IPP com o modo TLS configurado
                 client = pyipp.IPP(host=ip, port=port, tls=tls_mode)
@@ -553,7 +554,19 @@ async def get_ipp_attributes(ip, port=631):
                         return {"ip": ip, "raw_data": str(printer_attrs)}
             except Exception as e:
                 print(f"Tentativa com {protocol_name} e endpoint {endpoint} falhou: {str(e)}")
-                continue
+            finally:
+                # Fecha a sessão do cliente para evitar warnings
+                if client and hasattr(client, '_session') and client._session:
+                    try:
+                        await client._session.close()
+                    except Exception:
+                        pass
+                # Alternativa: tenta fechar o cliente diretamente se houver método close
+                if client and hasattr(client, 'close'):
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
     
     # Se chegou aqui, não conseguiu conectar-se com nenhum protocolo/endpoint
     print(f"✗ Não foi possível conectar à impressora em {ip}:{port} usando IPP")

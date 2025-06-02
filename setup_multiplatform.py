@@ -134,6 +134,10 @@ try:
     import asyncio
     import ssl
     import certifi
+    import zeroconf
+    import pysnmp
+    import netifaces
+    import requests
 except Exception as e:
     print(f"Erro ao importar módulos no runtime hook: {e}")
 '''
@@ -188,8 +192,8 @@ app = BUNDLE(
     icon='{icon_path}',
     bundle_identifier='br.com.loqquei.printmanagementsystem',
     info_plist={{
-        'CFBundleShortVersionString': '2.0.1',
-        'CFBundleVersion': '2.0.1',
+        'CFBundleShortVersionString': '2.0.2',
+        'CFBundleVersion': '2.0.2',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
         'NSAppleScriptEnabled': False,
@@ -330,6 +334,11 @@ all_hiddenimports = [
     # Codecs necessários
     'encodings', 'encodings.utf_8', 'encodings.ascii',
     'encodings.latin_1', 'encodings.cp1252',
+
+    'zeroconf', 'zeroconf._utils', 'zeroconf._services',
+    'pysnmp', 'pysnmp.hlapi', 'pysnmp.smi',
+    'netifaces', 'requests', 'urllib3',
+    'certifi', 'charset_normalizer', 
 ]
 
 # Adiciona todos os submódulos do pyipp
@@ -373,7 +382,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.1"
+APP_VERSION = "2.0.2"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências comuns para todas as plataformas
@@ -390,6 +399,11 @@ install_requires = [
     "flask>=3.1.1",
     'flask_cors>=6.0.0',
     "pyinstaller>=5.0.0",
+    "python-nmap>=0.7.1",
+    "pysnmp>=7.1.20",
+    "netifaces>=0.11.0",
+    "wsdiscovery>=2.1.2",
+    "zeroconf>=0.147.0",
 ]
 
 # Adiciona dependências específicas da plataforma

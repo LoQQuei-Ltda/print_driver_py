@@ -1796,52 +1796,85 @@ class PrinterDetailsDialog(wx.Dialog):
         Args:
             details: Detalhes da impressora
         """
+        # Check if the dialog or its main panel is being deleted or doesn't exist
+        if not self or not hasattr(self, 'panel') or not self.panel or self.IsBeingDeleted():
+            logger.warning("PrinterDetailsDialog ou seu painel principal não existe mais ou está sendo deletado. Abortando atualização da UI.")
+            return
+
         if not details:
+            # Safely update loading text labels
             if hasattr(self, 'summary_loading_text') and self.summary_loading_text:
                 try:
-                    self.summary_loading_text.SetLabel("Não foi possível carregar os detalhes da impressora.")
+                    if self.summary_loading_text: # Check it hasn't been set to None
+                        self.summary_loading_text.SetLabel("Não foi possível carregar os detalhes da impressora.")
                 except wx.PyDeadObjectError:
-                    self.summary_loading_text = None
+                    self.summary_loading_text = None # Mark as gone
                 
             if hasattr(self, 'loading_text') and self.loading_text:
                 try:
-                    self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
+                    if self.loading_text:
+                        self.loading_text.SetLabel("Não foi possível carregar os atributos da impressora.")
                 except wx.PyDeadObjectError:
                     self.loading_text = None
                 
             if hasattr(self, 'supplies_loading_text') and self.supplies_loading_text:
                 try:
-                    self.supplies_loading_text.SetLabel("Não foi possível carregar informações de suprimentos.")
+                    if self.supplies_loading_text:
+                        self.supplies_loading_text.SetLabel("Não foi possível carregar informações de suprimentos.")
                 except wx.PyDeadObjectError:
                     self.supplies_loading_text = None
+            
+            # Ensure layout is refreshed if elements were expected
+            if hasattr(self, 'panel') and self.panel:
+                try:
+                    self.panel.Layout()
+                except wx.PyDeadObjectError:
+                    pass # Panel is gone
             return
         
         # Atualiza a impressora com os detalhes
-        self.printer.update_from_discovery(details)
+        self.printer.update_from_discovery(details) # This should now include 'is_ready' and 'supplies'
         
-        # Atualiza cada painel - garante que apenas um será executado por vez
+        # Safely update each panel
         try:
-            self._update_summary_panel(details)
+            # Ensure the target panel for summary exists before updating
+            if hasattr(self, 'summary_panel') and self.summary_panel:
+                 self._update_summary_panel(details)
+            else:
+                logger.warning("Painel de resumo não encontrado para atualização.")
         except Exception as e:
-            logger.error(f"Erro ao atualizar resumo: {str(e)}")
+            logger.error(f"Erro ao atualizar resumo: {str(e)}", exc_info=True)
             
         try:
-            self._update_attributes_panel(details)
+            if hasattr(self, 'attributes_panel') and self.attributes_panel:
+                self._update_attributes_panel(details)
+            else:
+                logger.warning("Painel de atributos não encontrado para atualização.")
         except Exception as e:
-            logger.error(f"Erro ao atualizar atributos: {str(e)}")
+            logger.error(f"Erro ao atualizar atributos: {str(e)}", exc_info=True)
             
         try:
-            self._update_supplies_panel(details)
+            if hasattr(self, 'supplies_panel') and self.supplies_panel:
+                self._update_supplies_panel(details) # This will now show supplies
+            else:
+                logger.warning("Painel de suprimentos não encontrado para atualização.")
         except Exception as e:
-            logger.error(f"Erro ao atualizar suprimentos: {str(e)}")
+            logger.error(f"Erro ao atualizar suprimentos: {str(e)}", exc_info=True)
         
-        # Atualiza o estado de conectividade
         try:
-            self._update_connectivity_status()
+            if hasattr(self, 'connectivity_panel') and self.connectivity_panel:
+                 self._update_connectivity_status() # This will use the new 'is_ready'
+            else:
+                logger.warning("Painel de conectividade não encontrado para atualização.")
         except Exception as e:
-            logger.error(f"Erro ao atualizar status de conectividade: {str(e)}")
+            logger.error(f"Erro ao atualizar status de conectividade: {str(e)}", exc_info=True)
         
         self.details_loaded = True
+        if hasattr(self, 'panel') and self.panel: # Ensure panel exists before layout
+            try:
+                self.panel.Layout() # Refresh layout after updates
+            except wx.PyDeadObjectError:
+                logger.warning("Painel principal do PrinterDetailsDialog não existe mais ao tentar fazer layout.")
     
     def _on_refresh(self, event):
         """Manipula o clique no botão de atualizar"""
@@ -1863,15 +1896,30 @@ class PrinterDetailsDialog(wx.Dialog):
         Args:
             details: Detalhes da impressora
         """
+        if not hasattr(self, 'summary_panel') or not self.summary_panel:
+            logger.warning("summary_panel não existe em _update_summary_panel.")
+            return
+
         # Limpa o painel
         if hasattr(self, 'summary_loading_text') and self.summary_loading_text:
             try:
-                self.summary_loading_text.Destroy()
-                self.summary_loading_text = None
-            except (wx.PyDeadObjectError, Exception):
-                self.summary_loading_text = None
+                if self.summary_loading_text: # Explicit check
+                    self.summary_loading_text.Destroy()
+            except (wx.PyDeadObjectError, Exception): # Catch generic Exception if Destroy fails for other reasons
+                pass # Widget might already be gone or in a bad state
+            self.summary_loading_text = None # Clear reference
                 
-        self.summary_panel.GetSizer().Clear()
+        sizer = self.summary_panel.GetSizer()
+        if sizer:
+            sizer.Clear(delete_windows=True) # delete_windows=True will destroy child windows
+        else: # If sizer doesn't exist, can't do much. This case should ideally not happen.
+            logger.warning("Sizer do summary_panel não encontrado.")
+            # As a fallback, destroy children of the panel directly if no sizer
+            for child in self.summary_panel.GetChildren():
+                try:
+                    child.Destroy()
+                except: # pragma: no cover
+                    pass
 
         # Card para o resumo
         summary_card = wx.Panel(self.summary_panel)
@@ -1991,6 +2039,10 @@ class PrinterDetailsDialog(wx.Dialog):
         
         self.summary_panel.GetSizer().Add(summary_card, 0, wx.EXPAND | wx.ALL, 10)
         self.summary_panel.Layout()
+        
+        if sizer: # Or self.summary_panel.GetSizer() if re-fetched
+            self.summary_panel.Layout()
+            self.summary_panel.Refresh()
     
     def _add_summary_item(self, parent, sizer, label, value):
         """

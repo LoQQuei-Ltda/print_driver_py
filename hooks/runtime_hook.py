@@ -32,5 +32,9 @@ try:
     import asyncio
     import ssl
     import certifi
+    import zeroconf
+    import pysnmp
+    import netifaces
+    import requests
 except Exception as e:
     print(f"Erro ao importar módulos no runtime hook: {e}")

@@ -66,10 +66,10 @@ class AppUpdater:
                         if "APP_VERSION" in line:
                             return line.split("=")[1].strip().strip('"\'')
             
-            return "2.0.1"  # Versão padrão
+            return "2.0.2"  # Versão padrão
         except Exception as e:
             logger.error(f"Erro ao obter versão atual: {str(e)}")
-            return "2.0.1"
+            return "2.0.2"
     
     def check_for_update(self, silent=True):
         """
@@ -149,17 +149,23 @@ class AppUpdater:
             if hasattr(self.api_client, '_make_request'):
                 response = self.api_client._make_request("GET", "/desktop/update", params=params)
                 
-                # Verifica se há informações de versão no formato esperado (response.data.version)
+                # Verifica se há informações de versão no formato esperado
                 if response and isinstance(response, dict):
-                    if "data" in response and isinstance(response["data"], dict):
-                        # Obtém informações da resposta.data
-                        update_info = response["data"]
-                        logger.info(f"Versão do servidor: {update_info.get('version', 'desconhecida')}")
+                    # A API retorna: {'version': 'v2.0.2', 'updateUrl': 'https://...'}
+                    version = response.get('version')
+                    update_url = response.get('updateUrl')
+                    
+                    if version and update_url:
+                        # Normaliza o formato para compatibilidade com o resto do código
+                        update_info = {
+                            'version': version,
+                            'url': update_url  # Mapeia updateUrl para url
+                        }
+                        logger.info(f"Versão do servidor: {version}")
                         return update_info
-                    elif "version" in response:
-                        # A resposta contém a versão diretamente
-                        logger.info(f"Versão do servidor: {response.get('version', 'desconhecida')}")
-                        return response
+                    else:
+                        logger.warning("Resposta da API não contém version ou updateUrl")
+                        return None
             
             return None
         except Exception as e:
@@ -189,14 +195,35 @@ class AppUpdater:
             if response.status_code == 200:
                 response_data = response.json()
                 
-                # Tenta obter as informações do formato esperado (response.data.version)
+                # Verifica diferentes formatos de resposta possíveis
                 if "data" in response_data and isinstance(response_data["data"], dict):
-                    update_info = response_data["data"]
-                    logger.info(f"Versão do servidor: {update_info.get('version', 'desconhecida')}")
-                    return update_info
-                else:
-                    logger.info(f"Versão do servidor: {response_data.get('version', 'desconhecida')}")
-                    return response_data
+                    # Formato: {"data": {"version": "...", "updateUrl": "..."}}
+                    data = response_data["data"]
+                    version = data.get('version')
+                    update_url = data.get('updateUrl') or data.get('url')
+                    
+                    if version and update_url:
+                        update_info = {
+                            'version': version,
+                            'url': update_url
+                        }
+                        logger.info(f"Versão do servidor: {version}")
+                        return update_info
+                elif "version" in response_data:
+                    # Formato direto: {"version": "...", "updateUrl": "..."}
+                    version = response_data.get('version')
+                    update_url = response_data.get('updateUrl') or response_data.get('url')
+                    
+                    if version and update_url:
+                        update_info = {
+                            'version': version,
+                            'url': update_url
+                        }
+                        logger.info(f"Versão do servidor: {version}")
+                        return update_info
+                
+                logger.warning("Resposta do servidor não contém informações de versão válidas")
+                return None
             else:
                 logger.warning(f"Servidor retornou código {response.status_code}")
                 return None
@@ -225,14 +252,24 @@ class AppUpdater:
             remote_clean = remote_version.lstrip('v')
             
             # Converte as versões para tuples de inteiros
-            # Se a conversão falhar, tenta comparar como strings
             try:
-                current = tuple(map(int, current_clean.split('.')))
-                remote = tuple(map(int, remote_clean.split('.')))
+                current_parts = current_clean.split('.')
+                remote_parts = remote_clean.split('.')
+                
+                # Garante que ambas as versões tenham o mesmo número de partes
+                max_parts = max(len(current_parts), len(remote_parts))
+                current_parts.extend(['0'] * (max_parts - len(current_parts)))
+                remote_parts.extend(['0'] * (max_parts - len(remote_parts)))
+                
+                # Converte para inteiros
+                current = tuple(int(part) for part in current_parts)
+                remote = tuple(int(part) for part in remote_parts)
                 
                 # Compara as versões
                 result = remote > current
-            except ValueError:
+                
+            except ValueError as ve:
+                logger.warning(f"Erro ao converter versões para inteiros: {ve}")
                 # Se não conseguir converter para inteiros, compara como strings
                 # Isso é menos preciso, mas funciona para formatos não padrão
                 current_parts = current_clean.split('.')
@@ -240,7 +277,9 @@ class AppUpdater:
                 
                 # Compara cada parte das versões
                 result = False
-                for i in range(max(len(current_parts), len(remote_parts))):
+                max_parts = max(len(current_parts), len(remote_parts))
+                
+                for i in range(max_parts):
                     c_part = current_parts[i] if i < len(current_parts) else "0"
                     r_part = remote_parts[i] if i < len(remote_parts) else "0"
                     
@@ -287,8 +326,10 @@ class AppUpdater:
             
             # Nome do arquivo de atualização
             filename = os.path.basename(download_url)
-            if not filename:
-                filename = f"update-{self.update_info.get('version', 'latest')}.zip"
+            if not filename or '.' not in filename:
+                # Se não conseguir extrair o nome do arquivo da URL, usa um nome padrão
+                file_extension = ".exe" if self.system == "Windows" else ".zip"
+                filename = f"update-{self.update_info.get('version', 'latest')}{file_extension}"
             
             # Caminho completo do arquivo
             file_path = os.path.join(download_dir, filename)
@@ -299,13 +340,24 @@ class AppUpdater:
             
             # Verifica se a requisição foi bem-sucedida
             if response.status_code == 200:
+                # Obtém o tamanho total do arquivo se disponível
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded_size = 0
+                
                 # Salva o arquivo
                 with open(file_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=1024):
+                    for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
+                            downloaded_size += len(chunk)
+                            
+                            # Log do progresso a cada 10% (se o tamanho total for conhecido)
+                            if total_size > 0:
+                                progress = (downloaded_size / total_size) * 100
+                                if progress % 10 < 1:  # Log aproximadamente a cada 10%
+                                    logger.debug(f"Download: {progress:.1f}% ({downloaded_size}/{total_size} bytes)")
                 
-                logger.info(f"Atualização baixada para {file_path}")
+                logger.info(f"Atualização baixada para {file_path} ({downloaded_size} bytes)")
                 return file_path
             else:
                 logger.error(f"Erro ao baixar atualização: código {response.status_code}")
@@ -341,11 +393,48 @@ class AppUpdater:
                 self.is_updating = False
                 return False
             
-            # Aplica a atualização com privilégios elevados
-            return self._apply_update_with_privileges(update_file)
+            # Verifica se o arquivo baixado é um executável do Windows
+            if update_file.lower().endswith('.exe') and self.system == "Windows":
+                return self._apply_exe_update(update_file)
+            else:
+                # Aplica a atualização com privilégios elevados (formato ZIP)
+                return self._apply_update_with_privileges(update_file)
             
         except Exception as e:
             logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            self.is_updating = False
+            return False
+    
+    def _apply_exe_update(self, exe_file):
+        """
+        Aplica atualização usando um executável (.exe)
+        
+        Args:
+            exe_file (str): Caminho para o arquivo executável de atualização
+            
+        Returns:
+            bool: True se a atualização foi iniciada com sucesso
+        """
+        try:
+            logger.info(f"Executando atualização via executável: {exe_file}")
+            
+            # Executa o instalador de forma silenciosa
+            if self._is_admin():
+                # Se já tem privilégios, executa diretamente
+                subprocess.Popen([exe_file, '/S'], 
+                                creationflags=subprocess.CREATE_NO_WINDOW,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+            else:
+                # Executa com privilégios elevados
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_file, '/S', None, 0)
+            
+            logger.info("Instalador de atualização iniciado")
+            self.is_updating = False
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao executar instalador: {str(e)}")
             self.is_updating = False
             return False
     
