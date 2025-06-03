@@ -71,7 +71,6 @@ class PrintSyncManager:
             
             # Verifica se consegue acessar o histórico
             try:
-                # Log para debug
                 print_history = self.config.get("print_jobs", [])
                 logger.debug(f"Verificação inicial: encontrados {len(print_history)} trabalhos no histórico")
             except Exception as e:
@@ -100,7 +99,7 @@ class PrintSyncManager:
         try:
             logger.info("Iniciando sincronização de trabalhos de impressão")
             
-            # Obtém o histórico de impressão - CORRIGIDO: usa a mesma chave que PrintQueueManager
+            # Obtém o histórico de impressão
             print_history = self.config.get("print_jobs", [])
             
             # Log do histórico para debug
@@ -118,64 +117,99 @@ class PrintSyncManager:
             
             if not jobs_to_sync:
                 logger.info("Nenhum trabalho para sincronizar")
-                # self._cleanup_old_jobs()
                 self.is_syncing = False
                 if on_complete:
                     on_complete(True)
                 return
             
-            logger.info(f"{len(jobs_to_sync)} trabalhos para sincronizar")
-            
             # Sincroniza cada trabalho
+            sync_success_count = 0
+            sync_error_count = 0
+            
             for job in jobs_to_sync:
                 try:
                     # Extrai informações do trabalho
                     job_id = job.get("job_id", "")
-                    document_id = job.get("document_id", "")
+                    file_id = job.get("file_id") or job.get("document_id") or job_id
+                    asset_id = job.get("asset_id") or job.get("printer_id") or ""
                     completed_at = job.get("end_time") or job.get("completed_at")
                     pages = job.get("completed_pages", 0) or job.get("total_pages", 0)
                     
-                    # Se não tiver ID do documento, usa o caminho do arquivo
-                    if not document_id:
-                        document_id = str(uuid.uuid4())
+                    # Validações obrigatórias
+                    if not job_id:
+                        logger.warning(f"Trabalho sem job_id válido, pulando...")
+                        job["synced"] = True
+                        job["sync_error"] = "Job ID inválido"
+                        sync_error_count += 1
+                        continue
+                    
+                    if not file_id:
+                        logger.warning(f"Trabalho {job_id} sem file_id válido, usando job_id como fallback")
+                        file_id = job_id
+                    
+                    if not asset_id:
+                        logger.warning(f"Trabalho {job_id} sem asset_id válido")
+                        job["synced"] = True
+                        job["sync_error"] = "Asset ID não encontrado"
+                        sync_error_count += 1
+                        continue
+                    
+                    if not completed_at:
+                        logger.warning(f"Trabalho {job_id} sem data de conclusão")
+                        job["synced"] = True
+                        job["sync_error"] = "Data de conclusão não encontrada"
+                        sync_error_count += 1
+                        continue
+                    
+                    if pages <= 0:
+                        logger.warning(f"Trabalho {job_id} sem páginas válidas ({pages})")
+                        job["synced"] = True
+                        job["sync_error"] = "Número de páginas inválido"
+                        sync_error_count += 1
+                        continue
+                    
+                    # Prepara dados para sincronização conforme esperado pela API
+                    sync_data = {
+                        "date": completed_at,
+                        "fileId": str(file_id),
+                        "assetId": str(asset_id),
+                        "pages": int(pages)
+                    }
+                    
+                    logger.info(f"Sincronizando trabalho {job_id}: {sync_data}")
                     
                     # Sincroniza com o servidor
-                    if self.api_client and job_id and completed_at and pages > 0:
-                        self.api_client.sync_print_job(
-                            date=completed_at,
-                            file_id=job_id,
-                            asset_id=document_id,
-                            pages=pages
-                        )
-                        
+                    success = self.api_client.sync_print_job(**sync_data)
+                    
+                    if success:
                         # Marca o trabalho como sincronizado
                         job["synced"] = True
                         job["synced_at"] = datetime.now().isoformat()
+                        if "sync_error" in job:
+                            del job["sync_error"]
                         
+                        sync_success_count += 1
                         logger.info(f"Trabalho {job_id} sincronizado com sucesso")
                     else:
-                        logger.warning(f"Trabalho {job_id} não possui informações suficientes para sincronização")
-                        # Marca como sincronizado para não tentar novamente
-                        job["synced"] = True
-                        job["synced_at"] = datetime.now().isoformat()
-                        job["sync_error"] = "Informações insuficientes"
+                        logger.error(f"Falha na sincronização do trabalho {job_id}")
+                        job["sync_error"] = "Falha na chamada da API"
+                        sync_error_count += 1
                     
                 except Exception as e:
                     logger.error(f"Erro ao sincronizar trabalho {job.get('job_id')}: {str(e)}")
                     job["sync_error"] = str(e)
+                    sync_error_count += 1
             
-            # Salva o histórico atualizado - CORRIGIDO: usa a mesma chave que PrintQueueManager
+            # Salva o histórico atualizado
             self.config.set("print_jobs", print_history)
             
-            # Limpa trabalhos antigos
-            # self._cleanup_old_jobs()
-            
-            logger.info("Sincronização de trabalhos concluída")
+            logger.info(f"Sincronização concluída: {sync_success_count} sucessos, {sync_error_count} erros")
             
         except Exception as e:
             logger.error(f"Erro na thread de sincronização: {str(e)}")
             if on_complete:
                 on_complete(False)
+            return
         finally:
             self.is_syncing = False
             if on_complete:
@@ -235,6 +269,10 @@ class PrintSyncManager:
         Returns:
             bool: True se a sincronização foi concluída com sucesso
         """
+        if self.is_syncing:
+            logger.info("Sincronização já em andamento")
+            return False
+        
         sync_complete = threading.Event()
         sync_result = [False]  # Lista para armazenar o resultado
         
@@ -244,10 +282,13 @@ class PrintSyncManager:
         
         # Inicia a sincronização
         if not self.sync_print_jobs(on_sync_complete):
+            logger.error("Falha ao iniciar sincronização")
             return False
         
         # Aguarda a conclusão
-        sync_complete.wait(timeout)
+        if not sync_complete.wait(timeout):
+            logger.warning(f"Timeout na sincronização após {timeout} segundos")
+            return False
         
         # Retorna o resultado
         return sync_result[0]
