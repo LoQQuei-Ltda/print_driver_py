@@ -755,7 +755,8 @@ class IPPPrinter:
         return False
         
     def print_file(self, file_path: str, options: PrintOptions, 
-               job_name: Optional[str] = None, progress_callback=None) -> Tuple[bool, Dict]:
+               job_name: Optional[str] = None, progress_callback=None, 
+               job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
         """Imprime um arquivo PDF com fallback automático para JPG e discovery de endpoints"""
         
         if not os.path.exists(file_path):
@@ -805,7 +806,7 @@ class IPPPrinter:
         if progress_callback:
             progress_callback("Tentativa 2: Convertendo para JPG e enviando...")
         
-        success, result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback)
+        success, result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback, job_info)
         
         if success:
             logger.info("Impressão JPG enviada com sucesso!")
@@ -905,7 +906,8 @@ class IPPPrinter:
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
 
-    def _convert_and_print_as_jpg(self, pdf_path: str, job_name: str, options: PrintOptions, progress_callback=None) -> Tuple[bool, Dict]:
+    def _convert_and_print_as_jpg(self, pdf_path: str, job_name: str, options: PrintOptions, 
+                              progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
         """Converte PDF para JPG e tenta imprimir - IGUAL AO CÓDIGO DE TESTE"""
         
         temp_folder = None
@@ -1007,7 +1009,7 @@ class IPPPrinter:
                 logger.info(f"  - {os.path.basename(page_job.image_path)}")
             
             # Processa as páginas com sistema de retry e discovery de endpoints
-            return self._process_pages_with_retry(page_jobs, options, progress_callback)
+            return self._process_pages_with_retry(page_jobs, options, progress_callback, job_info)
             
         except Exception as e:
             logger.error(f"Erro na conversão/preparação JPG: {e}")
@@ -1016,7 +1018,8 @@ class IPPPrinter:
             return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
 
     
-    def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions, progress_callback=None) -> bool:
+    def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions, 
+                              progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
         """Processa páginas com sistema de retry inteligente e discovery de endpoints"""
         
         # Descobre endpoints disponíveis
@@ -1035,9 +1038,33 @@ class IPPPrinter:
             if not failed_pages:
                 break
                 
+            if job_info and job_info.status == "canceled":
+                logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} antes de processar páginas na tentativa {attempt + 1}.")
+                
+                for pj in failed_pages:
+                    if progress_callback:
+                        wx.CallAfter(progress_callback, f"Página {pj.page_num} não enviada (trabalho cancelado).")
+
+                result = {
+                    "total_pages": len(page_jobs),
+                    "successful_pages": len(successful_pages),
+                    "failed_pages": len(page_jobs) - len(successful_pages),
+                    "method": "jpg",
+                    "status": "canceled",
+                    "message": "Trabalho cancelado pelo usuário durante o processamento de páginas."
+                }
+                return False, result
+
             current_failed = []
             
             for page_job in failed_pages:
+                if job_info and job_info.status == "canceled":
+                    logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} ao tentar enviar a página {page_job.page_num}.")
+
+                    if progress_callback:
+                        wx.CallAfter(progress_callback, f"Página {page_job.page_num} não enviada (trabalho cancelado).")
+                    continue
+                
                 page_job.attempts += 1
                 
                 logger.info(f"Enviando página {page_job.page_num}/{len(page_jobs)} como JPG (tentativa {page_job.attempts}/{page_job.max_attempts})")
@@ -1431,7 +1458,17 @@ class PrintQueueManager:
         self.config = None
         self.job_history = []
         self.max_history = 100
+        self.canceled_job_ids = set()
     
+    def cancel_job_id(self, job_id: str):
+        """Registra um job_id como cancelado."""
+        with self.lock:
+            self.canceled_job_ids.add(job_id)
+            logger.info(f"Job ID {job_id} marcado para cancelamento.")
+
+            if self.current_job and self.current_job["info"].job_id == job_id:
+                self.current_job["info"].status = "canceled"
+                
     def set_config(self, config):
         """Define o objeto de configuração"""
         self.config = config
@@ -1506,12 +1543,30 @@ class PrintQueueManager:
                     
                 job_item = self.print_queue.get(block=False)
                 
-                with self.lock:
-                    self.current_job = job_item
-                
                 job_info = job_item["info"]
                 printer = job_item["printer"]
                 callback = job_item["callback"]
+                
+                with self.lock:
+                    is_canceled = job_info.job_id in self.canceled_job_ids
+
+                if is_canceled:
+                    logger.info(f"Trabalho {job_info.document_name} (ID: {job_info.job_id}) foi cancelado antes do processamento.")
+                    job_info.status = "canceled" 
+                    job_info.end_time = datetime.now()
+                    self._update_history(job_info)
+
+                    if callback:
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+
+                    self.print_queue.task_done()
+                    with self.lock: 
+                        if self.current_job and self.current_job["info"].job_id == job_info.job_id:
+                            self.current_job = None
+                    continue 
+                
+                with self.lock:
+                    self.current_job = job_item
                 
                 logger.info(f"Processando trabalho: {job_info.document_name}")
                 
@@ -1521,8 +1576,12 @@ class PrintQueueManager:
                 
                 # Definir função de progresso
                 def progress_callback(message):
+                    with self.lock:
+                        if self.current_job and self.current_job["info"].job_id == job_info.job_id and \
+                        self.current_job["info"].status == "canceled":
+                            raise InterruptedError("Trabalho cancelado durante o processamento")
                     if callback:
-                        callback(job_info.job_id, "progress", message)
+                        wx.CallAfter(callback, job_info.job_id, "progress", message) 
                 
                 # Tenta imprimir
                 try:
@@ -1532,7 +1591,8 @@ class PrintQueueManager:
                         job_info.document_path,
                         job_info.options,
                         job_info.document_name,
-                        progress_callback
+                        progress_callback,
+                        job_info=job_info
                     )
                     
                     # Atualiza informações do trabalho
@@ -1562,18 +1622,32 @@ class PrintQueueManager:
                             logger.error(f"Erro ao iniciar sincronização: {e}")
                             
                     else:
-                        job_info.status = "failed"
+                        with self.lock: # Re-check status
+                            if job_info.status == "canceled":
+                                logger.info(f"Trabalho {job_info.document_name} cancelado durante a impressão.")
+                            else:
+                                job_info.status = "failed"
+                                logger.error(f"Falha no trabalho: {job_info.document_name}")
+
                         job_info.total_pages = result.get("total_pages", 0)
                         job_info.completed_pages = result.get("successful_pages", 0)
-                        logger.error(f"Falha no trabalho: {job_info.document_name}")
                     
                     # Atualiza histórico
                     self._update_history(job_info)
                     
                     # Notifica o callback
                     if callback:
-                        callback(job_info.job_id, "complete" if success else "error", result)
+                        status_cb = "complete" if success else ("canceled" if job_info.status == "canceled" else "error")
+                        wx.CallAfter(callback, job_info.job_id, status_cb, result)
                     
+                except InterruptedError: # Captura o erro de cancelamento
+                    logger.info(f"Processamento do trabalho {job_info.document_name} interrompido devido ao cancelamento.")
+                    job_info.status = "canceled"
+                    job_info.end_time = datetime.now()
+                    self._update_history(job_info)
+                    if callback:
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+
                 except Exception as e:
                     job_info.status = "failed"
                     job_info.end_time = datetime.now()
@@ -2445,6 +2519,12 @@ class PrintSystem:
             elif status == "complete":
                 # Trabalho concluído com sucesso
                 dialog.set_success("Impressão concluída com sucesso")
+            elif status == "canceled":
+                message = "Trabalho cancelado pelo usuário."
+                if isinstance(data, dict) and "message" in data:
+                    message = data["message"]
+                dialog.set_error(message) # Reutiliza set_error ou cria um set_canceled
+                dialog.add_log(message)
             elif status == "error":
                 # Erro no trabalho
                 error_message = data.get("error", "Erro desconhecido") if isinstance(data, dict) else str(data)

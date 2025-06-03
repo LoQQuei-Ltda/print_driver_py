@@ -635,11 +635,13 @@ class PrintQueuePanel(wx.Panel):
         
         if dlg.ShowModal() == wx.ID_YES:
             # Cancela o trabalho
+            logger.info(f"Solicitando cancelamento para o Job ID: {job.job_id}")
+            self.print_queue_manager.cancel_job_id(job.job_id)
+            
             job.set_canceled()
             
-            # Atualiza o histórico
-            job_dict = job.to_dict()
-            self.print_queue_manager._update_history(job_dict)
+            # Atualiza o histórico - passa o objeto job diretamente
+            self.print_queue_manager._update_history(job)
             
             # Atualiza a lista
             self.load_jobs()
