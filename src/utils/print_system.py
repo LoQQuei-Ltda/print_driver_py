@@ -1612,14 +1612,28 @@ class PrintQueueManager:
                         except Exception as e:
                             logger.error(f"Erro ao remover arquivo: {e}")
                         
-                        # Inicia sincronização com o servidor
-                        try:
-                            from src.utils.print_sync_manager import PrintSyncManager
-                            sync_manager = PrintSyncManager.get_instance()
-                            if sync_manager:
-                                sync_manager.sync_print_jobs()
-                        except Exception as e:
-                            logger.error(f"Erro ao iniciar sincronização: {e}")
+                        # Atualiza histórico ANTES de tentar sincronizar
+                        self._update_history(job_info)
+                        
+                        # Inicia sincronização com o servidor (com delay para garantir que o histórico foi salvo)
+                        def delayed_sync():
+                            try:
+                                import time
+                                time.sleep(2)  # Aguarda 2 segundos para garantir que o histórico foi salvo
+                                from src.utils.print_sync_manager import PrintSyncManager
+                                sync_manager = PrintSyncManager.get_instance()
+                                if sync_manager:
+                                    logger.info(f"Iniciando sincronização para o trabalho concluído: {job_info.job_id}")
+                                    sync_manager.sync_print_jobs()
+                                else:
+                                    logger.warning("Sync manager não disponível")
+                            except Exception as e:
+                                logger.error(f"Erro ao iniciar sincronização: {e}")
+                        
+                        # Executa sincronização em thread separada
+                        import threading
+                        sync_thread = threading.Thread(target=delayed_sync, daemon=True)
+                        sync_thread.start()
                             
                     else:
                         with self.lock: # Re-check status

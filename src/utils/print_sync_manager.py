@@ -128,12 +128,18 @@ class PrintSyncManager:
             
             for job in jobs_to_sync:
                 try:
-                    # Extrai informações do trabalho
+                    # Mapeia os campos do histórico para os campos da API
                     job_id = job.get("job_id", "")
-                    file_id = job.get("file_id") or job.get("document_id") or job_id
-                    asset_id = job.get("asset_id") or job.get("printer_id") or ""
-                    completed_at = job.get("end_time") or job.get("completed_at")
-                    pages = job.get("completed_pages", 0) or job.get("total_pages", 0)
+                    file_id = job_id  # job_id é usado como file_id (ID único do trabalho)
+                    asset_id = job.get("printer_id", "")  # printer_id é o asset_id da API
+                    completed_at = job.get("end_time")
+                    pages = job.get("completed_pages", 0)
+                    
+                    logger.info(f"Mapeamento do trabalho {job_id}:")
+                    logger.info(f"  job_id -> file_id: {file_id}")
+                    logger.info(f"  printer_id -> asset_id: {asset_id}")
+                    logger.info(f"  end_time -> date: {completed_at}")
+                    logger.info(f"  completed_pages -> pages: {pages}")
                     
                     # Validações obrigatórias
                     if not job_id:
@@ -143,43 +149,40 @@ class PrintSyncManager:
                         sync_error_count += 1
                         continue
                     
-                    if not file_id:
-                        logger.warning(f"Trabalho {job_id} sem file_id válido, usando job_id como fallback")
-                        file_id = job_id
-                    
                     if not asset_id:
-                        logger.warning(f"Trabalho {job_id} sem asset_id válido")
+                        logger.warning(f"Trabalho {job_id} sem printer_id (asset_id) válido")
                         job["synced"] = True
-                        job["sync_error"] = "Asset ID não encontrado"
+                        job["sync_error"] = "Printer ID (asset_id) não encontrado"
                         sync_error_count += 1
                         continue
                     
                     if not completed_at:
-                        logger.warning(f"Trabalho {job_id} sem data de conclusão")
+                        logger.warning(f"Trabalho {job_id} sem data de conclusão (end_time)")
                         job["synced"] = True
                         job["sync_error"] = "Data de conclusão não encontrada"
                         sync_error_count += 1
                         continue
                     
                     if pages <= 0:
-                        logger.warning(f"Trabalho {job_id} sem páginas válidas ({pages})")
+                        logger.warning(f"Trabalho {job_id} sem páginas válidas (completed_pages: {pages})")
                         job["synced"] = True
                         job["sync_error"] = "Número de páginas inválido"
                         sync_error_count += 1
                         continue
                     
-                    # Prepara dados para sincronização conforme esperado pelo APIClient Python
-                    sync_data = {
-                        "date": completed_at,
-                        "file_id": str(file_id),
-                        "asset_id": str(asset_id),
-                        "pages": int(pages)
-                    }
-                    
-                    logger.info(f"Sincronizando trabalho {job_id}: {sync_data}")
+                    logger.info(f"Sincronizando trabalho {job_id}:")
+                    logger.info(f"  Data: {completed_at}")
+                    logger.info(f"  File ID: {file_id}")
+                    logger.info(f"  Asset ID: {asset_id}")
+                    logger.info(f"  Páginas: {pages}")
                     
                     # Sincroniza com o servidor
-                    success = self.api_client.sync_print_job(**sync_data)
+                    success = self.api_client.sync_print_job(
+                        date=completed_at,
+                        file_id=file_id,
+                        asset_id=asset_id,
+                        pages=int(pages)
+                    )
                     
                     if success:
                         # Marca o trabalho como sincronizado
@@ -214,6 +217,7 @@ class PrintSyncManager:
             self.is_syncing = False
             if on_complete:
                 on_complete(True)
+
     
     # def _cleanup_old_jobs(self):
     #     """Limpa trabalhos antigos (mais de 72 horas)"""

@@ -462,11 +462,11 @@ class APIClient:
         Args:
             date (str): Data da impressão (formato ISO)
             file_id (str): ID do arquivo/trabalho
-            asset_id (str): ID do asset (documento)
+            asset_id (str): ID do asset (impressora)
             pages (int): Número de páginas impressas
             
         Returns:
-            dict: Resposta do servidor
+            bool: True se sincronizado com sucesso, False caso contrário
         """
         try:
             data = {
@@ -476,12 +476,18 @@ class APIClient:
                 "pages": pages
             }
             
+            logger.info(f"Enviando dados para sincronização: {data}")
             result = self._make_request("POST", "/desktop/printedByUser", data)
-            logger.info(f"Trabalho de impressão sincronizado: {file_id}")
-            return result
+            logger.info(f"Trabalho de impressão sincronizado com sucesso: {file_id}")
+            logger.info(f"Resposta da API: {result}")
+            return True
         except APIError as e:
-            logger.error(f"Erro ao sincronizar trabalho de impressão: {str(e)}")
-            raise
+            logger.error(f"Erro ao sincronizar trabalho de impressão {file_id}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Erro inesperado ao sincronizar trabalho {file_id}: {str(e)}")
+            return False
+
     
 class APIError(Exception):
     """Exceção para erros na API"""
