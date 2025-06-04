@@ -240,7 +240,7 @@ class APIClient:
     def get_printers_with_discovery(self):
         """
         Obtém lista de impressoras e enriquece com descoberta automática
-        Versão melhorada com melhor tratamento de erros e fallbacks
+        Versão melhorada com verificação de ID da API
         
         Returns:
             list: Lista de impressoras com informações completas
@@ -255,6 +255,20 @@ class APIClient:
             if isinstance(result, list):
                 server_printers = result
                 logger.info(f"Servidor retornou {len(server_printers)} impressoras")
+                
+                # CORREÇÃO: Verifica se as impressoras têm ID
+                for i, printer in enumerate(server_printers):
+                    if not isinstance(printer, dict):
+                        logger.warning(f"Impressora {i} não é um dicionário: {type(printer)}")
+                        continue
+                        
+                    printer_id = printer.get('id')
+                    if not printer_id:
+                        logger.error(f"ERRO: Impressora {i} da API não tem campo 'id'!")
+                        logger.error(f"Campos disponíveis: {list(printer.keys())}")
+                        logger.error(f"Dados completos: {printer}")
+                    else:
+                        logger.info(f"Impressora {i}: ID da API = {printer_id}, Nome = {printer.get('name', 'N/A')}")
             else:
                 logger.warning("Servidor não retornou lista válida de impressoras")
         except APIError as e:
@@ -276,6 +290,9 @@ class APIClient:
                 
                 if discovered_printers:
                     logger.info(f"Descoberta local encontrou {len(discovered_printers)} impressoras")
+                    # CORREÇÃO: Impressoras descobertas localmente não têm ID da API
+                    logger.warning("ATENÇÃO: Impressoras descobertas localmente não têm ID da API!")
+                    logger.warning("Elas não poderão ser usadas para sincronização até serem cadastradas no servidor.")
                     return self._format_discovered_printers(discovered_printers)
                 else:
                     logger.warning("Descoberta local não encontrou impressoras")

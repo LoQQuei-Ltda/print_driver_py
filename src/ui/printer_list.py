@@ -2912,6 +2912,16 @@ class PrinterListPanel(wx.ScrolledWindow):
                 # Cria uma cópia limpa
                 clean_printer = {}
                 
+                # CORREÇÃO: Preserva o ID da API (não gera local)
+                api_id = printer_data.get('id', '')
+                if api_id:
+                    clean_printer['id'] = str(api_id)
+                    logger.debug(f"Impressora {i}: ID da API preservado: {api_id}")
+                else:
+                    logger.warning(f"Impressora {i}: Sem ID da API - dados: {list(printer_data.keys())}")
+                    # Se não tem ID da API, pula esta impressora ou registra como erro
+                    continue
+                
                 # Campos obrigatórios
                 clean_printer['name'] = self._clean_string_field(
                     printer_data.get('name') or f"Impressora {printer_data.get('ip', i+1)}"
@@ -2919,9 +2929,9 @@ class PrinterListPanel(wx.ScrolledWindow):
                 
                 # MAC Address - tenta várias possibilidades
                 mac = (printer_data.get('macAddress') or 
-                       printer_data.get('mac_address') or 
-                       printer_data.get('MAC') or 
-                       "")
+                    printer_data.get('mac_address') or 
+                    printer_data.get('MAC') or 
+                    "")
                 clean_printer['macAddress'] = self._clean_string_field(mac)
                 clean_printer['mac_address'] = clean_printer['macAddress']  # Compatibilidade
                 
@@ -2942,38 +2952,20 @@ class PrinterListPanel(wx.ScrolledWindow):
                 
                 # Validação básica
                 if not clean_printer['name']:
-                    clean_printer['name'] = f"Impressora {i+1}"
+                    clean_printer['name'] = f"Impressora {clean_printer['id']}"
                 
                 # Log da impressora processada
                 logger.info(f"Impressora validada: {clean_printer['name']} "
-                          f"(IP: {clean_printer['ip']}, MAC: {clean_printer['macAddress']}, "
-                          f"Online: {clean_printer['is_online']})")
+                        f"(ID API: {clean_printer['id']}, IP: {clean_printer['ip']}, "
+                        f"MAC: {clean_printer['macAddress']}, Online: {clean_printer['is_online']})")
                 
                 validated_printers.append(clean_printer)
                 
             except Exception as e:
                 logger.error(f"Erro ao validar impressora no índice {i}: {str(e)}")
-                # Tenta criar uma impressora básica como fallback
-                try:
-                    fallback_printer = {
-                        'name': f"Impressora {i+1}",
-                        'macAddress': "",
-                        'mac_address': "",
-                        'ip': "",
-                        'uri': "",
-                        'model': "",
-                        'location': "",
-                        'state': "",
-                        'is_online': False,
-                        'is_ready': False,
-                        'ports': [],
-                        'attributes': {}
-                    }
-                    validated_printers.append(fallback_printer)
-                    logger.warning(f"Criada impressora fallback para índice {i}")
-                except:
-                    logger.error(f"Falha ao criar impressora fallback para índice {i}")
-                    continue
+                # CORREÇÃO: Não cria fallback sem ID da API
+                logger.error(f"Pulando impressora {i} - sem ID da API válido")
+                continue
         
         logger.info(f"Validação concluída: {len(validated_printers)} impressoras válidas de {len(printers)} originais")
         return validated_printers

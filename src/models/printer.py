@@ -23,7 +23,7 @@ class Printer:
         
         self.id = printer_data.get("id", "")
         self.name = printer_data.get("name", "")
-        self.mac_address = printer_data.get("mac_address", "")
+        self.mac_address = printer_data.get("mac_address", "") or printer_data.get("macAddress", "")
         self.system_name = printer_data.get("system_name", "")
         
         # Campos de conectividade
@@ -41,6 +41,13 @@ class Printer:
         # Flags de status
         self.is_ready = printer_data.get("is_ready", False)
         self.is_online = printer_data.get("is_online", False)
+        
+        # Log de debug para verificar se o ID foi preservado
+        if not self.id:
+            import logging
+            logger = logging.getLogger("PrintManagementSystem.Models.Printer")
+            logger.warning(f"Impressora criada sem ID: {self.name} ({self.ip})")
+            logger.debug(f"Dados recebidos: {list(printer_data.keys())}")
     
     def to_dict(self):
         """

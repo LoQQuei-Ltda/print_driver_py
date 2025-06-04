@@ -105,7 +105,15 @@ class PrintSyncManager:
             # Log do histórico para debug
             logger.debug(f"Histórico encontrado: {len(print_history)} trabalhos")
             for idx, job in enumerate(print_history):
-                logger.debug(f"Trabalho {idx+1}: ID={job.get('job_id')}, status={job.get('status')}, synced={job.get('synced', False)}")
+                job_id = job.get('job_id', 'N/A')
+                printer_id = job.get('printer_id', 'N/A')
+                status = job.get('status', 'N/A')
+                synced = job.get('synced', False)
+                logger.info(f"Trabalho {idx+1}: ID={job_id}, Printer_ID={printer_id}, Status={status}, Synced={synced}")
+                
+                # CORREÇÃO: Log todos os campos disponíveis para debug
+                if printer_id == 'N/A' or not printer_id:
+                    logger.warning(f"Trabalho {job_id} sem printer_id! Campos disponíveis: {list(job.keys())}")
             
             # Filtra apenas os trabalhos concluídos e não sincronizados
             jobs_to_sync = [
@@ -135,11 +143,12 @@ class PrintSyncManager:
                     completed_at = job.get("end_time")
                     pages = job.get("completed_pages", 0)
                     
-                    logger.info(f"Mapeamento do trabalho {job_id}:")
-                    logger.info(f"  job_id -> file_id: {file_id}")
-                    logger.info(f"  printer_id -> asset_id: {asset_id}")
-                    logger.info(f"  end_time -> date: {completed_at}")
-                    logger.info(f"  completed_pages -> pages: {pages}")
+                    logger.info(f"=== Processando trabalho para sincronização ===")
+                    logger.info(f"Job ID: {job_id}")
+                    logger.info(f"File ID (job_id): {file_id}")
+                    logger.info(f"Asset ID (printer_id da API): {asset_id}")
+                    logger.info(f"Data conclusão: {completed_at}")
+                    logger.info(f"Páginas: {pages}")
                     
                     # Validações obrigatórias
                     if not job_id:
@@ -150,9 +159,11 @@ class PrintSyncManager:
                         continue
                     
                     if not asset_id:
-                        logger.warning(f"Trabalho {job_id} sem printer_id (asset_id) válido")
+                        logger.error(f"ERRO CRÍTICO: Trabalho {job_id} sem printer_id (asset_id)!")
+                        logger.error(f"Este printer_id deveria vir da API. Campos do trabalho: {list(job.keys())}")
+                        logger.error(f"Valores dos campos: {job}")
                         job["synced"] = True
-                        job["sync_error"] = "Printer ID (asset_id) não encontrado"
+                        job["sync_error"] = "Printer ID da API não encontrado"
                         sync_error_count += 1
                         continue
                     
@@ -170,11 +181,7 @@ class PrintSyncManager:
                         sync_error_count += 1
                         continue
                     
-                    logger.info(f"Sincronizando trabalho {job_id}:")
-                    logger.info(f"  Data: {completed_at}")
-                    logger.info(f"  File ID: {file_id}")
-                    logger.info(f"  Asset ID: {asset_id}")
-                    logger.info(f"  Páginas: {pages}")
+                    logger.info(f"✓ Trabalho {job_id} válido para sincronização com printer_id da API: {asset_id}")
                     
                     # Sincroniza com o servidor
                     success = self.api_client.sync_print_job(
@@ -192,14 +199,14 @@ class PrintSyncManager:
                             del job["sync_error"]
                         
                         sync_success_count += 1
-                        logger.info(f"Trabalho {job_id} sincronizado com sucesso")
+                        logger.info(f"✓ Trabalho {job_id} sincronizado com sucesso usando printer_id: {asset_id}")
                     else:
-                        logger.error(f"Falha na sincronização do trabalho {job_id}")
+                        logger.error(f"✗ Falha na sincronização do trabalho {job_id}")
                         job["sync_error"] = "Falha na chamada da API"
                         sync_error_count += 1
                     
                 except Exception as e:
-                    logger.error(f"Erro ao sincronizar trabalho {job.get('job_id')}: {str(e)}")
+                    logger.error(f"✗ Erro ao sincronizar trabalho {job.get('job_id')}: {str(e)}")
                     job["sync_error"] = str(e)
                     sync_error_count += 1
             

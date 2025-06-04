@@ -1547,6 +1547,12 @@ class PrintQueueManager:
                 printer = job_item["printer"]
                 callback = job_item["callback"]
                 
+                # CORREÇÃO: Log detalhado do printer_id
+                logger.info(f"Processando trabalho: {job_info.document_name}")
+                logger.info(f"  Job ID: {job_info.job_id}")
+                logger.info(f"  Printer ID (da API): {job_info.printer_id}")
+                logger.info(f"  Printer Name: {job_info.printer_name}")
+                
                 with self.lock:
                     is_canceled = job_info.job_id in self.canceled_job_ids
 
@@ -1568,11 +1574,11 @@ class PrintQueueManager:
                 with self.lock:
                     self.current_job = job_item
                 
-                logger.info(f"Processando trabalho: {job_info.document_name}")
-                
                 # Salva o trabalho no histórico antes de começar
                 job_info.status = "processing"
                 self._add_to_history(job_info)
+                
+                logger.info(f"Trabalho salvo no histórico inicial - Printer ID: {job_info.printer_id}")
                 
                 # Definir função de progresso
                 def progress_callback(message):
@@ -2400,6 +2406,13 @@ class PrintSystem:
                 if printer is None:
                     return False  # Usuário cancelou
             
+            # CORREÇÃO: Verifica se a impressora tem ID válido
+            if not hasattr(printer, 'id') or not printer.id:
+                wx.MessageBox(f"A impressora '{printer.name}' não possui um ID válido do servidor.",
+                            "Erro", wx.OK | wx.ICON_ERROR)
+                logger.error(f"Impressora sem ID: {printer.name} - Atributos: {dir(printer)}")
+                return False
+            
             # Exibe diálogo com opções de impressão
             print_options_dialog = PrintOptionsDialog(parent_window, document, printer)
             if print_options_dialog.ShowModal() != wx.ID_OK:
@@ -2413,18 +2426,23 @@ class PrintSystem:
             # Cria um ID único para o trabalho
             job_id = f"job_{int(time.time())}_{document.id}"
             
-            # Cria objeto de informações do trabalho
+            # CORREÇÃO: Usa printer.id como printer_id
             job_info = PrintJobInfo(
                 job_id=job_id,
                 document_path=document.path,
                 document_name=document.name,
                 printer_name=printer.name,
-                printer_id=getattr(printer, 'id', printer.name),
+                printer_id=printer.id,  # CORREÇÃO: Usa o ID da API
                 printer_ip=getattr(printer, 'ip', ''),
                 options=options,
                 start_time=datetime.now(),
                 status="pending"
             )
+            
+            # Log para debug
+            logger.info(f"Trabalho criado - Job ID: {job_info.job_id}, "
+                    f"Printer ID (da API): {job_info.printer_id}, "
+                    f"Printer Name: {job_info.printer_name}")
             
             # Cria instância da impressora (detecta automaticamente HTTP/HTTPS)
             printer_ip = getattr(printer, 'ip', '')
@@ -2470,7 +2488,7 @@ class PrintSystem:
         except Exception as e:
             logger.error(f"Erro ao preparar impressão: {e}")
             wx.MessageBox(f"Erro ao preparar impressão: {e}",
-                         "Erro", wx.OK | wx.ICON_ERROR)
+                        "Erro", wx.OK | wx.ICON_ERROR)
             return False
     
     def _select_printer(self, parent_window):
