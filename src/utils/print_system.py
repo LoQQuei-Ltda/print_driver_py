@@ -1019,139 +1019,180 @@ class IPPPrinter:
 
     
     def _process_pages_with_retry(self, page_jobs: list, options: PrintOptions, 
-                              progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Processa páginas com sistema de retry inteligente e discovery de endpoints"""
+                            progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Processa páginas com sistema de retry inteligente, discovery de endpoints e cópias manuais para JPG"""
         
         # Descobre endpoints disponíveis
         discovered_endpoints = self._discover_printer_endpoints()
         
         successful_pages = []
-        failed_pages = list(page_jobs)  # Copia inicial
         retry_delays = [2, 5, 10]  # Delays progressivos em segundos
         
-        # Primeira passada - tenta todas as páginas
-        logger.info(f"Processando {len(page_jobs)} página(s)...")
-        if progress_callback:
-            progress_callback(f"Processando {len(page_jobs)} página(s)...")
+        # Calcula total de páginas considerando as cópias
+        total_copies = options.copies
+        total_pages_all_copies = len(page_jobs) * total_copies
+        pages_sent = 0
         
-        for attempt in range(max(p.max_attempts for p in page_jobs)):
-            if not failed_pages:
-                break
-                
-            if job_info and job_info.status == "canceled":
-                logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} antes de processar páginas na tentativa {attempt + 1}.")
-                
-                for pj in failed_pages:
-                    if progress_callback:
-                        wx.CallAfter(progress_callback, f"Página {pj.page_num} não enviada (trabalho cancelado).")
-
-                result = {
-                    "total_pages": len(page_jobs),
-                    "successful_pages": len(successful_pages),
-                    "failed_pages": len(page_jobs) - len(successful_pages),
-                    "method": "jpg",
-                    "status": "canceled",
-                    "message": "Trabalho cancelado pelo usuário durante o processamento de páginas."
-                }
-                return False, result
-
-            current_failed = []
+        logger.info(f"Processando {len(page_jobs)} página(s) com {total_copies} cópia(s) cada = {total_pages_all_copies} páginas totais...")
+        if progress_callback:
+            progress_callback(f"Processando {len(page_jobs)} página(s) com {total_copies} cópia(s) = {total_pages_all_copies} páginas totais...")
+        
+        # Processa cada cópia separadamente
+        for copy_num in range(1, total_copies + 1):
+            logger.info(f"=== Processando cópia {copy_num}/{total_copies} ===")
+            if progress_callback:
+                progress_callback(f"Iniciando cópia {copy_num}/{total_copies}...")
             
-            for page_job in failed_pages:
+            # Processa todas as páginas desta cópia
+            failed_pages_this_copy = list(page_jobs)  # Copia inicial para esta cópia
+            copy_successful_pages = []
+            
+            # Sistema de retry para esta cópia
+            for attempt in range(max(p.max_attempts for p in page_jobs)):
+                if not failed_pages_this_copy:
+                    break
+                    
+                # Verifica cancelamento
                 if job_info and job_info.status == "canceled":
-                    logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} ao tentar enviar a página {page_job.page_num}.")
+                    logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} durante cópia {copy_num}.")
+                    
+                    for pj in failed_pages_this_copy:
+                        if progress_callback:
+                            wx.CallAfter(progress_callback, f"Página {pj.page_num} (cópia {copy_num}) não enviada (trabalho cancelado).")
 
-                    if progress_callback:
-                        wx.CallAfter(progress_callback, f"Página {page_job.page_num} não enviada (trabalho cancelado).")
-                    continue
-                
-                page_job.attempts += 1
-                
-                logger.info(f"Enviando página {page_job.page_num}/{len(page_jobs)} como JPG (tentativa {page_job.attempts}/{page_job.max_attempts})")
-                logger.info(f"Tamanho JPG página {page_job.page_num}: {len(page_job.jpg_data):,} bytes")
-                
-                if progress_callback:
-                    progress_callback(f"Enviando página {page_job.page_num}/{len(page_jobs)} (tentativa {page_job.attempts})")
-                
-                # Tenta enviar esta página
-                page_success = False
-                
-                for endpoint_info in discovered_endpoints:
-                    endpoint = endpoint_info["endpoint"]
-                    url = endpoint_info["url"]
-                    
-                    # Atributos IPP para JPG
-                    attributes = {
-                        "printer-uri": url,
-                        "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
-                        "job-name": page_job.job_name,
-                        "document-name": page_job.job_name,
-                        "document-format": "image/jpeg",
-                        "ipp-attribute-fidelity": False,
-                        "job-priority": 50,
-                        "copies": options.copies if page_job.page_num == 1 else 1,  # Cópias apenas na primeira página
-                        "orientation-requested": 3 if options.orientation == "portrait" else 4,
-                        "print-quality": options.quality.value,
-                        "media": options.paper_size,
+                    result = {
+                        "total_pages": total_pages_all_copies,
+                        "successful_pages": len(successful_pages),
+                        "failed_pages": total_pages_all_copies - len(successful_pages),
+                        "method": "jpg",
+                        "status": "canceled",
+                        "message": f"Trabalho cancelado pelo usuário durante a cópia {copy_num}."
                     }
-                    
-                    # Para JPG, não aplicamos duplex (cada página é individual)
-                    if options.color_mode != ColorMode.AUTO:
-                        attributes["print-color-mode"] = options.color_mode.value
-                    
-                    if self._send_ipp_request(url, attributes, page_job.jpg_data):
-                        page_success = True
-                        break
-                    
-                    # Se falhou no primeiro endpoint, aguarda um pouco antes do próximo
-                    if endpoint == discovered_endpoints[0]["endpoint"] and not page_success:
-                        logger.info("Aguardando 1s antes do próximo endpoint...")
-                        time.sleep(1)
+                    return False, result
+
+                current_failed = []
                 
-                if page_success:
-                    logger.info(f"Página {page_job.page_num} enviada com sucesso")
-                    successful_pages.append(page_job)
-                    if progress_callback:
-                        progress_callback(f"✓ Página {page_job.page_num} impressa com sucesso")
-                else:
-                    logger.info(f"Falha ao enviar página {page_job.page_num}")
+                for page_job in failed_pages_this_copy:
+                    # Verifica cancelamento novamente
+                    if job_info and job_info.status == "canceled":
+                        logger.info(f"Cancelamento detectado para o trabalho {job_info.job_id} ao tentar enviar a página {page_job.page_num} (cópia {copy_num}).")
+                        if progress_callback:
+                            wx.CallAfter(progress_callback, f"Página {page_job.page_num} (cópia {copy_num}) não enviada (trabalho cancelado).")
+                        continue
                     
-                    if page_job.attempts < page_job.max_attempts:
-                        current_failed.append(page_job)
-                        # Aguarda antes da próxima tentativa
-                        delay = retry_delays[min(page_job.attempts - 1, len(retry_delays) - 1)]
-                        logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
-                        if progress_callback:
-                            progress_callback(f"Aguardando {delay}s antes de tentar página {page_job.page_num} novamente...")
-                        time.sleep(delay)
+                    page_job.attempts += 1
+                    
+                    logger.info(f"Enviando página {page_job.page_num}/{len(page_jobs)} (cópia {copy_num}/{total_copies}) como JPG (tentativa {page_job.attempts}/{page_job.max_attempts})")
+                    logger.info(f"Progresso geral: {pages_sent + 1}/{total_pages_all_copies}")
+                    
+                    if progress_callback:
+                        progress_callback(f"Enviando página {page_job.page_num} (cópia {copy_num}/{total_copies}) - {pages_sent + 1}/{total_pages_all_copies}")
+                    
+                    # Cria nome único para cada cópia
+                    if total_copies > 1:
+                        copy_job_name = f"{page_job.job_name}_c{copy_num:02d}"
                     else:
-                        logger.error(f"Página {page_job.page_num} falhou após {page_job.max_attempts} tentativas")
+                        copy_job_name = page_job.job_name
+                    
+                    # Tenta enviar esta página
+                    page_success = False
+                    
+                    for endpoint_info in discovered_endpoints:
+                        endpoint = endpoint_info["endpoint"]
+                        url = endpoint_info["url"]
+                        
+                        # Atributos IPP para JPG (sempre 1 cópia pois controlamos manualmente)
+                        attributes = {
+                            "printer-uri": url,
+                            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+                            "job-name": copy_job_name,
+                            "document-name": copy_job_name,
+                            "document-format": "image/jpeg",
+                            "ipp-attribute-fidelity": False,
+                            "job-priority": 50,
+                            "copies": 1,  # Sempre 1 cópia pois controlamos manualmente
+                            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+                            "print-quality": options.quality.value,
+                            "media": options.paper_size,
+                        }
+                        
+                        # Para JPG, não aplicamos duplex (cada página é individual)
+                        if options.color_mode != ColorMode.AUTO:
+                            attributes["print-color-mode"] = options.color_mode.value
+                        
+                        if self._send_ipp_request(url, attributes, page_job.jpg_data):
+                            page_success = True
+                            break
+                        
+                        # Se falhou no primeiro endpoint, aguarda um pouco antes do próximo
+                        if endpoint == discovered_endpoints[0]["endpoint"] and not page_success:
+                            logger.info("Aguardando 1s antes do próximo endpoint...")
+                            time.sleep(1)
+                    
+                    if page_success:
+                        logger.info(f"Página {page_job.page_num} (cópia {copy_num}) enviada com sucesso")
+                        copy_successful_pages.append(page_job)
+                        successful_pages.append(f"p{page_job.page_num}_c{copy_num}")  # Identificador único
+                        pages_sent += 1
+                        
                         if progress_callback:
-                            progress_callback(f"✗ Página {page_job.page_num} falhou após {page_job.max_attempts} tentativas")
+                            progress_callback(f"✓ Página {page_job.page_num} (cópia {copy_num}) impressa - {pages_sent}/{total_pages_all_copies}")
+                    else:
+                        logger.info(f"Falha ao enviar página {page_job.page_num} (cópia {copy_num})")
+                        
+                        if page_job.attempts < page_job.max_attempts:
+                            current_failed.append(page_job)
+                            # Aguarda antes da próxima tentativa
+                            delay = retry_delays[min(page_job.attempts - 1, len(retry_delays) - 1)]
+                            logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                            if progress_callback:
+                                progress_callback(f"Aguardando {delay}s antes de tentar página {page_job.page_num} (cópia {copy_num}) novamente...")
+                            time.sleep(delay)
+                        else:
+                            logger.error(f"Página {page_job.page_num} (cópia {copy_num}) falhou após {page_job.max_attempts} tentativas")
+                            if progress_callback:
+                                progress_callback(f"✗ Página {page_job.page_num} (cópia {copy_num}) falhou após {page_job.max_attempts} tentativas")
+                
+                failed_pages_this_copy = current_failed
+                
+                # Se ainda há páginas falhando e não é a última tentativa, aguarda mais um pouco
+                if failed_pages_this_copy and attempt < max(p.max_attempts for p in page_jobs) - 1:
+                    logger.info("Aguardando 3s antes da próxima rodada de tentativas...")
+                    time.sleep(3)
             
-            failed_pages = current_failed
+            # Verifica se todas as páginas desta cópia foram enviadas
+            if len(copy_successful_pages) == len(page_jobs):
+                logger.info(f"✓ Cópia {copy_num} concluída com sucesso - todas as {len(page_jobs)} páginas enviadas")
+                if progress_callback:
+                    progress_callback(f"✓ Cópia {copy_num}/{total_copies} concluída com sucesso")
+            else:
+                failed_count = len(page_jobs) - len(copy_successful_pages)
+                logger.warning(f"⚠ Cópia {copy_num} parcialmente falhada - {failed_count} páginas falharam")
+                if progress_callback:
+                    progress_callback(f"⚠ Cópia {copy_num} - {failed_count} páginas falharam")
             
-            # Se ainda há páginas falhando e não é a última tentativa, aguarda mais um pouco
-            if failed_pages and attempt < max(p.max_attempts for p in page_jobs) - 1:
-                logger.info("Aguardando 3s antes da próxima rodada de tentativas...")
-                time.sleep(3)
+            # Pausa entre cópias (exceto na última)
+            if copy_num < total_copies:
+                logger.info("Aguardando 2s antes da próxima cópia...")
+                if progress_callback:
+                    progress_callback(f"Aguardando 2s antes da cópia {copy_num + 1}...")
+                time.sleep(2)
         
         # Relatório final
-        total_pages = len(page_jobs)
         successful_count = len(successful_pages)
-        failed_count = total_pages - successful_count
+        failed_count = total_pages_all_copies - successful_count
         
-        logger.info("Relatório de impressão:")
-        logger.info(f"Páginas enviadas com sucesso: {successful_count}/{total_pages}")
-        logger.info(f"Páginas que falharam: {failed_count}/{total_pages}")
+        logger.info("=== Relatório Final de Impressão ===")
+        logger.info(f"Total de páginas enviadas: {successful_count}/{total_pages_all_copies}")
+        logger.info(f"Páginas que falharam: {failed_count}/{total_pages_all_copies}")
+        logger.info(f"Cópias configuradas: {total_copies}")
+        logger.info(f"Páginas únicas: {len(page_jobs)}")
         
-        if successful_pages:
-            logger.info(f"Páginas bem-sucedidas: {', '.join(str(p.page_num) for p in successful_pages)}")
+        if successful_count > 0:
+            logger.info(f"Taxa de sucesso: {(successful_count/total_pages_all_copies)*100:.1f}%")
         
-        remaining_failed = [p for p in page_jobs if p not in successful_pages]
-        if remaining_failed:
-            logger.info(f"Páginas que falharam: {', '.join(str(p.page_num) for p in remaining_failed)}")
-            logger.info(f"Imagens mantidas em: {os.path.dirname(remaining_failed[0].image_path)}")
+        if failed_count > 0:
+            logger.info(f"Imagens mantidas em: {os.path.dirname(page_jobs[0].image_path)}")
             logger.info("Você pode tentar reimprimir manualmente as páginas que falharam")
         else:
             logger.info("Todas as páginas foram processadas com sucesso!")
@@ -1161,14 +1202,17 @@ class IPPPrinter:
         
         # Cria um dicionário para retornar o resultado
         result = {
-            "total_pages": total_pages,
-            "successful_pages": successful_count,
+            "total_pages": total_pages_all_copies,  # Total considerando cópias
+            "successful_pages": successful_count,   # Páginas efetivamente enviadas
             "failed_pages": failed_count,
-            "method": "jpg"
+            "method": "jpg",
+            "copies_requested": total_copies,
+            "unique_pages": len(page_jobs)
         }
         
-        # Retorna True apenas se TODAS as páginas foram impressas com sucesso
-        return successful_count == total_pages, result
+        # Retorna True apenas se TODAS as páginas (incluindo cópias) foram impressas com sucesso
+        return successful_count == total_pages_all_copies, result
+
 
 
     def _build_ipp_request(self, operation: int, attributes: Dict[str, Any]) -> bytes:
@@ -1533,7 +1577,7 @@ class PrintQueueManager:
             return self.current_job
     
     def _process_queue(self):
-        """Processa a fila de impressão"""
+        """Processa a fila de impressão com correção para exclusão de arquivos"""
         while self.is_running:
             try:
                 # Obtém o próximo trabalho da fila
@@ -1552,6 +1596,7 @@ class PrintQueueManager:
                 logger.info(f"  Job ID: {job_info.job_id}")
                 logger.info(f"  Printer ID (da API): {job_info.printer_id}")
                 logger.info(f"  Printer Name: {job_info.printer_name}")
+                logger.info(f"  Cópias solicitadas: {job_info.options.copies}")
                 
                 with self.lock:
                     is_canceled = job_info.job_id in self.canceled_job_ids
@@ -1589,6 +1634,9 @@ class PrintQueueManager:
                     if callback:
                         wx.CallAfter(callback, job_info.job_id, "progress", message) 
                 
+                # Variável para controlar se deve deletar o arquivo
+                should_delete_file = False
+                
                 # Tenta imprimir
                 try:
                     progress_callback("Iniciando impressão...")
@@ -1606,22 +1654,62 @@ class PrintQueueManager:
                     
                     if success:
                         job_info.status = "completed"
-                        job_info.total_pages = result.get("total_pages", 0)
-                        job_info.completed_pages = result.get("successful_pages", 0)
-                        logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
                         
-                        # Tenta excluir o arquivo após impressão bem-sucedida
+                        # CORREÇÃO: Calcula corretamente as páginas considerando cópias
+                        total_pages_sent = result.get("total_pages", 0)  # Total incluindo cópias
+                        successful_pages_sent = result.get("successful_pages", 0)  # Efetivamente enviadas
+                        
+                        # Para sincronização, usamos o total de páginas efetivamente enviadas
+                        job_info.total_pages = total_pages_sent
+                        job_info.completed_pages = successful_pages_sent
+                        
+                        logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
+                        logger.info(f"  Total de páginas (com cópias): {total_pages_sent}")
+                        logger.info(f"  Páginas enviadas com sucesso: {successful_pages_sent}")
+                        logger.info(f"  Cópias: {result.get('copies_requested', 1)}")
+                        
+                        # Só marca para deletar se foi 100% bem-sucedido
+                        should_delete_file = (successful_pages_sent == total_pages_sent)
+                        
+                        if should_delete_file:
+                            logger.info("Impressão 100% bem-sucedida - arquivo será removido")
+                        else:
+                            logger.warning("Impressão parcialmente falhada - arquivo será mantido")
+                            
+                    else:
+                        with self.lock: # Re-check status
+                            if job_info.status == "canceled":
+                                logger.info(f"Trabalho {job_info.document_name} cancelado durante a impressão.")
+                            else:
+                                job_info.status = "failed"
+                                logger.error(f"Falha no trabalho: {job_info.document_name}")
+
+                        # Para trabalhos falhados, ainda registra as páginas processadas
+                        total_pages_sent = result.get("total_pages", 0)
+                        successful_pages_sent = result.get("successful_pages", 0)
+                        
+                        job_info.total_pages = total_pages_sent
+                        job_info.completed_pages = successful_pages_sent
+                        
+                        # Não deleta arquivo em caso de falha
+                        should_delete_file = False
+                    
+                    # Tenta excluir o arquivo apenas se foi completamente bem-sucedido
+                    if should_delete_file:
                         try:
                             if os.path.exists(job_info.document_path):
                                 os.remove(job_info.document_path)
                                 logger.info(f"Arquivo removido: {job_info.document_path}")
                         except Exception as e:
                             logger.error(f"Erro ao remover arquivo: {e}")
-                        
-                        # Atualiza histórico ANTES de tentar sincronizar
-                        self._update_history(job_info)
-                        
-                        # Inicia sincronização com o servidor (com delay para garantir que o histórico foi salvo)
+                    else:
+                        logger.info(f"Arquivo mantido devido a falhas: {job_info.document_path}")
+                    
+                    # Atualiza histórico ANTES de tentar sincronizar
+                    self._update_history(job_info)
+                    
+                    # Inicia sincronização apenas se houve páginas bem-sucedidas
+                    if job_info.completed_pages > 0:
                         def delayed_sync():
                             try:
                                 import time
@@ -1629,7 +1717,7 @@ class PrintQueueManager:
                                 from src.utils.print_sync_manager import PrintSyncManager
                                 sync_manager = PrintSyncManager.get_instance()
                                 if sync_manager:
-                                    logger.info(f"Iniciando sincronização para o trabalho concluído: {job_info.job_id}")
+                                    logger.info(f"Iniciando sincronização para o trabalho: {job_info.job_id} ({job_info.completed_pages} páginas)")
                                     sync_manager.sync_print_jobs()
                                 else:
                                     logger.warning("Sync manager não disponível")
@@ -1641,20 +1729,6 @@ class PrintQueueManager:
                         sync_thread = threading.Thread(target=delayed_sync, daemon=True)
                         sync_thread.start()
                             
-                    else:
-                        with self.lock: # Re-check status
-                            if job_info.status == "canceled":
-                                logger.info(f"Trabalho {job_info.document_name} cancelado durante a impressão.")
-                            else:
-                                job_info.status = "failed"
-                                logger.error(f"Falha no trabalho: {job_info.document_name}")
-
-                        job_info.total_pages = result.get("total_pages", 0)
-                        job_info.completed_pages = result.get("successful_pages", 0)
-                    
-                    # Atualiza histórico
-                    self._update_history(job_info)
-                    
                     # Notifica o callback
                     if callback:
                         status_cb = "complete" if success else ("canceled" if job_info.status == "canceled" else "error")
@@ -1690,7 +1764,7 @@ class PrintQueueManager:
                 time.sleep(1.0)
             except Exception as e:
                 logger.error(f"Erro no processamento da fila: {e}")
-                time.sleep(5.0)  # Aguarda antes de tentar novamente
+                time.sleep(5.0)  
     
     def _add_to_history(self, job_info):
         """Adiciona um trabalho ao histórico"""
