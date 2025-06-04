@@ -168,11 +168,11 @@ class PrintSyncManager:
                         sync_error_count += 1
                         continue
                     
-                    # Prepara dados para sincronização conforme esperado pela API
+                    # Prepara dados para sincronização conforme esperado pelo APIClient Python
                     sync_data = {
                         "date": completed_at,
-                        "fileId": str(file_id),
-                        "assetId": str(asset_id),
+                        "file_id": str(file_id),
+                        "asset_id": str(asset_id),
                         "pages": int(pages)
                     }
                     
