@@ -471,7 +471,36 @@ class APIClient:
                 logger.warning(f"Erro ao formatar impressora descoberta: {str(e)}")
         
         return formatted_printers
+    
+    def send_printer_pages(self, asset_id, pages):
+        """
+        Envia a contagem de páginas impressas de uma impressora para o servidor
         
+        Args:
+            asset_id (str): ID do asset (impressora) da API
+            pages (int): Número total de páginas impressas
+            
+        Returns:
+            bool: True se enviado com sucesso, False caso contrário
+        """
+        try:
+            data = {
+                "assetId": asset_id,
+                "pages": int(pages)
+            }
+            
+            logger.info(f"Enviando contagem de páginas para impressora {asset_id}: {pages} páginas")
+            result = self._make_request("POST", "/desktop/printedPages", data)
+            logger.info(f"Contagem de páginas enviada com sucesso para impressora {asset_id}")
+            logger.debug(f"Resposta da API: {result}")
+            return True
+        except APIError as e:
+            logger.error(f"Erro ao enviar contagem de páginas para impressora {asset_id}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"Erro inesperado ao enviar contagem de páginas para impressora {asset_id}: {str(e)}")
+            return False
+
     def sync_print_job(self, date, file_id, asset_id, pages):
         """
         Sincroniza um trabalho de impressão com o servidor
