@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Painel de fila de impressão
+Painel de fila de impressão - VERSÃO CORRIGIDA
 """
 
 import os
@@ -33,6 +33,9 @@ class PrintQueuePanel(wx.Panel):
         self.print_queue_manager = PrintQueueManager.get_instance()
         self.print_queue_manager.set_config(config)
         self.jobs = []
+        
+        # Variável para preservar a seleção durante atualizações
+        self.selected_job_id = None
         
         # Define as larguras das colunas como atributo da classe
         self.column_widths = [80, 200, 150, 100, 100, 150]
@@ -474,10 +477,54 @@ class PrintQueuePanel(wx.Panel):
         except Exception as e:
             logger.error(f"Erro ao sincronizar scroll do cabeçalho: {str(e)}")
 
+    def _save_selection(self):
+        """Salva o ID do trabalho selecionado"""
+        selected_index = self.job_list.GetFirstSelected()
+        if selected_index != -1 and selected_index < len(self.jobs):
+            self.selected_job_id = self.jobs[selected_index].job_id
+        else:
+            self.selected_job_id = None
+
+    def _restore_selection(self):
+        """Restaura a seleção baseada no ID do trabalho salvo"""
+        if not self.selected_job_id:
+            return
+            
+        for i, job in enumerate(self.jobs):
+            if job.job_id == self.selected_job_id:
+                # Seleciona o item
+                self.job_list.Select(i)
+                self.job_list.EnsureVisible(i)
+                # Atualiza os botões
+                self._update_button_states(job)
+                break
+
+    def _update_button_states(self, job=None):
+        """Atualiza o estado dos botões baseado no trabalho selecionado"""
+        if job is None:
+            # Nenhum trabalho selecionado
+            self.cancel_button.Disable()
+            self.details_button.Disable()
+        else:
+            # Sempre habilita o botão de detalhes
+            self.details_button.Enable()
+            
+            # Habilita o botão de cancelar apenas para trabalhos em processamento
+            if job.status == PrintJobStatus.PROCESSING:
+                self.cancel_button.Enable()
+                # Atualiza o texto do botão para indicar que pode cancelar
+                self.cancel_button.SetLabel("Cancelar Trabalho")
+            else:
+                self.cancel_button.Enable()  # Habilita para mostrar a mensagem
+                # Atualiza o texto do botão para indicar que não pode cancelar
+                self.cancel_button.SetLabel("Não Cancelável")
 
     def load_jobs(self, event=None):
         """Carrega a lista de trabalhos de impressão"""
         try:
+            # Salva a seleção atual
+            self._save_selection()
+            
             # Obtém o histórico de trabalhos
             job_history = self.print_queue_manager.get_job_history()
             
@@ -537,6 +584,9 @@ class PrintQueuePanel(wx.Panel):
             else:
                 self.empty_panel.Hide()
                 self.job_list.GetParent().Show()
+            
+            # Restaura a seleção
+            self._restore_selection()
             
             # Atualiza o layout
             self.Layout()
@@ -605,15 +655,21 @@ class PrintQueuePanel(wx.Panel):
     
     def on_job_selected(self, event):
         """Manipula o evento de seleção de trabalho"""
-        # Habilita os botões
-        self.cancel_button.Enable()
-        self.details_button.Enable()
+        # Obtém o trabalho selecionado
+        index = event.GetIndex()
+        if index >= 0 and index < len(self.jobs):
+            job = self.jobs[index]
+            # Atualiza o ID selecionado
+            self.selected_job_id = job.job_id
+            # Atualiza os estados dos botões
+            self._update_button_states(job)
     
     def on_job_deselected(self, event):
         """Manipula o evento de deseleção de trabalho"""
-        # Desabilita os botões
-        self.cancel_button.Disable()
-        self.details_button.Disable()
+        # Limpa a seleção
+        self.selected_job_id = None
+        # Atualiza os estados dos botões
+        self._update_button_states()
     
     def on_cancel_job(self, event):
         """Manipula o evento de cancelar trabalho"""
@@ -625,26 +681,65 @@ class PrintQueuePanel(wx.Panel):
         # Obtém o trabalho
         job = self.jobs[index]
         
-        # Confirma o cancelamento
+        # Verifica se o trabalho pode ser cancelado
+        if job.status != PrintJobStatus.PROCESSING:
+            # Mostra mensagem explicando por que não pode cancelar
+            status_text = self._get_status_text(job.status)
+            
+            if job.status == PrintJobStatus.COMPLETED:
+                message = f"O trabalho '{job.document_name}' já foi concluído e não pode ser cancelado."
+            elif job.status == PrintJobStatus.FAILED:
+                message = f"O trabalho '{job.document_name}' já falhou e não pode ser cancelado."
+            elif job.status == PrintJobStatus.CANCELED:
+                message = f"O trabalho '{job.document_name}' já foi cancelado."
+            elif job.status == PrintJobStatus.PENDING:
+                message = f"O trabalho '{job.document_name}' está pendente. Apenas trabalhos em processamento podem ser cancelados."
+            else:
+                message = f"O trabalho '{job.document_name}' está no status '{status_text}' e não pode ser cancelado."
+            
+            wx.MessageBox(
+                message,
+                "Não é Possível Cancelar",
+                wx.OK | wx.ICON_INFORMATION
+            )
+            return
+        
+        # Confirma o cancelamento para trabalhos em processamento
         dlg = wx.MessageDialog(
             self,
-            f"Tem certeza que deseja cancelar o trabalho '{job.document_name}'?",
+            f"Tem certeza que deseja cancelar o trabalho '{job.document_name}'?\n\nEste trabalho está sendo processado atualmente.",
             "Confirmar Cancelamento",
             wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION
         )
         
         if dlg.ShowModal() == wx.ID_YES:
-            # Cancela o trabalho
-            logger.info(f"Solicitando cancelamento para o Job ID: {job.job_id}")
-            self.print_queue_manager.cancel_job_id(job.job_id)
-            
-            job.set_canceled()
-            
-            # Atualiza o histórico - passa o objeto job diretamente
-            self.print_queue_manager._update_history(job)
-            
-            # Atualiza a lista
-            self.load_jobs()
+            try:
+                # Cancela o trabalho
+                logger.info(f"Solicitando cancelamento para o Job ID: {job.job_id}")
+                self.print_queue_manager.cancel_job_id(job.job_id)
+                
+                job.set_canceled()
+                
+                # Atualiza o histórico - passa o objeto job diretamente
+                self.print_queue_manager._update_history(job)
+                
+                # Atualiza a lista preservando a seleção
+                self.load_jobs()
+                
+                # Mostra mensagem de sucesso
+                wx.MessageBox(
+                    f"Trabalho '{job.document_name}' foi cancelado com sucesso.",
+                    "Cancelamento Realizado",
+                    wx.OK | wx.ICON_INFORMATION
+                )
+                
+            except Exception as e:
+                logger.error(f"Erro ao cancelar trabalho: {str(e)}")
+                wx.MessageBox(
+                    f"Erro ao cancelar o trabalho: {str(e)}",
+                    "Erro",
+                    wx.OK | wx.ICON_ERROR
+                )
         
         dlg.Destroy()
     
@@ -666,6 +761,7 @@ class PrintQueuePanel(wx.Panel):
     def on_timer(self, event):
         """Manipula o evento do timer"""
         # Recarrega os trabalhos para atualizar o status
+        # A função load_jobs() agora preserva a seleção automaticamente
         self.load_jobs()
 
 class PrintJobDetailsDialog(wx.Dialog):
