@@ -96,6 +96,10 @@ class FileMonitor:
         # Lista de diretórios a monitorar
         self.pdf_dirs = self._get_pdf_directories()
         
+        # CORREÇÃO: Adiciona controle de processamento de auto-impressão
+        self.auto_print_processed = {}  # arquivo -> timestamp do último processamento
+        self.auto_print_lock = threading.Lock()
+        
         logger.info(f"Base de diretórios PDF configurada: {self.base_pdf_dir}")
         logger.info(f"Diretórios a monitorar: {len(self.pdf_dirs)}")
     
@@ -268,11 +272,47 @@ class FileMonitor:
                 auto_print_enabled = self.config.get("auto_print", False)
 
                 if document and auto_print_enabled:
-                    self._process_auto_print(document)
+                    # CORREÇÃO: Verifica se já foi processado recentemente
+                    if self._should_process_auto_print(filepath):
+                        self._process_auto_print(document)
+                    else:
+                        logger.debug(f"Auto-impressão: Arquivo {filepath} já foi processado recentemente, ignorando")
                 elif document and not auto_print_enabled:
                     # Se auto-impressão não estiver ativada, mostra a tela de documentos
                     self._show_documents_screen()
+    
+    def _should_process_auto_print(self, filepath):
+        """
+        Verifica se um arquivo deve ser processado para auto-impressão
+        Evita processamento duplicado em um curto período de tempo
+        
+        Args:
+            filepath: Caminho do arquivo
             
+        Returns:
+            bool: True se deve processar, False caso contrário
+        """
+        import time
+        
+        with self.auto_print_lock:
+            current_time = time.time()
+            last_processed = self.auto_print_processed.get(filepath, 0)
+            
+            # Se foi processado há menos de 5 segundos, ignora
+            if current_time - last_processed < 5:
+                return False
+            
+            # Marca como processado agora
+            self.auto_print_processed[filepath] = current_time
+            
+            # Limpa entradas antigas (mais de 1 hora)
+            old_entries = [path for path, timestamp in self.auto_print_processed.items() 
+                        if current_time - timestamp > 3600]
+            for path in old_entries:
+                del self.auto_print_processed[path]
+            
+            return True
+
     def _show_documents_screen(self):
         """Mostra a tela de documentos quando auto-impressão não está ativa"""
         import wx
@@ -407,13 +447,13 @@ class FileMonitor:
             # Cria um ID único para o trabalho
             job_id = f"auto_{int(time.time())}_{document.id}"
             
-            # Cria objeto de informações do trabalho
+            # CORREÇÃO: Usa printer.id diretamente como na impressão manual
             job_info = PrintJobInfo(
                 job_id=job_id,
                 document_path=document.path,
                 document_name=document.name,
                 printer_name=printer.name,
-                printer_id=getattr(printer, 'id', printer.name),
+                printer_id=printer.id,  # CORREÇÃO: Usa o ID da API diretamente
                 printer_ip=getattr(printer, 'ip', ''),
                 options=options,
                 start_time=datetime.now(),
@@ -426,17 +466,37 @@ class FileMonitor:
                 logger.error(f"Auto-impressão: A impressora '{printer.name}' não possui um endereço IP configurado")
                 return False
             
+            # CORREÇÃO: Adiciona use_https=False como na impressão manual
             printer_instance = IPPPrinter(
                 printer_ip=printer_ip,
-                port=631
+                port=631,
+                use_https=False  # Deixa detectar automaticamente
             )
+            
+            # CORREÇÃO: Adiciona callback para tratar adequadamente o resultado
+            def auto_print_callback(job_id, status, data):
+                """Callback para auto-impressão"""
+                try:
+                    if status == "complete":
+                        logger.info(f"Auto-impressão concluída com sucesso: {job_info.document_name}")
+                        logger.info(f"Páginas processadas: {data.get('successful_pages', 0)}/{data.get('total_pages', 0)}")
+                    elif status == "canceled":
+                        logger.warning(f"Auto-impressão cancelada: {job_info.document_name}")
+                    elif status == "error":
+                        error_msg = data.get("error", "Erro desconhecido") if isinstance(data, dict) else str(data)
+                        logger.error(f"Erro na auto-impressão de '{job_info.document_name}': {error_msg}")
+                    elif status == "progress":
+                        # Log de progresso mais silencioso para auto-impressão
+                        logger.debug(f"Auto-impressão progresso: {data}")
+                except Exception as e:
+                    logger.error(f"Erro no callback de auto-impressão: {e}")
             
             # Adiciona o trabalho à fila
             print_queue_manager = print_system.print_queue_manager
             print_queue_manager.add_job(
                 job_info,
                 printer_instance,
-                None  # Sem callback para notificação
+                auto_print_callback  # CORREÇÃO: Agora tem callback
             )
             
             logger.info(f"Auto-impressão: Documento '{document.name}' enviado para impressão")
@@ -507,6 +567,11 @@ class FileMonitor:
         with self.lock:
             if filepath in self.documents:
                 del self.documents[filepath]
+                
+                # CORREÇÃO: Remove também do controle de auto-impressão
+                with self.auto_print_lock:
+                    if filepath in self.auto_print_processed:
+                        del self.auto_print_processed[filepath]
                 
                 if self.on_documents_changed:
                     self.on_documents_changed(list(self.documents.values()))

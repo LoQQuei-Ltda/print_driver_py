@@ -1503,6 +1503,10 @@ class PrintQueueManager:
         self.job_history = []
         self.max_history = 100
         self.canceled_job_ids = set()
+        
+        # CORREÇÃO: Adiciona controle de jobs processados
+        self.processed_jobs = {}  # job_id -> timestamp
+        self.processed_jobs_lock = threading.Lock()
     
     def cancel_job_id(self, job_id: str):
         """Registra um job_id como cancelado."""
@@ -1552,6 +1556,28 @@ class PrintQueueManager:
     
     def add_job(self, print_job_info, printer_instance, callback=None):
         """Adiciona um trabalho à fila de impressão"""
+        
+        # CORREÇÃO: Verifica se o job já foi processado recentemente
+        with self.processed_jobs_lock:
+            import time
+            current_time = time.time()
+            job_id = print_job_info.job_id
+            
+            # Verifica se o job já foi processado nos últimos 10 segundos
+            last_processed = self.processed_jobs.get(job_id, 0)
+            if current_time - last_processed < 10:
+                logger.warning(f"Job {job_id} já foi processado recentemente, ignorando duplicata")
+                return job_id
+            
+            # Marca como sendo processado
+            self.processed_jobs[job_id] = current_time
+            
+            # Limpa entradas antigas (mais de 1 hora)
+            old_entries = [jid for jid, timestamp in self.processed_jobs.items() 
+                        if current_time - timestamp > 3600]
+            for jid in old_entries:
+                del self.processed_jobs[jid]
+        
         self.start()  # Garante que o worker está rodando
         
         job_item = {
@@ -1597,6 +1623,7 @@ class PrintQueueManager:
                 logger.info(f"  Printer ID (da API): {job_info.printer_id}")
                 logger.info(f"  Printer Name: {job_info.printer_name}")
                 logger.info(f"  Cópias solicitadas: {job_info.options.copies}")
+                logger.info(f"  Tem callback: {'Sim' if callback else 'Não'}")
                 
                 with self.lock:
                     is_canceled = job_info.job_id in self.canceled_job_ids
@@ -1639,18 +1666,24 @@ class PrintQueueManager:
                 
                 # Tenta imprimir
                 try:
-                    progress_callback("Iniciando impressão...")
+                    if callback:
+                        progress_callback("Iniciando impressão...")
+                    else:
+                        logger.info(f"Iniciando impressão (auto): {job_info.document_name}")
                     
                     success, result = printer.print_file(
                         job_info.document_path,
                         job_info.options,
                         job_info.document_name,
-                        progress_callback,
+                        progress_callback if callback else None,  # CORREÇÃO: Só passa progress_callback se houver callback
                         job_info=job_info
                     )
                     
                     # Atualiza informações do trabalho
                     job_info.end_time = datetime.now()
+                    
+                    # CORREÇÃO: Log detalhado do resultado
+                    logger.info(f"Resultado da impressão - Success: {success}, Result: {result}")
                     
                     if success:
                         job_info.status = "completed"
@@ -1683,6 +1716,8 @@ class PrintQueueManager:
                             else:
                                 job_info.status = "failed"
                                 logger.error(f"Falha no trabalho: {job_info.document_name}")
+                                # CORREÇÃO: Log detalhado da falha
+                                logger.error(f"  Detalhes da falha: {result}")
 
                         # Para trabalhos falhados, ainda registra as páginas processadas
                         total_pages_sent = result.get("total_pages", 0)
@@ -1733,6 +1768,12 @@ class PrintQueueManager:
                     if callback:
                         status_cb = "complete" if success else ("canceled" if job_info.status == "canceled" else "error")
                         wx.CallAfter(callback, job_info.job_id, status_cb, result)
+                    else:
+                        # CORREÇÃO: Log para casos sem callback (auto-impressão)
+                        if success:
+                            logger.info(f"Auto-impressão concluída: {job_info.document_name} - {job_info.completed_pages} páginas")
+                        else:
+                            logger.error(f"Auto-impressão falhou: {job_info.document_name}")
                     
                 except InterruptedError: # Captura o erro de cancelamento
                     logger.info(f"Processamento do trabalho {job_info.document_name} interrompido devido ao cancelamento.")
@@ -1752,8 +1793,14 @@ class PrintQueueManager:
                     
                     # Notifica o callback
                     if callback:
-                        callback(job_info.job_id, "error", {"error": str(e)})
+                        wx.CallAfter(callback, job_info.job_id, "error", {"error": str(e)})
+                    else:
+                        logger.error(f"Erro na auto-impressão: {job_info.document_name} - {str(e)}")
                 
+                with self.processed_jobs_lock:
+                    if job_info.job_id in self.processed_jobs:
+                        del self.processed_jobs[job_info.job_id]
+
                 # Marca o trabalho como concluído na fila
                 self.print_queue.task_done()
                 
@@ -1764,7 +1811,7 @@ class PrintQueueManager:
                 time.sleep(1.0)
             except Exception as e:
                 logger.error(f"Erro no processamento da fila: {e}")
-                time.sleep(5.0)  
+                time.sleep(5.0)
     
     def _add_to_history(self, job_info):
         """Adiciona um trabalho ao histórico"""
