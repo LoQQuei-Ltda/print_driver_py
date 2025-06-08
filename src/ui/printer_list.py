@@ -2961,15 +2961,6 @@ class PrinterListPanel(wx.ScrolledWindow):
                 try:
                     logger.info("Iniciando atualização de impressoras...")
                     
-                    # Notificação de progresso
-                    wx.CallAfter(
-                        self.notification_system.show_notification,
-                        "Descoberta de Impressoras",
-                        "Verificando conectividade e escaneando rede...",
-                        duration=4,
-                        notification_type="info"
-                    )
-                    
                     # Verifica se o método existe
                     if not hasattr(self.api_client, 'get_printers_with_discovery'):
                         wx.CallAfter(
