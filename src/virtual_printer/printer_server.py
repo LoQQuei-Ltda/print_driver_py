@@ -3,6 +3,7 @@
 
 """
 Servidor de impressora virtual cross-platform
+Versão corrigida com melhor suporte para macOS, Windows 7+ e Linux
 """
 
 import os
@@ -46,6 +47,8 @@ class PrinterServer:
         self.server_thread = None
         self.socket = None
         self.system = platform.system()
+        self.system_version = self._get_system_version()
+        self.architecture = self._get_architecture()
         self.ghostscript_path = None
         
         # Diretório base para PDFs
@@ -55,8 +58,106 @@ class PrinterServer:
         Path(self.base_output_dir).mkdir(parents=True, exist_ok=True)
         logger.info(f"Diretório base para PDFs: {self.base_output_dir}")
         
+        # Log de informações do sistema
+        self._log_system_info()
+        
         # Verificar e instalar Ghostscript
         self._init_ghostscript()
+    
+    def _get_system_version(self):
+        """Obtém versão específica do sistema"""
+        try:
+            if self.system == 'Darwin':  # macOS
+                version = platform.mac_ver()[0]
+                return version
+            elif self.system == 'Windows':
+                return platform.release()
+            elif self.system == 'Linux':
+                try:
+                    with open('/etc/os-release', 'r') as f:
+                        lines = f.readlines()
+                        for line in lines:
+                            if line.startswith('PRETTY_NAME='):
+                                return line.split('=', 1)[1].strip().strip('"')
+                except:
+                    pass
+                return platform.release()
+            else:
+                return platform.release()
+        except:
+            return "unknown"
+    
+    def _get_architecture(self):
+        """Detecta a arquitetura do sistema de forma precisa"""
+        machine = platform.machine().lower()
+        
+        if self.system == 'Darwin':  # macOS
+            # Verificar se é Apple Silicon
+            try:
+                # Método 1: Verificar tradução Rosetta
+                result = run_hidden(['sysctl', '-n', 'sysctl.proc_translated'], timeout=5)
+                if result.returncode == 0 and result.stdout.strip() == '1':
+                    # Rodando sob Rosetta, mas vamos verificar a arquitetura real
+                    pass
+            except:
+                pass
+            
+            try:
+                # Método 2: Verificar arquitetura do processador
+                result = run_hidden(['uname', '-m'], timeout=5)
+                if result.returncode == 0:
+                    uname_machine = result.stdout.strip().lower()
+                    if 'arm' in uname_machine or 'aarch64' in uname_machine:
+                        return 'apple_silicon'
+                    else:
+                        return 'intel'
+            except:
+                pass
+            
+            # Método 3: Verificar via sysctl
+            try:
+                result = run_hidden(['sysctl', '-n', 'hw.optional.arm64'], timeout=5)
+                if result.returncode == 0 and result.stdout.strip() == '1':
+                    return 'apple_silicon'
+            except:
+                pass
+            
+            # Fallback baseado no platform.machine()
+            if 'arm' in machine or 'aarch64' in machine:
+                return 'apple_silicon'
+            else:
+                return 'intel'
+                
+        elif 'x86_64' in machine or 'amd64' in machine:
+            return 'x86_64'
+        elif 'i386' in machine or 'i686' in machine:
+            return 'x86'
+        elif 'arm' in machine or 'aarch64' in machine:
+            return 'arm64'
+        else:
+            return machine
+    
+    def _log_system_info(self):
+        """Log detalhado das informações do sistema"""
+        logger.info("=== INFORMAÇÕES DO SISTEMA ===")
+        logger.info(f"Sistema operacional: {self.system}")
+        logger.info(f"Versão do sistema: {self.system_version}")
+        logger.info(f"Arquitetura: {self.architecture}")
+        logger.info(f"Máquina: {platform.machine()}")
+        logger.info(f"Processador: {platform.processor()}")
+        
+        if self.system == 'Darwin':
+            try:
+                # Informações específicas do macOS
+                result = run_hidden(['sw_vers'], timeout=5)
+                if result.returncode == 0:
+                    logger.info("Detalhes do macOS:")
+                    for line in result.stdout.strip().split('\n'):
+                        logger.info(f"  {line}")
+            except:
+                pass
+        
+        logger.info("===============================")
     
     def _init_ghostscript(self):
         """Inicializa o Ghostscript"""
@@ -76,8 +177,10 @@ class PrinterServer:
         """Localiza o executável do Ghostscript cross-platform"""
         if self.system == 'Windows':
             return self._find_ghostscript_windows()
-        else:
-            return self._find_ghostscript_unix()
+        elif self.system == 'Darwin':
+            return self._find_ghostscript_macos()
+        else:  # Linux
+            return self._find_ghostscript_linux()
     
     def _find_ghostscript_windows(self):
         """Busca Ghostscript no Windows"""
@@ -119,8 +222,68 @@ class PrinterServer:
         
         return None
     
-    def _find_ghostscript_unix(self):
-        """Busca Ghostscript em sistemas Unix (Linux/macOS)"""
+    def _find_ghostscript_macos(self):
+        """Busca Ghostscript no macOS"""
+        # Verificar pasta portátil primeiro
+        current_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        gs_dir = os.path.join(current_dir, 'gs')
+        
+        if os.path.exists(gs_dir):
+            for root, dirs, files in os.walk(gs_dir):
+                if 'gs' in files:
+                    gs_path = os.path.join(root, 'gs')
+                    if os.access(gs_path, os.X_OK) and self._test_ghostscript_executable(gs_path):
+                        return gs_path
+        
+        # Verificar instalações do Homebrew
+        homebrew_paths = []
+        if self.architecture == 'apple_silicon':
+            homebrew_paths = [
+                '/opt/homebrew/bin/gs',  # Homebrew Apple Silicon
+                '/usr/local/bin/gs',     # Homebrew Intel no Apple Silicon
+            ]
+        else:
+            homebrew_paths = [
+                '/usr/local/bin/gs',     # Homebrew Intel
+                '/opt/homebrew/bin/gs',  # Fallback
+            ]
+        
+        for path in homebrew_paths:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                if self._test_ghostscript_executable(path):
+                    return path
+        
+        # Verificar no PATH do sistema
+        try:
+            result = run_hidden(['which', 'gs'], timeout=5)
+            if result.returncode == 0:
+                gs_path = result.stdout.strip()
+                if self._test_ghostscript_executable(gs_path):
+                    return gs_path
+        except:
+            pass
+        
+        # Verificar locais comuns de instalação no macOS
+        common_paths = [
+            '/usr/bin/gs',
+            '/usr/local/bin/gs',
+            '/opt/local/bin/gs',  # MacPorts
+            '/Applications/ghostscript*/bin/gs',
+            '/Library/usr/bin/gs',
+        ]
+        
+        import glob
+        for path_pattern in common_paths:
+            paths = glob.glob(path_pattern)
+            for path in paths:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    if self._test_ghostscript_executable(path):
+                        return path
+        
+        return None
+    
+    def _find_ghostscript_linux(self):
+        """Busca Ghostscript no Linux"""
         # Verificar pasta portátil primeiro
         current_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
         gs_dir = os.path.join(current_dir, 'gs')
@@ -134,7 +297,7 @@ class PrinterServer:
         
         # Verificar no PATH do sistema
         try:
-            result = run_hidden(['which', 'gs'])
+            result = run_hidden(['which', 'gs'], timeout=5)
             if result.returncode == 0:
                 gs_path = result.stdout.strip()
                 if self._test_ghostscript_executable(gs_path):
@@ -147,7 +310,8 @@ class PrinterServer:
             '/usr/bin/gs',
             '/usr/local/bin/gs',
             '/opt/local/bin/gs',
-            '/usr/local/Cellar/ghostscript/*/bin/gs'
+            '/snap/bin/gs',  # Snap packages
+            '/usr/local/Cellar/ghostscript/*/bin/gs'  # Se alguém instalou Homebrew no Linux
         ]
         
         import glob
@@ -182,10 +346,10 @@ class PrinterServer:
         """Instala versão portátil do Ghostscript baseada no sistema"""
         if self.system == 'Windows':
             return self._install_ghostscript_windows()
-        elif self.system == 'Linux':
-            return self._install_ghostscript_linux()
         elif self.system == 'Darwin':
             return self._install_ghostscript_macos()
+        elif self.system == 'Linux':
+            return self._install_ghostscript_linux()
         return None
     
     def _install_ghostscript_windows(self):
@@ -197,42 +361,228 @@ class PrinterServer:
         
         is_64bits = platform.architecture()[0] == '64bit'
         
+        # URLs atualizadas para Ghostscript 10.02.1 (versão mais recente)
         if is_64bits:
-            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs1000/ghostpcl-10.0.0-win64.zip"
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostpcl-10.02.1-win64.zip"
             expected_exe = "gpcl6win64.exe"
         else:
-            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs1000/ghostpcl-10.0.0-win32.zip"
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostpcl-10.02.1-win32.zip"
             expected_exe = "gpcl6win32.exe"
         
         return self._download_and_install_ghostscript(gs_url, expected_exe)
     
-    def _install_ghostscript_linux(self):
-        """Instala Ghostscript no Linux"""
-        import urllib.request
-        import tarfile
-        
-        machine = platform.machine().lower()
-        if 'x86_64' in machine or 'amd64' in machine:
-            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs1000/ghostscript-10.0.0-linux-x86_64.tgz"
-        else:
-            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs1000/ghostscript-10.0.0-linux-x86.tgz"
-        
-        return self._download_and_install_ghostscript_unix(gs_url, 'gs')
-    
     def _install_ghostscript_macos(self):
         """Instala Ghostscript no macOS"""
-        try:
-            run_hidden(['which', 'brew'], timeout=5)
-            logger.info("Homebrew encontrado, tentando instalar Ghostscript...")
-            result = run_hidden(['brew', 'install', 'ghostscript'])
-            if result.returncode == 0:
-                gs_result = run_hidden(['which', 'gs'])
-                if gs_result.returncode == 0:
-                    return gs_result.stdout.strip()
-        except:
-            pass
+        # Primeiro, tentar Homebrew
+        homebrew_success = self._install_ghostscript_homebrew()
+        if homebrew_success:
+            return homebrew_success
         
-        gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs1000/ghostscript-10.0.0-linux-x86_64.tgz"
+        # Se Homebrew falhou, tentar MacPorts
+        macports_success = self._install_ghostscript_macports()
+        if macports_success:
+            return macports_success
+        
+        # Se ambos falharam, tentar download direto
+        return self._install_ghostscript_macos_direct()
+    
+    def _install_ghostscript_homebrew(self):
+        """Instala Ghostscript via Homebrew no macOS"""
+        try:
+            # Verificar se Homebrew está instalado
+            homebrew_paths = ['/opt/homebrew/bin/brew', '/usr/local/bin/brew']
+            brew_cmd = None
+            
+            for path in homebrew_paths:
+                if os.path.exists(path):
+                    brew_cmd = path
+                    break
+            
+            if not brew_cmd:
+                # Tentar encontrar brew no PATH
+                try:
+                    result = run_hidden(['which', 'brew'], timeout=5)
+                    if result.returncode == 0:
+                        brew_cmd = result.stdout.strip()
+                except:
+                    pass
+            
+            if brew_cmd:
+                logger.info("Homebrew encontrado, tentando instalar Ghostscript...")
+                
+                # Atualizar Homebrew primeiro
+                try:
+                    run_hidden([brew_cmd, 'update'], timeout=120)
+                except:
+                    pass  # Não é crítico se a atualização falhar
+                
+                # Instalar Ghostscript
+                result = run_hidden([brew_cmd, 'install', 'ghostscript'], timeout=300)
+                if result.returncode == 0:
+                    logger.info("Ghostscript instalado via Homebrew com sucesso")
+                    
+                    # Encontrar o executável instalado
+                    time.sleep(2)
+                    return self._find_ghostscript_macos()
+                else:
+                    logger.warning(f"Falha ao instalar Ghostscript via Homebrew: {result.stderr}")
+            else:
+                logger.info("Homebrew não encontrado")
+                
+        except Exception as e:
+            logger.warning(f"Erro ao instalar via Homebrew: {e}")
+        
+        return None
+    
+    def _install_ghostscript_macports(self):
+        """Instala Ghostscript via MacPorts no macOS"""
+        try:
+            # Verificar se MacPorts está instalado
+            if os.path.exists('/opt/local/bin/port'):
+                logger.info("MacPorts encontrado, tentando instalar Ghostscript...")
+                
+                result = run_hidden(['sudo', '/opt/local/bin/port', 'install', 'ghostscript'], timeout=300)
+                if result.returncode == 0:
+                    logger.info("Ghostscript instalado via MacPorts com sucesso")
+                    
+                    # Encontrar o executável instalado
+                    time.sleep(2)
+                    return self._find_ghostscript_macos()
+                else:
+                    logger.warning(f"Falha ao instalar Ghostscript via MacPorts: {result.stderr}")
+            else:
+                logger.info("MacPorts não encontrado")
+                
+        except Exception as e:
+            logger.warning(f"Erro ao instalar via MacPorts: {e}")
+        
+        return None
+    
+    def _install_ghostscript_macos_direct(self):
+        """Instala Ghostscript diretamente no macOS via download"""
+        logger.info("Tentando instalação direta do Ghostscript para macOS...")
+        
+        # URLs corretas para macOS baseadas na arquitetura
+        if self.architecture == 'apple_silicon':
+            # Para Apple Silicon, usar builds universais ou ARM64
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1-darwin-x86_64.pkg"
+            logger.info("Usando build para Apple Silicon/ARM64")
+        else:
+            # Para Intel Mac
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1-darwin-x86_64.pkg"
+            logger.info("Usando build para Intel Mac")
+        
+        return self._download_and_install_ghostscript_macos_pkg(gs_url)
+    
+    def _download_and_install_ghostscript_macos_pkg(self, url):
+        """Download e instalação de PKG do macOS"""
+        import urllib.request
+        import tempfile
+        import shutil
+        
+        temp_dir = tempfile.mkdtemp(prefix="gs_install_")
+        
+        try:
+            pkg_path = os.path.join(temp_dir, "ghostscript.pkg")
+            
+            logger.info(f"Baixando Ghostscript de {url}...")
+            headers = {'User-Agent': 'Mozilla/5.0 (compatible; Python)'}
+            request = urllib.request.Request(url, headers=headers)
+            
+            with urllib.request.urlopen(request, timeout=120) as response:
+                with open(pkg_path, 'wb') as out_file:
+                    shutil.copyfileobj(response, out_file)
+            
+            # Instalar o PKG
+            logger.info("Instalando Ghostscript...")
+            result = run_hidden(['sudo', 'installer', '-pkg', pkg_path, '-target', '/'], timeout=180)
+            
+            if result.returncode == 0:
+                logger.info("Ghostscript instalado com sucesso")
+                time.sleep(3)
+                return self._find_ghostscript_macos()
+            else:
+                logger.error(f"Falha ao instalar PKG: {result.stderr}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"Erro na instalação do PKG: {e}")
+            return None
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+    
+    def _install_ghostscript_linux(self):
+        """Instala Ghostscript no Linux"""
+        # Primeiro, tentar via gerenciador de pacotes
+        package_success = self._install_ghostscript_linux_packages()
+        if package_success:
+            return package_success
+        
+        # Se falhou, tentar download direto
+        return self._install_ghostscript_linux_direct()
+    
+    def _install_ghostscript_linux_packages(self):
+        """Instala Ghostscript via gerenciador de pacotes"""
+        logger.info("Tentando instalar Ghostscript via gerenciador de pacotes...")
+        
+        # Detectar distribuição e gerenciador de pacotes
+        install_commands = []
+        
+        # Debian/Ubuntu (apt)
+        if os.path.exists('/usr/bin/apt-get') or os.path.exists('/usr/bin/apt'):
+            install_commands.extend([
+                ['sudo', 'apt-get', 'update'],
+                ['sudo', 'apt-get', 'install', '-y', 'ghostscript'],
+            ])
+        
+        # Red Hat/CentOS/Fedora (yum/dnf)
+        elif os.path.exists('/usr/bin/yum'):
+            install_commands.append(['sudo', 'yum', 'install', '-y', 'ghostscript'])
+        elif os.path.exists('/usr/bin/dnf'):
+            install_commands.append(['sudo', 'dnf', 'install', '-y', 'ghostscript'])
+        
+        # Arch Linux (pacman)
+        elif os.path.exists('/usr/bin/pacman'):
+            install_commands.append(['sudo', 'pacman', '-S', '--noconfirm', 'ghostscript'])
+        
+        # openSUSE (zypper)
+        elif os.path.exists('/usr/bin/zypper'):
+            install_commands.append(['sudo', 'zypper', 'install', '-y', 'ghostscript'])
+        
+        # Alpine Linux (apk)
+        elif os.path.exists('/sbin/apk'):
+            install_commands.append(['sudo', 'apk', 'add', 'ghostscript'])
+        
+        for cmd in install_commands:
+            try:
+                logger.info(f"Executando: {' '.join(cmd)}")
+                result = run_hidden(cmd, timeout=180)
+                if result.returncode == 0:
+                    logger.info("Ghostscript instalado via gerenciador de pacotes")
+                    time.sleep(2)
+                    return self._find_ghostscript_linux()
+            except Exception as e:
+                logger.warning(f"Erro ao executar comando: {e}")
+        
+        return None
+    
+    def _install_ghostscript_linux_direct(self):
+        """Instala Ghostscript diretamente no Linux via download"""
+        logger.info("Tentando instalação direta do Ghostscript para Linux...")
+        
+        # URLs baseadas na arquitetura
+        if self.architecture == 'x86_64':
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1-linux-x86_64.tgz"
+        elif self.architecture == 'x86':
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1-linux-x86.tgz"
+        elif self.architecture == 'arm64':
+            # Para ARM64, tentar compilar ou usar build genérico
+            gs_url = "https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10021/ghostscript-10.02.1-linux-x86_64.tgz"
+            logger.warning("Usando build x86_64 para ARM64 - pode não funcionar otimamente")
+        else:
+            logger.warning(f"Arquitetura {self.architecture} não suportada para download direto")
+            return None
+        
         return self._download_and_install_ghostscript_unix(gs_url, 'gs')
     
     def _download_and_install_ghostscript(self, url, expected_exe):
@@ -386,6 +736,8 @@ class PrinterServer:
                 return pdf_data
             else:
                 logger.error("Erro: Saída não contém um PDF válido.")
+                if stderr:
+                    logger.error(f"Stderr do Ghostscript: {stderr.decode('utf-8', errors='ignore')}")
                 return None
                 
         except Exception as e:
@@ -472,30 +824,11 @@ class PrinterServer:
             logger.error(f"Erro ao extrair nome de usuário: {e}")
             return None
     
-    def _get_current_windows_user(self):
-        """Obtém o nome do usuário atual no Windows"""
+    def _get_current_system_user(self):
+        """Obtém o nome do usuário atual do sistema"""
         try:
-            if self.system == 'Windows':
-                # Tenta usando o processo de spooler
-                try:
-                    # Verifica o processo do spooler
-                    import psutil
-                    for process in psutil.process_iter(['pid', 'name', 'username']):
-                        if process.info['name'] and 'spoolsv' in process.info['name'].lower():
-                            if process.info['username']:
-                                # Extrai apenas o nome de usuário da string de domínio\usuário
-                                username = process.info['username'].split('\\')[-1]
-                                return username
-                except:
-                    pass
-                
-                # Método mais direto usando módulo getpass
-                return getpass.getuser()
-            else:
-                # Em sistemas Unix
-                return getpass.getuser()
+            return getpass.getuser()
         except:
-            # Fallback
             return "shared_user"
     
     def _get_user_output_dir(self, username=None):
@@ -513,31 +846,118 @@ class PrinterServer:
             logger.info(f"Usando diretório padrão: {self.base_output_dir}")
             return self.base_output_dir
         
-        # Se estiver no Windows, tenta criar/usar o diretório no AppData do usuário
+        # Tratamento específico por sistema operacional
         if self.system == 'Windows':
-            try:
-                # Tenta encontrar o perfil do usuário
-                users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
-                user_profile = os.path.join(users_dir, username)
-                
-                # Se o perfil do usuário existe
-                if os.path.exists(user_profile):
-                    app_data = os.path.join(user_profile, 'AppData', 'Local')
-                    if os.path.exists(app_data):
-                        user_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
-                        try:
-                            os.makedirs(user_dir, exist_ok=True)
-                            logger.info(f"Usando diretório específico do usuário: {user_dir}")
-                            return user_dir
-                        except PermissionError:
-                            logger.warning(f"Sem permissão para criar diretório no AppData do usuário {username}")
-                        except Exception as e:
-                            logger.warning(f"Erro ao criar diretório do usuário {username}: {e}")
-            except Exception as e:
-                logger.warning(f"Erro ao processar diretório para usuário {username}: {e}")
+            return self._get_user_output_dir_windows(username)
+        elif self.system == 'Darwin':  # macOS
+            return self._get_user_output_dir_macos(username)
+        else:  # Linux
+            return self._get_user_output_dir_linux(username)
+    
+    def _get_user_output_dir_windows(self, username):
+        """Obtém diretório de saída para Windows"""
+        try:
+            # Tenta encontrar o perfil do usuário
+            users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
+            user_profile = os.path.join(users_dir, username)
+            
+            # Se o perfil do usuário existe
+            if os.path.exists(user_profile):
+                app_data = os.path.join(user_profile, 'AppData', 'Local')
+                if os.path.exists(app_data):
+                    user_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        logger.info(f"Usando diretório específico do usuário Windows: {user_dir}")
+                        return user_dir
+                    except PermissionError:
+                        logger.warning(f"Sem permissão para criar diretório no AppData do usuário {username}")
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório do usuário {username}: {e}")
+        except Exception as e:
+            logger.warning(f"Erro ao processar diretório para usuário {username}: {e}")
         
-        # Se não conseguiu usar o diretório específico do usuário, usa o diretório base
-        logger.info(f"Usando diretório base: {self.base_output_dir}")
+        # Fallback para diretório base
+        logger.info(f"Usando diretório base Windows: {self.base_output_dir}")
+        return self.base_output_dir
+    
+    def _get_user_output_dir_macos(self, username):
+        """Obtém diretório de saída para macOS"""
+        try:
+            # No macOS, os usuários ficam em /Users/
+            user_home = os.path.join('/Users', username)
+            
+            if os.path.exists(user_home):
+                # Usar Documents folder do usuário
+                documents_dir = os.path.join(user_home, 'Documents')
+                if os.path.exists(documents_dir):
+                    user_dir = os.path.join(documents_dir, 'Impressora_LoQQuei')
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        # Verificar permissões
+                        if os.access(user_dir, os.W_OK):
+                            logger.info(f"Usando diretório específico do usuário macOS: {user_dir}")
+                            return user_dir
+                        else:
+                            logger.warning(f"Sem permissão de escrita no diretório {user_dir}")
+                    except PermissionError:
+                        logger.warning(f"Sem permissão para criar diretório no Documents do usuário {username}")
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório do usuário {username}: {e}")
+                
+                # Tentar Application Support como alternativa
+                app_support = os.path.join(user_home, 'Library', 'Application Support')
+                if os.path.exists(app_support):
+                    user_dir = os.path.join(app_support, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        if os.access(user_dir, os.W_OK):
+                            logger.info(f"Usando diretório Application Support do usuário macOS: {user_dir}")
+                            return user_dir
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório Application Support: {e}")
+        except Exception as e:
+            logger.warning(f"Erro ao processar diretório para usuário macOS {username}: {e}")
+        
+        # Fallback para diretório base
+        logger.info(f"Usando diretório base macOS: {self.base_output_dir}")
+        return self.base_output_dir
+    
+    def _get_user_output_dir_linux(self, username):
+        """Obtém diretório de saída para Linux"""
+        try:
+            # No Linux, os usuários ficam em /home/
+            user_home = os.path.join('/home', username)
+            
+            if os.path.exists(user_home):
+                # Tentar usar Documents primeiro
+                documents_dir = os.path.join(user_home, 'Documents')
+                if os.path.exists(documents_dir):
+                    user_dir = os.path.join(documents_dir, 'Impressora_LoQQuei')
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        if os.access(user_dir, os.W_OK):
+                            logger.info(f"Usando diretório específico do usuário Linux: {user_dir}")
+                            return user_dir
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório Documents: {e}")
+                
+                # Tentar .local/share como alternativa (XDG)
+                local_share = os.path.join(user_home, '.local', 'share')
+                if os.path.exists(local_share):
+                    user_dir = os.path.join(local_share, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                    try:
+                        os.makedirs(user_dir, exist_ok=True)
+                        if os.access(user_dir, os.W_OK):
+                            logger.info(f"Usando diretório .local/share do usuário Linux: {user_dir}")
+                            return user_dir
+                    except Exception as e:
+                        logger.warning(f"Erro ao criar diretório .local/share: {e}")
+        except Exception as e:
+            logger.warning(f"Erro ao processar diretório para usuário Linux {username}: {e}")
+        
+        # Fallback para diretório base
+        logger.info(f"Usando diretório base Linux: {self.base_output_dir}")
         return self.base_output_dir
     
     def _decode_with_multiple_encodings(self, data):
@@ -649,46 +1069,6 @@ class PrinterServer:
                 except:
                     continue
         
-        # Estratégia 4: Tenta decodificar blocos de texto separadamente
-        # Isso ajuda quando o documento tem mistura de encodings
-        try:
-            segments = []
-            i = 0
-            while i < len(data):
-                # Tenta diferentes tamanhos de bloco e encodings
-                best_segment = None
-                best_segment_score = -1
-                
-                for block_size in [100, 200, 500]:
-                    if i + block_size > len(data):
-                        block_size = len(data) - i
-                    
-                    block = data[i:i+block_size]
-                    
-                    for enc in ['utf-8', 'cp1252', 'latin1']:
-                        try:
-                            decoded_block = block.decode(enc, errors='replace')
-                            score = self._evaluate_text_quality(decoded_block)
-                            
-                            if score > best_segment_score:
-                                best_segment_score = score
-                                best_segment = decoded_block
-                        except:
-                            continue
-                
-                if best_segment:
-                    segments.append(best_segment)
-                    i += block_size
-                else:
-                    # Se nenhum bloco for decodificado bem, avance um byte
-                    i += 1
-            
-            if segments:
-                result = ''.join(segments)
-                return result
-        except:
-            pass
-        
         # Fallback final: UTF-8 com substituição de erros
         logger.warning("Todas as estratégias de decodificação falharam, usando UTF-8 com substituições")
         return data.decode('utf-8', errors='replace')
@@ -775,17 +1155,6 @@ class PrinterServer:
         
         return False
     
-    def _is_reasonable_text(self, text):
-        """Verifica se o texto decodificado é razoável"""
-        if not text:
-            return False
-        
-        # Conta caracteres de controle (exceto whitespace comum)
-        control_chars = sum(1 for c in text if ord(c) < 32 and c not in '\t\n\r ')
-        
-        # Se mais de 5% são caracteres de controle, provavelmente é encoding errado
-        return (control_chars / len(text)) < 0.05
-    
     def _clean_filename(self, filename):
         """Limpa e normaliza o nome do arquivo mantendo caracteres especiais - Versão melhorada"""
         if not filename:
@@ -844,7 +1213,6 @@ class PrinterServer:
         
         return filename
 
-    
     def _extract_pdf_filename(self, data):
         """Extrai o nome do arquivo diretamente de dados PDF - Versão melhorada"""
         try:
@@ -1125,38 +1493,6 @@ class PrinterServer:
                         logger.info(f"Nome de arquivo extraído por extensão ({ext}): {filename}")
                         break
         
-        # Tentativa final para nomes sem extensão mas que parecem válidos
-        if not filename:
-            logger.debug("Tentativa final: busca por qualquer nome aparente...")
-            
-            # Busca por sequências que parecem nomes de documento
-            patterns = [
-                # Padrões comuns de nomeação de documentos
-                r'(?:Documento|Document|Arquivo|File|Relatório|Report|Planilha|Spreadsheet|Apresentação|Presentation|Fatura|Invoice|Recibo|Receipt|Contrato|Contract)[\s_-]*([a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻]{3,})',
-                
-                # Nomes sem extensão mas com caracteres válidos
-                r'\b([a-zA-ZÀ-ÿ][a-zA-ZÀ-ÿ0-9\s_\-!#$%&\'()\-@^`{}~,;=+\[\]ªº°ßØøÆæœ¿¡¬¨§¶µ✓✔★☆♫♯♻☼☺☻]{5,})\b',
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, ps_text, re.UNICODE | re.IGNORECASE)
-                filtered_matches = []
-                
-                for match in matches:
-                    extracted_name = clean_extracted_name(match)
-                    if extracted_name and len(extracted_name) > 5:
-                        # Filtra nomes muito genéricos ou muito curtos
-                        if not any(generic in extracted_name.lower() for generic in 
-                                ['default', 'temp', 'tmp', 'unnamed', 'document', 'file']):
-                            filtered_matches.append(extracted_name)
-                
-                if filtered_matches:
-                    # Usa o nome mais longo
-                    filtered_matches.sort(key=len, reverse=True)
-                    filename = filtered_matches[0]
-                    logger.info(f"Nome extraído da busca final: {filename}")
-                    break
-        
         return filename
     
     def _save_pdf(self, pdf_data, title=None, author=None, filename=None):
@@ -1376,7 +1712,9 @@ class PrinterServer:
                         handler_thread.start()
                         
                     except socket.error as e:
-                        if e.errno != 10035:  # WSAEWOULDBLOCK no Windows
+                        if hasattr(e, 'errno') and e.errno == 10035:  # WSAEWOULDBLOCK no Windows
+                            continue
+                        else:
                             logger.error(f"Erro ao aceitar conexão: {e}")
                     
                 except Exception as e:
@@ -1463,3 +1801,5 @@ class PrinterServer:
             
         except Exception as e:
             logger.error(f"Erro ao processar trabalho de impressão: {e}")
+            import traceback
+            logger.debug(f"Traceback completo: {traceback.format_exc()}")
