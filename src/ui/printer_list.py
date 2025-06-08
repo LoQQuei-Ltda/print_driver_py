@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Componente de listagem de impressoras com detalhes aprimorados - Versão com Notificações do Sistema
+Componente de listagem de impressoras com detalhes aprimorados - Versão com Notificações do Sistema e Scrollbars Personalizadas
 """
 
 import os
@@ -1072,6 +1072,19 @@ class PrinterDetailsDialog(wx.Dialog):
         self.panel = wx.Panel(self)
         self.panel.SetBackgroundColour(self.colors["bg_color"])
         
+        # Aplica personalização de scrollbar após inicialização
+        if wx.Platform == '__WXMSW__':
+            try:
+                import win32gui
+                import win32con
+                
+                def customize_scrollbar():
+                    wx.CallAfter(self._customize_scrollbar_colors)
+                
+                wx.CallLater(100, customize_scrollbar)
+            except ImportError:
+                pass
+        
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Cabeçalho
@@ -1468,12 +1481,224 @@ class PrinterDetailsDialog(wx.Dialog):
         # Carrega os detalhes da impressora
         self._load_printer_details()
     
+    def _customize_scrollbar_colors(self):
+        """Personaliza as cores da scrollbar para tema escuro"""
+        try:
+            if wx.Platform == '__WXMSW__':
+                # Tenta aplicar tema escuro via win32
+                try:
+                    import win32gui
+                    import win32con
+                    import win32api
+                    import ctypes
+                    from ctypes import wintypes
+                    
+                    # Aplica para todos os ScrolledWindows nos tabs
+                    scroll_windows = [
+                        self.summary_panel,
+                        self.connectivity_panel, 
+                        self.attributes_panel,
+                        self.supplies_panel,
+                        self.diagnostic_panel
+                    ]
+                    
+                    for scroll_window in scroll_windows:
+                        if hasattr(scroll_window, 'GetHandle'):
+                            hwnd = scroll_window.GetHandle()
+                            
+                            # Tenta habilitar tema escuro no controle
+                            # Este é o método mais moderno para Windows 10/11
+                            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+                            DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1 = 19
+                            
+                            def try_set_dark_mode(attribute):
+                                try:
+                                    dwmapi = ctypes.windll.dwmapi
+                                    value = ctypes.c_int(1)
+                                    dwmapi.DwmSetWindowAttribute(
+                                        hwnd,
+                                        attribute,
+                                        ctypes.byref(value),
+                                        ctypes.sizeof(value)
+                                    )
+                                    return True
+                                except:
+                                    return False
+                            
+                            # Tenta ambas as versões do atributo
+                            if not try_set_dark_mode(DWMWA_USE_IMMERSIVE_DARK_MODE):
+                                try_set_dark_mode(DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_20H1)
+                            
+                            # Método alternativo: força tema escuro via SetWindowTheme
+                            try:
+                                uxtheme = ctypes.windll.uxtheme
+                                uxtheme.SetWindowTheme(hwnd, "DarkMode_Explorer", None)
+                            except:
+                                pass
+                            
+                            # Força atualização da janela
+                            try:
+                                user32 = ctypes.windll.user32
+                                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 
+                                                0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+                            except:
+                                pass
+                        
+                except ImportError:
+                    # Se win32 não estiver disponível, tenta método alternativo
+                    pass
+            
+            elif wx.Platform == '__WXGTK__':
+                # Para GTK, tenta aplicar estilo escuro
+                try:
+                    import gi
+                    gi.require_version('Gtk', '3.0')
+                    from gi.repository import Gtk
+                    
+                    # Aplica tema escuro no GTK
+                    settings = Gtk.Settings.get_default()
+                    settings.set_property('gtk-application-prefer-dark-theme', True)
+                except:
+                    pass
+            
+            elif wx.Platform == '__WXMAC__':
+                # Para macOS, o tema escuro é controlado pelo sistema
+                # Força refresh dos controles
+                scroll_windows = [
+                    self.summary_panel,
+                    self.connectivity_panel, 
+                    self.attributes_panel,
+                    self.supplies_panel,
+                    self.diagnostic_panel
+                ]
+                
+                for scroll_window in scroll_windows:
+                    scroll_window.Refresh()
+                
+        except Exception as e:
+            # Falha silenciosa para não quebrar a aplicação
+            pass
+        
+        # Método adicional: tenta personalizar via CSS no Windows
+        if wx.Platform == '__WXMSW__':
+            try:
+                # Aplica estilo personalizado aos ScrolledWindows
+                scroll_windows = [
+                    self.summary_panel,
+                    self.connectivity_panel, 
+                    self.attributes_panel,
+                    self.supplies_panel,
+                    self.diagnostic_panel
+                ]
+                
+                for scroll_window in scroll_windows:
+                    scroll_window.SetBackgroundColour(self.colors["panel_bg"])
+                    scroll_window.Refresh()
+                    scroll_window.Update()
+                
+                # Agenda uma segunda tentativa
+                wx.CallLater(500, self._apply_scrollbar_theme)
+                
+            except:
+                pass
+
+    def _apply_scrollbar_theme(self):
+        """Segunda tentativa de aplicar tema na scrollbar"""
+        try:
+            if wx.Platform == '__WXMSW__':
+                import ctypes
+                from ctypes import wintypes
+                
+                scroll_windows = [
+                    self.summary_panel,
+                    self.connectivity_panel, 
+                    self.attributes_panel,
+                    self.supplies_panel,
+                    self.diagnostic_panel
+                ]
+                
+                for scroll_window in scroll_windows:
+                    if hasattr(scroll_window, 'GetHandle'):
+                        hwnd = scroll_window.GetHandle()
+                        
+                        # Obtém todos os controles filhos (incluindo scrollbars)
+                        def enum_child_proc(child_hwnd, lparam):
+                            try:
+                                # Obtém informações da janela
+                                user32 = ctypes.windll.user32
+                                
+                                # Aplica tema escuro
+                                try:
+                                    uxtheme = ctypes.windll.uxtheme
+                                    uxtheme.SetWindowTheme(child_hwnd, "DarkMode_CFD", None)
+                                except:
+                                    try:
+                                        uxtheme.SetWindowTheme(child_hwnd, "DarkMode_Explorer", None)
+                                    except:
+                                        pass
+                                
+                                # Força redraw
+                                user32.InvalidateRect(child_hwnd, None, True)
+                                user32.UpdateWindow(child_hwnd)
+                                
+                            except:
+                                pass
+                            return True
+                        
+                        # Enumera e aplica tema em todos os filhos
+                        enum_proc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+                        ctypes.windll.user32.EnumChildWindows(hwnd, enum_proc(enum_child_proc), 0)
+                
+        except Exception as e:
+            pass
+    
     def _create_tab_panel(self, parent):
         """Cria um painel para uma tab"""
         panel = wx.ScrolledWindow(parent)
         panel.SetBackgroundColour(self.colors["panel_bg"])
         panel.SetScrollRate(0, 10)
+        
+        # Aplica personalização de scrollbar se no Windows
+        if wx.Platform == '__WXMSW__':
+            try:
+                import win32gui
+                import win32con
+                
+                def customize_panel_scrollbar():
+                    wx.CallAfter(self._customize_panel_scrollbar, panel)
+                
+                wx.CallLater(150, customize_panel_scrollbar)
+            except ImportError:
+                pass
+        
         return panel
+    
+    def _customize_panel_scrollbar(self, panel):
+        """Personaliza scrollbar de um painel específico"""
+        try:
+            if wx.Platform == '__WXMSW__' and hasattr(panel, 'GetHandle'):
+                import ctypes
+                from ctypes import wintypes
+                
+                hwnd = panel.GetHandle()
+                
+                # Aplica tema escuro
+                try:
+                    uxtheme = ctypes.windll.uxtheme
+                    uxtheme.SetWindowTheme(hwnd, "DarkMode_Explorer", None)
+                except:
+                    pass
+                
+                # Força atualização
+                try:
+                    user32 = ctypes.windll.user32
+                    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 
+                                    0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020)
+                except:
+                    pass
+                    
+        except Exception:
+            pass
     
     def _select_tab(self, index):
         """Seleciona uma tab pelo índice"""
