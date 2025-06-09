@@ -11,6 +11,7 @@ import logging
 import threading
 import platform
 import appdirs
+import hashlib
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from src.models.document import Document
@@ -19,7 +20,7 @@ from src.utils.pdf import PDFUtils
 logger = logging.getLogger("PrintManagementSystem.Utils.FileMonitor")
 
 class PDFHandler(FileSystemEventHandler):
-    """Manipulador para eventos de arquivos PDF"""
+    """Manipulador para eventos de arquivos PDF - VERSÃO CORRIGIDA"""
     
     def __init__(self, file_monitor):
         """
@@ -30,15 +31,18 @@ class PDFHandler(FileSystemEventHandler):
         """
         super().__init__()
         self.file_monitor = file_monitor
+        # CORREÇÃO: Adiciona debounce para evitar múltiplos eventos
+        self.pending_events = {}
+        self.event_lock = threading.Lock()
     
     def on_created(self, event):
-        """Manipula evento de criação de arquivo"""
+        """Manipula evento de criação de arquivo com debounce"""
         if event.is_directory:
             return
         
         if self._is_pdf_file(event.src_path):
             logger.info(f"Novo arquivo PDF criado: {event.src_path}")
-            self.file_monitor.add_document(event.src_path)
+            self._debounce_event('created', event.src_path)
     
     def on_deleted(self, event):
         """Manipula evento de exclusão de arquivo"""
@@ -47,16 +51,18 @@ class PDFHandler(FileSystemEventHandler):
         
         if self._is_pdf_file(event.src_path):
             logger.info(f"Arquivo PDF excluído: {event.src_path}")
+            # Cancelar eventos pendentes para este arquivo
+            self._cancel_pending_events(event.src_path)
             self.file_monitor.remove_document(event.src_path)
     
     def on_modified(self, event):
-        """Manipula evento de modificação de arquivo"""
+        """Manipula evento de modificação de arquivo com debounce"""
         if event.is_directory:
             return
         
         if self._is_pdf_file(event.src_path):
             logger.info(f"Arquivo PDF modificado: {event.src_path}")
-            self.file_monitor.update_document(event.src_path)
+            self._debounce_event('modified', event.src_path)
     
     def on_moved(self, event):
         """Manipula evento de movimentação de arquivo"""
@@ -66,8 +72,71 @@ class PDFHandler(FileSystemEventHandler):
         # Verifica se o destino é um PDF
         if self._is_pdf_file(event.dest_path):
             logger.info(f"Arquivo PDF movido: {event.src_path} -> {event.dest_path}")
+            self._cancel_pending_events(event.src_path)
             self.file_monitor.remove_document(event.src_path)
-            self.file_monitor.add_document(event.dest_path)
+            self._debounce_event('created', event.dest_path)
+    
+    def _debounce_event(self, event_type, file_path):
+        """
+        Implementa debounce para evitar múltiplos eventos para o mesmo arquivo
+        
+        Args:
+            event_type: Tipo do evento ('created' ou 'modified')
+            file_path: Caminho do arquivo
+        """
+        with self.event_lock:
+            current_time = time.time()
+            
+            # Chave única para o arquivo e tipo de evento
+            event_key = f"{event_type}:{file_path}"
+            
+            # Cancelar timer anterior se existir
+            if event_key in self.pending_events:
+                self.pending_events[event_key].cancel()
+            
+            # Criar novo timer
+            timer = threading.Timer(
+                2.0,  # Aguarda 2 segundos antes de processar
+                self._process_debounced_event,
+                args=[event_type, file_path, event_key]
+            )
+            
+            self.pending_events[event_key] = timer
+            timer.start()
+    
+    def _process_debounced_event(self, event_type, file_path, event_key):
+        """Processa o evento após o debounce"""
+        try:
+            with self.event_lock:
+                # Remove da lista de eventos pendentes
+                if event_key in self.pending_events:
+                    del self.pending_events[event_key]
+            
+            # Verifica se o arquivo ainda existe (pode ter sido deletado)
+            if not os.path.exists(file_path):
+                logger.debug(f"Arquivo {file_path} não existe mais, ignorando evento {event_type}")
+                return
+            
+            # Processa o evento baseado no tipo
+            if event_type == 'created':
+                self.file_monitor.add_document(file_path)
+            elif event_type == 'modified':
+                self.file_monitor.update_document(file_path)
+                
+        except Exception as e:
+            logger.error(f"Erro ao processar evento {event_type} para {file_path}: {e}")
+    
+    def _cancel_pending_events(self, file_path):
+        """Cancela todos os eventos pendentes para um arquivo"""
+        with self.event_lock:
+            keys_to_remove = []
+            for event_key in self.pending_events:
+                if file_path in event_key:
+                    self.pending_events[event_key].cancel()
+                    keys_to_remove.append(event_key)
+            
+            for key in keys_to_remove:
+                del self.pending_events[key]
     
     def _is_pdf_file(self, path):
         """Verifica se o arquivo é um PDF"""
@@ -99,6 +168,9 @@ class FileMonitor:
         # CORREÇÃO: Adiciona controle de processamento de auto-impressão
         self.auto_print_processed = {}  # arquivo -> timestamp do último processamento
         self.auto_print_lock = threading.Lock()
+
+        self.file_hashes = {}
+        self.hash_lock = threading.Lock()
         
         logger.info(f"Base de diretórios PDF configurada: {self.base_pdf_dir}")
         logger.info(f"Diretórios a monitorar: {len(self.pdf_dirs)}")
@@ -120,6 +192,55 @@ class FileMonitor:
         
         return None
     
+    def _get_file_hash(self, filepath):
+        """
+        Calcula o hash do arquivo para detectar duplicatas reais
+        
+        Args:
+            filepath: Caminho do arquivo
+            
+        Returns:
+            str: Hash MD5 do arquivo ou None em caso de erro
+        """
+        try:
+            with open(filepath, 'rb') as f:
+                # Lê apenas os primeiros 4KB para eficiência
+                content = f.read(4096)
+                return hashlib.md5(content).hexdigest()
+        except Exception as e:
+            logger.debug(f"Erro ao calcular hash de {filepath}: {e}")
+            return None
+
+    def _is_duplicate_file(self, filepath):
+        """
+        Verifica se o arquivo é uma duplicata baseado no hash
+        
+        Args:
+            filepath: Caminho do arquivo
+            
+        Returns:
+            bool: True se for duplicata
+        """
+        with self.hash_lock:
+            file_hash = self._get_file_hash(filepath)
+            if not file_hash:
+                return False
+            
+            # Verifica se já existe um arquivo com o mesmo hash
+            for existing_path, existing_hash in self.file_hashes.items():
+                if existing_hash == file_hash and existing_path != filepath:
+                    # Se o arquivo existente ainda existe, é duplicata
+                    if os.path.exists(existing_path):
+                        logger.info(f"Arquivo duplicado detectado: {filepath} (duplicata de {existing_path})")
+                        return True
+                    else:
+                        # Remove hash de arquivo que não existe mais
+                        del self.file_hashes[existing_path]
+            
+            # Adiciona o hash do arquivo atual
+            self.file_hashes[filepath] = file_hash
+            return False
+
     def _get_pdf_directories(self):
         """
         Obtém a lista de diretórios de PDF a serem monitorados
@@ -261,12 +382,17 @@ class FileMonitor:
     
     def add_document(self, filepath):
         """
-        Adiciona um documento ao monitor
+        Adiciona um documento ao monitor com controle aprimorado de duplicatas
         
         Args:
             filepath: Caminho para o documento
         """
         with self.lock:
+            # CORREÇÃO: Verifica se é arquivo duplicado por hash
+            if self._is_duplicate_file(filepath):
+                logger.info(f"Arquivo duplicado ignorado: {filepath}")
+                return
+            
             if self._add_document_internal(filepath):
                 document = self.documents.get(filepath)
                 auto_print_enabled = self.config.get("auto_print", False)
@@ -298,8 +424,8 @@ class FileMonitor:
             current_time = time.time()
             last_processed = self.auto_print_processed.get(filepath, 0)
             
-            # Se foi processado há menos de 5 segundos, ignora
-            if current_time - last_processed < 5:
+            # CORREÇÃO: Aumenta o tempo de debounce para 15 segundos
+            if current_time - last_processed < 15:
                 return False
             
             # Marca como processado agora
@@ -445,7 +571,9 @@ class FileMonitor:
             from src.utils.print_system import IPPPrinter, PrintJobInfo
             
             # Cria um ID único para o trabalho
-            job_id = f"auto_{int(time.time())}_{document.id}"
+            timestamp = int(time.time() * 1000)
+            file_hash = self._get_file_hash(document.path) or "unknown"
+            job_id = f"auto_{timestamp}_{file_hash[:8]}_{document.id}"
             
             # CORREÇÃO: Usa printer.id diretamente como na impressão manual
             job_info = PrintJobInfo(
@@ -572,6 +700,11 @@ class FileMonitor:
                 with self.auto_print_lock:
                     if filepath in self.auto_print_processed:
                         del self.auto_print_processed[filepath]
+                
+                # CORREÇÃO: Remove também do controle de hash
+                with self.hash_lock:
+                    if filepath in self.file_hashes:
+                        del self.file_hashes[filepath]
                 
                 if self.on_documents_changed:
                     self.on_documents_changed(list(self.documents.values()))

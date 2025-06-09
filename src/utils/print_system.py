@@ -1481,7 +1481,7 @@ class IPPPrinter:
 
 # Mantém as classes de gerenciamento e diálogos inalteradas
 class PrintQueueManager:
-    """Gerencia a fila de impressão"""
+    """Gerencia a fila de impressão - VERSÃO CORRIGIDA"""
     
     _instance = None
     
@@ -1504,9 +1504,13 @@ class PrintQueueManager:
         self.max_history = 100
         self.canceled_job_ids = set()
         
-        # CORREÇÃO: Adiciona controle de jobs processados
+        # CORREÇÃO: Controle aprimorado de jobs processados
         self.processed_jobs = {}  # job_id -> timestamp
         self.processed_jobs_lock = threading.Lock()
+        
+        # CORREÇÃO: Controle adicional por caminho de arquivo + hash
+        self.file_jobs = {}  # file_path -> {"hash": hash, "timestamp": timestamp, "job_id": job_id}
+        self.file_jobs_lock = threading.Lock()
     
     def cancel_job_id(self, job_id: str):
         """Registra um job_id como cancelado."""
@@ -1554,18 +1558,92 @@ class PrintQueueManager:
                 self.worker_thread = None
                 logger.info("Gerenciador de fila de impressão parado")
     
-    def add_job(self, print_job_info, printer_instance, callback=None):
-        """Adiciona um trabalho à fila de impressão"""
+    def _get_file_hash(self, filepath):
+        """
+        Calcula hash do arquivo para controle de duplicatas
         
-        # CORREÇÃO: Verifica se o job já foi processado recentemente
+        Args:
+            filepath: Caminho do arquivo
+            
+        Returns:
+            str: Hash MD5 do arquivo
+        """
+        try:
+            import hashlib
+            with open(filepath, 'rb') as f:
+                # Lê apenas os primeiros 8KB para eficiência
+                content = f.read(8192)
+                return hashlib.md5(content).hexdigest()
+        except Exception as e:
+            logger.debug(f"Erro ao calcular hash de {filepath}: {e}")
+            return None
+    
+    def _is_duplicate_job(self, print_job_info):
+        """
+        Verifica se é um trabalho duplicado baseado no arquivo e hash
+        
+        Args:
+            print_job_info: Informações do trabalho
+            
+        Returns:
+            bool: True se for duplicata
+        """
+        with self.file_jobs_lock:
+            import time
+            current_time = time.time()
+            filepath = print_job_info.document_path
+            
+            # Calcula hash do arquivo
+            file_hash = self._get_file_hash(filepath)
+            if not file_hash:
+                return False
+            
+            # Verifica se existe job para este arquivo
+            if filepath in self.file_jobs:
+                existing_job = self.file_jobs[filepath]
+                
+                # Se foi processado há menos de 30 segundos e tem o mesmo hash
+                if (current_time - existing_job["timestamp"] < 30 and 
+                    existing_job["hash"] == file_hash):
+                    logger.warning(f"Job duplicado detectado para arquivo {filepath} "
+                                 f"(job anterior: {existing_job['job_id']})")
+                    return True
+            
+            # Registra este job
+            self.file_jobs[filepath] = {
+                "hash": file_hash,
+                "timestamp": current_time,
+                "job_id": print_job_info.job_id
+            }
+            
+            # Limpa entradas antigas (mais de 5 minutos)
+            old_entries = []
+            for path, job_data in self.file_jobs.items():
+                if current_time - job_data["timestamp"] > 300:
+                    old_entries.append(path)
+            
+            for path in old_entries:
+                del self.file_jobs[path]
+            
+            return False
+    
+    def add_job(self, print_job_info, printer_instance, callback=None):
+        """Adiciona um trabalho à fila de impressão com controle aprimorado de duplicatas"""
+        
+        # CORREÇÃO: Verifica se é trabalho duplicado por arquivo/hash
+        if self._is_duplicate_job(print_job_info):
+            logger.warning(f"Job duplicado ignorado: {print_job_info.job_id}")
+            return print_job_info.job_id
+        
+        # CORREÇÃO: Verifica se o job ID já foi processado recentemente
         with self.processed_jobs_lock:
             import time
             current_time = time.time()
             job_id = print_job_info.job_id
             
-            # Verifica se o job já foi processado nos últimos 10 segundos
+            # Verifica se o job já foi processado nos últimos 20 segundos
             last_processed = self.processed_jobs.get(job_id, 0)
-            if current_time - last_processed < 10:
+            if current_time - last_processed < 20:
                 logger.warning(f"Job {job_id} já foi processado recentemente, ignorando duplicata")
                 return job_id
             
@@ -1797,6 +1875,7 @@ class PrintQueueManager:
                     else:
                         logger.error(f"Erro na auto-impressão: {job_info.document_name} - {str(e)}")
                 
+                # CORREÇÃO: Remove do controle de jobs processados apenas ao final
                 with self.processed_jobs_lock:
                     if job_info.job_id in self.processed_jobs:
                         del self.processed_jobs[job_info.job_id]
@@ -1812,7 +1891,7 @@ class PrintQueueManager:
             except Exception as e:
                 logger.error(f"Erro no processamento da fila: {e}")
                 time.sleep(5.0)
-    
+
     def _add_to_history(self, job_info):
         """Adiciona um trabalho ao histórico"""
         with self.lock:
@@ -1841,7 +1920,7 @@ class PrintQueueManager:
         """Retorna o histórico de trabalhos"""
         with self.lock:
             return list(self.job_history)
-
+        
 class PrintOptionsDialog(wx.Dialog):
     """Diálogo para configurar opções de impressão"""
     
