@@ -192,8 +192,8 @@ app = BUNDLE(
     icon='{icon_path}',
     bundle_identifier='br.com.loqquei.printmanagementsystem',
     info_plist={{
-        'CFBundleShortVersionString': '2.0.2',
-        'CFBundleVersion': '2.0.2',
+        'CFBundleShortVersionString': '2.0.3',
+        'CFBundleVersion': '2.0.3',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
         'NSAppleScriptEnabled': False,
@@ -382,7 +382,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.2"
+APP_VERSION = "2.0.3"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências comuns para todas as plataformas

@@ -66,10 +66,10 @@ class AppUpdater:
                         if "APP_VERSION" in line:
                             return line.split("=")[1].strip().strip('"\'')
             
-            return "2.0.2"  # Versão padrão
+            return "2.0.3"  # Versão padrão
         except Exception as e:
             logger.error(f"Erro ao obter versão atual: {str(e)}")
-            return "2.0.2"
+            return "2.0.3"
     
     def check_for_update(self, silent=True):
         """
@@ -151,7 +151,7 @@ class AppUpdater:
                 
                 # Verifica se há informações de versão no formato esperado
                 if response and isinstance(response, dict):
-                    # A API retorna: {'version': 'v2.0.2', 'updateUrl': 'https://...'}
+                    # A API retorna: {'version': 'v2.0.3', 'updateUrl': 'https://...'}
                     version = response.get('version')
                     update_url = response.get('updateUrl')
                     
