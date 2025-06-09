@@ -7,6 +7,11 @@ Monitor integrado para impressora virtual
 
 import os
 import logging
+import ctypes
+import psutil
+import socket
+import subprocess
+import time
 from datetime import datetime
 import platform
 
@@ -63,29 +68,120 @@ class VirtualPrinterManager:
         self.file_monitor = None
     
     def _diagnose_system(self):
-        """Diagnostica o sistema e registra informações úteis"""
-        import platform
-        import ctypes
+        """Diagnostica o sistema e registra informações detalhadas"""
+               
+        logger.info("=" * 50)
+        logger.info("=== DIAGNÓSTICO COMPLETO DO SISTEMA ===")
+        logger.info("=" * 50)
         
-        logger.info("=== DIAGNÓSTICO DO SISTEMA ===")
-        logger.info(f"Sistema operacional: {platform.system()} {platform.release()}")
+        # === INFORMAÇÕES BÁSICAS DO SISTEMA ===
+        logger.info("\n[SISTEMA OPERACIONAL]")
+        logger.info(f"Sistema: {platform.system()} {platform.release()}")
         logger.info(f"Versão: {platform.version()}")
         logger.info(f"Arquitetura: {platform.machine()}")
+        logger.info(f"Processador: {platform.processor()}")
+        logger.info(f"Nome da máquina: {platform.node()}")
         logger.info(f"Python: {platform.python_version()}")
+        logger.info(f"Data/Hora atual: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
+        # === INFORMAÇÕES DE HARDWARE ===
+        try:
+            logger.info("\n[HARDWARE]")
+            # CPU
+            cpu_count = psutil.cpu_count(logical=False)
+            cpu_count_logical = psutil.cpu_count(logical=True)
+            cpu_freq = psutil.cpu_freq()
+            logger.info(f"CPU físicos: {cpu_count}")
+            logger.info(f"CPU lógicos: {cpu_count_logical}")
+            if cpu_freq:
+                logger.info(f"Frequência CPU: {cpu_freq.current:.2f} MHz (max: {cpu_freq.max:.2f})")
+            
+            # Uso atual da CPU
+            cpu_percent = psutil.cpu_percent(interval=1)
+            logger.info(f"Uso atual da CPU: {cpu_percent}%")
+            
+            # Memória
+            memory = psutil.virtual_memory()
+            logger.info(f"Memória total: {memory.total / (1024**3):.2f} GB")
+            logger.info(f"Memória disponível: {memory.available / (1024**3):.2f} GB")
+            logger.info(f"Uso de memória: {memory.percent}%")
+            
+            # Disco
+            logger.info("\n[ARMAZENAMENTO]")
+            for partition in psutil.disk_partitions():
+                try:
+                    partition_usage = psutil.disk_usage(partition.mountpoint)
+                    logger.info(f"Disco {partition.device}: {partition_usage.total / (1024**3):.2f} GB total, "
+                            f"{partition_usage.free / (1024**3):.2f} GB livre ({partition_usage.percent}% usado)")
+                except PermissionError:
+                    logger.info(f"Disco {partition.device}: Sem permissão para acessar")
+        except Exception as e:
+            logger.error(f"Erro ao obter informações de hardware: {e}")
+        
+        # === INFORMAÇÕES DE REDE ===
+        try:
+            logger.info("\n[REDE]")
+            # Interfaces de rede
+            interfaces = psutil.net_if_addrs()
+            for interface_name, interface_addresses in interfaces.items():
+                logger.info(f"Interface: {interface_name}")
+                for address in interface_addresses:
+                    if address.family == socket.AF_INET:
+                        logger.info(f"  IPv4: {address.address}")
+                    elif address.family == socket.AF_INET6:
+                        logger.info(f"  IPv6: {address.address}")
+                    elif address.family == psutil.AF_LINK:
+                        logger.info(f"  MAC: {address.address}")
+            
+            # Estatísticas de rede
+            net_io = psutil.net_io_counters()
+            logger.info(f"Bytes enviados: {net_io.bytes_sent / (1024**2):.2f} MB")
+            logger.info(f"Bytes recebidos: {net_io.bytes_recv / (1024**2):.2f} MB")
+            
+            # Conexões ativas
+            connections = psutil.net_connections()
+            active_connections = [conn for conn in connections if conn.status == 'ESTABLISHED']
+            logger.info(f"Conexões ativas: {len(active_connections)}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao obter informações de rede: {e}")
+        
+        # === INFORMAÇÕES ESPECÍFICAS DO WINDOWS ===
         if platform.system() == 'Windows':
+            logger.info("\n[WINDOWS]")
+            
+            # Privilégios de administrador
             try:
                 is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
                 logger.info(f"Executando como administrador: {is_admin}")
             except:
                 logger.info("Não foi possível verificar privilégios de administrador")
             
-            # Verificar firewall
+            # Versão detalhada do Windows
             try:
-                result = run_hidden(
-                    ['netsh', 'advfirewall', 'show', 'currentprofile'],
-                    timeout=5
-                )
+                result = run_hidden(['wmic', 'os', 'get', 'Caption,Version,BuildNumber'], timeout=10)
+                if result.returncode == 0:
+                    logger.info("Versão detalhada do Windows:")
+                    for line in result.stdout.strip().split('\n')[1:]:
+                        if line.strip():
+                            logger.info(f"  {line.strip()}")
+            except:
+                pass
+            
+            # Informações do computador
+            try:
+                result = run_hidden(['wmic', 'computersystem', 'get', 'Manufacturer,Model,TotalPhysicalMemory'], timeout=10)
+                if result.returncode == 0:
+                    logger.info("Informações do computador:")
+                    for line in result.stdout.strip().split('\n')[1:]:
+                        if line.strip():
+                            logger.info(f"  {line.strip()}")
+            except:
+                pass
+            
+            # Firewall
+            try:
+                result = run_hidden(['netsh', 'advfirewall', 'show', 'currentprofile'], timeout=5)
                 if result.returncode == 0:
                     if 'State                                 ON' in result.stdout:
                         logger.warning("Firewall do Windows está ATIVO - pode bloquear conexões")
@@ -93,8 +189,102 @@ class VirtualPrinterManager:
                         logger.info("Firewall do Windows está desativado")
             except:
                 pass
+            
+            # Windows Defender
+            try:
+                result = run_hidden(['powershell', '-Command', 'Get-MpComputerStatus | Select-Object AntivirusEnabled,RealTimeProtectionEnabled'], timeout=10)
+                if result.returncode == 0:
+                    logger.info("Status do Windows Defender:")
+                    logger.info(f"  {result.stdout.strip()}")
+            except:
+                pass
+            
+            # Serviços importantes
+            try:
+                important_services = ['Themes', 'AudioSrv', 'Spooler', 'BITS', 'EventLog']
+                for service_name in important_services:
+                    result = run_hidden(['sc', 'query', service_name], timeout=5)
+                    if result.returncode == 0:
+                        if 'RUNNING' in result.stdout:
+                            logger.info(f"Serviço {service_name}: ATIVO")
+                        else:
+                            logger.warning(f"Serviço {service_name}: INATIVO")
+            except:
+                pass
+            
+            # Configurações de energia
+            try:
+                result = run_hidden(['powercfg', '/query'], timeout=10)
+                if result.returncode == 0:
+                    lines = result.stdout.split('\n')
+                    for line in lines[:10]:  # Primeiras 10 linhas
+                        if 'Power Scheme GUID' in line or 'GUID' in line:
+                            logger.info(f"Energia: {line.strip()}")
+            except:
+                pass
+                
+        # === CONFIGURAÇÕES DE REDE AVANÇADAS ===
+        try:
+            logger.info("\n[CONFIGURAÇÕES DE REDE]")
+            
+            # DNS
+            if platform.system() == 'Windows':
+                result = run_hidden(['nslookup', 'google.com'], timeout=10)
+                if result.returncode == 0:
+                    dns_lines = [line for line in result.stdout.split('\n') if 'Server:' in line]
+                    for line in dns_lines:
+                        logger.info(f"DNS: {line.strip()}")
+            
+            # Gateway padrão
+            if platform.system() == 'Windows':
+                result = run_hidden(['ipconfig'], timeout=10)
+                if result.returncode == 0:
+                    gateway_lines = [line for line in result.stdout.split('\n') if 'Gateway' in line and ':' in line]
+                    for line in gateway_lines:
+                        logger.info(f"Gateway: {line.strip()}")
+            
+            # Teste de conectividade
+            try:
+                response_time = subprocess.run(['ping', '-n', '1', 'google.com'], 
+                                            capture_output=True, text=True, timeout=5)
+                if response_time.returncode == 0:
+                    logger.info("Conectividade com internet: OK")
+                else:
+                    logger.warning("Conectividade com internet: FALHA")
+            except:
+                logger.warning("Não foi possível testar conectividade")
+                
+        except Exception as e:
+            logger.error(f"Erro ao obter configurações de rede: {e}")
         
-        logger.info("=== FIM DO DIAGNÓSTICO ===")
+        # === VARIÁVEIS DE AMBIENTE IMPORTANTES ===
+        try:
+            logger.info("\n[VARIÁVEIS DE AMBIENTE]")
+            important_env_vars = ['PATH', 'TEMP', 'USERNAME', 'COMPUTERNAME', 'PROCESSOR_ARCHITECTURE']
+            for var in important_env_vars:
+                value = os.environ.get(var, 'Não definida')
+                if var == 'PATH':
+                    logger.info(f"{var}: {len(value.split(';'))} entradas")
+                else:
+                    logger.info(f"{var}: {value}")
+        except Exception as e:
+            logger.error(f"Erro ao obter variáveis de ambiente: {e}")
+        
+        # === TEMPO DE ATIVIDADE ===
+        try:
+            logger.info("\n[SISTEMA]")
+            boot_time = psutil.boot_time()
+            boot_time_formatted = datetime.fromtimestamp(boot_time).strftime('%Y-%m-%d %H:%M:%S')
+            uptime_seconds = time.time() - boot_time
+            uptime_hours = uptime_seconds / 3600
+            logger.info(f"Último boot: {boot_time_formatted}")
+            logger.info(f"Tempo ativo: {uptime_hours:.1f} horas")
+        except Exception as e:
+            logger.error(f"Erro ao obter tempo de atividade: {e}")
+        
+        logger.info("=" * 50)
+        logger.info("=== FIM DO DIAGNÓSTICO COMPLETO ===")
+        logger.info("=" * 50)
 
     def _on_server_document_created(self, document):
         """Callback chamado quando o servidor cria um novo documento"""
