@@ -213,7 +213,8 @@ class FileMonitor:
 
     def _is_duplicate_file(self, filepath):
         """
-        Verifica se o arquivo é uma duplicata baseado no hash
+        Verifica se o arquivo é uma duplicata baseado no hash - VERSÃO MODIFICADA
+        Agora permite arquivos com mesmo conteúdo se tiverem nomes diferentes
         
         Args:
             filepath: Caminho do arquivo
@@ -226,16 +227,32 @@ class FileMonitor:
             if not file_hash:
                 return False
             
-            # Verifica se já existe um arquivo com o mesmo hash
+            filename = os.path.basename(filepath)
+            
+            # Verifica se já existe um arquivo com o mesmo hash E mesmo nome
             for existing_path, existing_hash in self.file_hashes.items():
                 if existing_hash == file_hash and existing_path != filepath:
-                    # Se o arquivo existente ainda existe, é duplicata
-                    if os.path.exists(existing_path):
-                        logger.info(f"Arquivo duplicado detectado: {filepath} (duplicata de {existing_path})")
-                        return True
+                    existing_filename = os.path.basename(existing_path)
+                    
+                    # Se o arquivo existente ainda existe E tem o mesmo nome
+                    if os.path.exists(existing_path) and existing_filename == filename:
+                        # Verifica se são realmente o mesmo arquivo (mesmo timestamp e tamanho)
+                        try:
+                            stat1 = os.stat(filepath)
+                            stat2 = os.stat(existing_path)
+                            
+                            # Se têm o mesmo tamanho e foram modificados com menos de 2 segundos de diferença
+                            if (stat1.st_size == stat2.st_size and 
+                                abs(stat1.st_mtime - stat2.st_mtime) < 2):
+                                logger.info(f"Arquivo duplicado detectado: {filepath} (duplicata exata de {existing_path})")
+                                return True
+                        except Exception as e:
+                            logger.debug(f"Erro ao comparar arquivos: {e}")
+                            continue
                     else:
                         # Remove hash de arquivo que não existe mais
-                        del self.file_hashes[existing_path]
+                        if not os.path.exists(existing_path):
+                            del self.file_hashes[existing_path]
             
             # Adiciona o hash do arquivo atual
             self.file_hashes[filepath] = file_hash
@@ -388,7 +405,6 @@ class FileMonitor:
             filepath: Caminho para o documento
         """
         with self.lock:
-            # CORREÇÃO: Verifica se é arquivo duplicado por hash
             if self._is_duplicate_file(filepath):
                 logger.info(f"Arquivo duplicado ignorado: {filepath}")
                 return
@@ -398,7 +414,7 @@ class FileMonitor:
                 auto_print_enabled = self.config.get("auto_print", False)
 
                 if document and auto_print_enabled:
-                    # CORREÇÃO: Verifica se já foi processado recentemente
+                    # Verifica se já foi processado recentemente
                     if self._should_process_auto_print(filepath):
                         self._process_auto_print(document)
                     else:
