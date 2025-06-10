@@ -316,22 +316,19 @@ class WindowsPrinterManager(PrinterManager):
         return False
     
     def _create_printer(self, name, port_name, is_server=False):
-        """Cria a impressora usando diferentes métodos com melhor tratamento de privilégios"""
-        
-        # CORREÇÃO: Verifica privilégios antes de tentar
-        is_admin = self._is_admin()
-        
+        """Cria a impressora usando diferentes métodos"""
         # Método 1: PowerShell (Windows 8+)
         try:
-            if is_admin and is_server:
+            cmd = [
+                'powershell', '-command',
+                f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
+            ]
+            
+            # Para servidores, adicionar configurações específicas
+            if is_server:
                 cmd = [
                     'powershell', '-command',
                     f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -Shared $true -ErrorAction Stop'
-                ]
-            else:
-                cmd = [
-                    'powershell', '-command',
-                    f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
                 ]
             
             result = run_hidden(cmd, timeout=30)
@@ -344,58 +341,54 @@ class WindowsPrinterManager(PrinterManager):
         except Exception as e:
             logger.warning(f"Erro ao criar impressora via PowerShell: {e}")
         
-        # CORREÇÃO: Para usuários não-admin, tenta método alternativo
-        if not is_admin:
-            logger.info("Usuário não-admin, tentando método alternativo...")
-            try:
-                # Tenta usar rundll32 que às vezes funciona para usuários não-admin
+        # Método 2: rundll32 printui.dll
+        try:
+            cmd = [
+                'rundll32', 'printui.dll,PrintUIEntry',
+                '/if', '/b', name, '/r', port_name, '/m', self.default_driver
+            ]
+            
+            result = run_hidden(cmd, timeout=30)
+            
+            # rundll32 não retorna códigos de erro confiáveis, verificar se foi criada
+            time.sleep(2)
+            if self.check_printer_exists(name):
+                logger.info(f"Impressora criada via rundll32: {name}")
+                return True
+            else:
+                logger.warning("rundll32 printui.dll executado mas impressora não foi criada")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via rundll32: {e}")
+        
+        # Método 3: cscript prnmngr.vbs
+        try:
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnmngr.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnmngr.vbs',
+                r'C:\Windows\System32\prnmngr.vbs'
+            ]
+            
+            script_path = None
+            for path in script_paths:
+                if os.path.exists(path):
+                    script_path = path
+                    break
+            
+            if script_path:
                 cmd = [
-                    'rundll32', 'printui.dll,PrintUIEntry',
-                    '/if', '/b', name, '/r', port_name, '/m', self.default_driver
+                    'cscript', script_path,
+                    '-a', '-p', name, '-m', self.default_driver, '-r', port_name
                 ]
                 
                 result = run_hidden(cmd, timeout=30)
                 
-                # rundll32 nem sempre retorna códigos corretos, verifica se foi criada
-                time.sleep(3)
-                if self.check_printer_exists(name):
-                    logger.info(f"Impressora criada via rundll32: {name}")
+                if result.returncode == 0 or 'added printer' in result.stdout.lower():
+                    logger.info(f"Impressora criada via prnmngr.vbs: {name}")
                     return True
                 else:
-                    logger.warning("rundll32 executado mas impressora não foi criada")
-            except Exception as e:
-                logger.warning(f"Erro ao criar impressora via rundll32: {e}")
-        
-        # Método 3: cscript prnmngr.vbs (só para admin)
-        if is_admin:
-            try:
-                script_paths = [
-                    r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnmngr.vbs',
-                    r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnmngr.vbs',
-                    r'C:\Windows\System32\prnmngr.vbs'
-                ]
-                
-                script_path = None
-                for path in script_paths:
-                    if os.path.exists(path):
-                        script_path = path
-                        break
-                
-                if script_path:
-                    cmd = [
-                        'cscript', script_path,
-                        '-a', '-p', name, '-m', self.default_driver, '-r', port_name
-                    ]
-                    
-                    result = run_hidden(cmd, timeout=30)
-                    
-                    if result.returncode == 0 or 'added printer' in result.stdout.lower():
-                        logger.info(f"Impressora criada via prnmngr.vbs: {name}")
-                        return True
-                    else:
-                        logger.warning(f"prnmngr.vbs falhou: {result.stderr}")
-            except Exception as e:
-                logger.warning(f"Erro ao criar impressora via prnmngr.vbs: {e}")
+                    logger.warning(f"prnmngr.vbs falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via prnmngr.vbs: {e}")
         
         return False
     
@@ -630,69 +623,52 @@ class UnixPrinterManager(PrinterManager):
             logger.info("No macOS, CUPS geralmente está pré-instalado. Tente: brew install cups")
     
     def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
-        """Adiciona impressora no Windows com prevenção de duplicatas"""
-        
-        # CORREÇÃO: Verifica se a impressora já existe ANTES de fazer qualquer coisa
-        if self.check_printer_exists(name):
-            logger.info(f"Impressora '{name}' já existe, não criando duplicata")
-            return True
-        
-        if printer_port_name is None:
-            printer_port_name = f"IP_{ip}:{port}"
-        
-        logger.info(f"Instalando impressora: {name}")
-        logger.info(f"Driver: {self.default_driver}")
-        logger.info(f"Porta: {printer_port_name}")
-        logger.info(f"IP: {ip}:{port}")
-        
-        # Para Windows Server, verificar se precisa configurar para todos os usuários
-        is_server = self._is_windows_server()
-        if is_server:
-            logger.info("Configurando impressora para ambiente Windows Server (multi-usuário)")
-        
-        # CORREÇÃO: Verifica se a porta existe antes de tentar criar
-        port_exists = self.check_port_exists(printer_port_name)
-        if not port_exists:
-            port_created = self._create_port(printer_port_name, ip, port)
-            if not port_created:
-                logger.error("Falha ao criar porta de impressora")
-                return False
-            # Aguardar um pouco para a porta ser registrada
-            time.sleep(2)
-        else:
-            logger.info(f"Porta {printer_port_name} já existe, reutilizando")
-        
-        # CORREÇÃO: Verifica novamente se a impressora existe (pode ter sido criada por outro processo)
-        if self.check_printer_exists(name):
-            logger.info(f"Impressora '{name}' foi criada por outro processo, usando existente")
-            return True
-        
-        # Criar impressora usando diferentes métodos
-        printer_created = self._create_printer(name, printer_port_name, is_server)
-        
-        if printer_created:
-            logger.info(f"Impressora '{name}' instalada com sucesso!")
-            
-            # Aguardar um pouco para a impressora ser registrada
-            time.sleep(2)
-            
-            # Definir comentário se fornecido
-            if comment:
-                if is_server:
-                    comment += " (Configurado para multi-usuário)"
-                self._set_printer_comment(name, comment)
-            
-            # Configurar permissões para todos os usuários em servidores
-            if is_server:
-                self._configure_multiuser_permissions(name)
-            
-            return True
-        else:
-            logger.error("Falha ao criar impressora")
-            # CORREÇÃO: Só remove a porta se ela não existia antes
-            if not port_exists:
-                self.remove_port(printer_port_name)
+        """Adiciona impressora no Unix usando CUPS"""
+        if not self.cups_available:
+            logger.error("CUPS não está disponível. Não é possível adicionar impressora.")
             return False
+
+        device_uri = f"socket://{ip}:{port}"
+        
+        cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+        
+        if os.geteuid() != 0:
+            cmd.insert(0, 'sudo')
+        
+        # Tentar diferentes drivers
+        drivers = ['raw', 'drv:///generic.drv/generic.ppd', 'textonly.ppd']
+        
+        success = False
+        for driver in drivers:
+            try:
+                current_cmd = cmd + ['-m', driver]
+                result = run_hidden(current_cmd, timeout=30)
+                
+                if result.returncode == 0:
+                    logger.info(f"Impressora '{name}' instalada com sucesso usando driver: {driver}")
+                    success = True
+                    break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception as e:
+                logger.warning(f"Erro ao instalar com driver {driver}: {e}")
+                continue
+        
+        if not success:
+            logger.error("Não foi possível instalar a impressora com nenhum driver disponível.")
+            return False
+        
+        # Configurações adicionais
+        try:
+            if comment:
+                cmd_comment = ['lpadmin', '-p', name, '-D', comment]
+                if os.geteuid() != 0:
+                    cmd_comment.insert(0, 'sudo')
+                run_hidden(cmd_comment, timeout=10)
+        except Exception as e:
+            logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
+        
+        return True
     
     def remove_printer(self, name):
         """Remove impressora no Unix"""

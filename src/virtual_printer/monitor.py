@@ -2,592 +2,902 @@
 # -*- coding: utf-8 -*-
 
 """
-Monitor integrado para impressora virtual
+Instalador da impressora virtual cross-platform com suporte multi-usuário
 """
 
 import os
-import logging
-import ctypes
-import psutil
-import socket
-import threading
-import subprocess
-import time
-from datetime import datetime
+import sys
 import platform
+import logging
+import subprocess
+import tempfile
+import shutil
+import ctypes
+import typing
+import time
+from pathlib import Path
+from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
-from src.utils.file_monitor import FileMonitor
-from .printer_server import PrinterServer
-from .installer import VirtualPrinterInstaller
-from src.utils.subprocess_utils import run_hidden
+logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Installer")
 
-logger = logging.getLogger("PrintManagementSystem.VirtualPrinter.Monitor")
-
-class VirtualPrinterManager:
-    """Gerenciador completo da impressora virtual"""
+class PrinterManager:
+    """Classe base para gerenciar impressoras específicas do sistema"""
     
-    def __init__(self, config, api_client=None, on_new_document=None):
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona uma impressora virtual"""
+        raise NotImplementedError
+    
+    def remove_printer(self, name):
+        """Remove uma impressora"""
+        raise NotImplementedError
+    
+    def remove_port(self, port_name):
+        """Remove uma porta de impressora"""
+        raise NotImplementedError
+    
+    def check_printer_exists(self, name):
+        """Verifica se uma impressora existe"""
+        raise NotImplementedError
+    
+    def check_port_exists(self, port_name):
+        """Verifica se uma porta existe"""
+        raise NotImplementedError
+
+class WindowsPrinterManager(PrinterManager):
+    """Gerenciador de impressoras para Windows com suporte multi-usuário"""
+    
+    def __init__(self):
+        self.postscript_printer_drivers = [
+            'Microsoft Print To PDF',
+            'Microsoft XPS Document Writer',
+            'HP Universal Printing PS',
+            'HP Color LaserJet 2800 Series PS',
+            'Generic / Text Only'
+        ]
+        self.default_driver = self._find_available_driver()
+        self._debug_environment()
+    
+    def _debug_environment(self):
+        """Debug do ambiente Windows com informações multi-usuário"""
+        logger.debug(f"Sistema operacional: {platform.system()} {platform.release()}")
+        logger.debug(f"Versão do Windows: {platform.version()}")
+        logger.debug(f"Arquitetura: {platform.machine()}")
+        logger.debug(f"Usuário: {os.environ.get('USERNAME', 'Unknown')}")
+        logger.debug(f"É admin: {self._is_admin()}")
+        
+        # Detectar tipo de Windows
+        try:
+            result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+            if result.returncode == 0:
+                if 'Server' in result.stdout:
+                    logger.info("Detectado Windows Server - modo multi-usuário otimizado")
+                else:
+                    logger.info("Detectado Windows Desktop")
+        except:
+            pass
+        
+        # Verificar sessões de usuário ativas (apenas em servidores)
+        try:
+            result = run_hidden(['query', 'user'], timeout=5)
+            if result.returncode == 0:
+                logger.debug("Sessões de usuário ativas:")
+                logger.debug(result.stdout)
+        except:
+            pass
+    
+    def _is_admin(self):
+        """Verifica se está rodando como administrador"""
+        try:
+            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+        except:
+            return False
+    
+    def _find_available_driver(self):
+        """Encontra um driver disponível"""
+        try:
+            # Método 1: PowerShell
+            result = run_hidden([
+                'powershell', '-command',
+                'Get-PrinterDriver | Select-Object Name | Format-Table -HideTableHeaders'
+            ], timeout=10)
+            
+            if result.returncode == 0:
+                available_drivers = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                
+                for driver in self.postscript_printer_drivers:
+                    if driver in available_drivers:
+                        logger.info(f"Driver encontrado: {driver}")
+                        return driver
+                
+                if available_drivers:
+                    logger.info(f"Usando primeiro driver disponível: {available_drivers[0]}")
+                    return available_drivers[0]
+        except Exception as e:
+            logger.warning(f"Erro ao listar drivers via PowerShell: {e}")
+        
+        # Método 2: wmic
+        try:
+            result = run_hidden([
+                'wmic', 'path', 'Win32_PrinterDriver', 'get', 'Name'
+            ], timeout=10)
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    for line in lines[1:]:  # Pula o cabeçalho
+                        driver_info = line.strip()
+                        if driver_info:
+                            # wmic retorna no formato "Nome,Versão,Ambiente"
+                            driver_name = driver_info.split(',')[0].strip()
+                            for known_driver in self.postscript_printer_drivers:
+                                if known_driver in driver_name:
+                                    logger.info(f"Driver encontrado via wmic: {known_driver}")
+                                    return known_driver
+        except Exception as e:
+            logger.warning(f"Erro ao listar drivers via wmic: {e}")
+        
+        # Fallback
+        logger.warning("Nenhum driver específico encontrado, usando Microsoft Print To PDF")
+        return 'Microsoft Print To PDF'
+    
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona impressora no Windows com configuração multi-usuário"""
+        if printer_port_name is None:
+            printer_port_name = f"IP_{ip}:{port}"
+        
+        logger.info(f"Instalando impressora: {name}")
+        logger.info(f"Driver: {self.default_driver}")
+        logger.info(f"Porta: {printer_port_name}")
+        logger.info(f"IP: {ip}:{port}")
+        
+        # Para Windows Server, verificar se precisa configurar para todos os usuários
+        is_server = self._is_windows_server()
+        if is_server:
+            logger.info("Configurando impressora para ambiente Windows Server (multi-usuário)")
+        
+        # Criar porta usando diferentes métodos
+        port_created = self._create_port(printer_port_name, ip, port)
+        
+        if not port_created:
+            logger.error("Falha ao criar porta de impressora")
+            return False
+        
+        # Aguardar um pouco para a porta ser registrada
+        time.sleep(2)
+        
+        # Criar impressora usando diferentes métodos
+        printer_created = self._create_printer(name, printer_port_name, is_server)
+        
+        if printer_created:
+            logger.info(f"Impressora '{name}' instalada com sucesso!")
+            
+            # Aguardar um pouco para a impressora ser registrada
+            time.sleep(2)
+            
+            # Definir comentário se fornecido
+            if comment:
+                # Adicionar informação sobre multi-usuário ao comentário
+                if is_server:
+                    comment += " (Configurado para multi-usuário)"
+                self._set_printer_comment(name, comment)
+            
+            # Configurar permissões para todos os usuários em servidores
+            if is_server:
+                self._configure_multiuser_permissions(name)
+            
+            return True
+        else:
+            logger.error("Falha ao criar impressora")
+            # Tentar remover a porta criada
+            self.remove_port(printer_port_name)
+            return False
+    
+    def _is_windows_server(self):
+        """Verifica se está rodando em Windows Server"""
+        try:
+            result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+            if result.returncode == 0:
+                return 'Server' in result.stdout
+        except:
+            pass
+        return False
+    
+    def _configure_multiuser_permissions(self, printer_name):
+        """Configura permissões da impressora para todos os usuários"""
+        try:
+            # Tentar dar permissão para o grupo "Everyone" usando PowerShell
+            logger.info("Configurando permissões multi-usuário...")
+            
+            # Método 1: PowerShell com Set-Printer
+            try:
+                cmd = [
+                    'powershell', '-command',
+                    f'$printer = Get-Printer -Name "{printer_name}"; '
+                    f'$printer.PermissionSDDL = $null; '
+                    f'Set-Printer -InputObject $printer'
+                ]
+                run_hidden(cmd, timeout=15)
+                logger.info("Permissões configuradas via PowerShell")
+            except Exception as e:
+                logger.debug(f"Erro na configuração via PowerShell: {e}")
+            
+            # Método 2: Usar rundll32 para configurar permissões
+            try:
+                cmd = [
+                    'rundll32', 'printui.dll,PrintUIEntry',
+                    '/Xs', '/n', printer_name, 'attributes', '+shared'
+                ]
+                run_hidden(cmd, timeout=15)
+                logger.info("Impressora configurada como compartilhada")
+            except Exception as e:
+                logger.debug(f"Erro na configuração de compartilhamento: {e}")
+            
+        except Exception as e:
+            logger.warning(f"Erro ao configurar permissões multi-usuário: {e}")
+    
+    def _create_port(self, port_name, ip, port):
+        """Cria uma porta de impressora TCP/IP"""
+        # Método 1: PowerShell (Windows 8+)
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'Add-PrinterPort -Name "{port_name}" -PrinterHostAddress "{ip}" -PortNumber {port} -ErrorAction Stop'
+            ]
+            
+            result = run_hidden(cmd, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"Porta criada via PowerShell: {port_name}")
+                return True
+            else:
+                logger.warning(f"PowerShell Add-PrinterPort falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via PowerShell: {e}")
+        
+        # Método 2: cscript prnport.vbs
+        try:
+            # Tentar diferentes localizações do script
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnport.vbs',
+                r'C:\Windows\System32\prnport.vbs'
+            ]
+            
+            script_path = None
+            for path in script_paths:
+                if os.path.exists(path):
+                    script_path = path
+                    break
+            
+            if script_path:
+                cmd = [
+                    'cscript', script_path,
+                    '-a', '-r', port_name, '-h', ip, '-o', 'raw', '-n', str(port)
+                ]
+                
+                result = run_hidden(cmd, timeout=30)
+                
+                if result.returncode == 0 or 'already exists' in result.stdout.lower():
+                    logger.info(f"Porta criada via prnport.vbs: {port_name}")
+                    return True
+                else:
+                    logger.warning(f"prnport.vbs falhou: {result.stderr}")
+            else:
+                logger.warning("Script prnport.vbs não encontrado")
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via prnport.vbs: {e}")
+        
+        # Método 3: Comando TCP/IP direto (fallback)
+        try:
+            # Criar registro diretamente
+            import winreg
+            
+            port_key = rf"SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\{port_name}"
+            
+            with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, port_key) as key:
+                winreg.SetValueEx(key, "Protocol", 0, winreg.REG_DWORD, 1)  # RAW
+                winreg.SetValueEx(key, "Version", 0, winreg.REG_DWORD, 1)
+                winreg.SetValueEx(key, "HostName", 0, winreg.REG_SZ, ip)
+                winreg.SetValueEx(key, "IPAddress", 0, winreg.REG_SZ, ip)
+                winreg.SetValueEx(key, "PortNumber", 0, winreg.REG_DWORD, int(port))
+                winreg.SetValueEx(key, "SNMP Community", 0, winreg.REG_SZ, "public")
+                winreg.SetValueEx(key, "SNMP Enabled", 0, winreg.REG_DWORD, 0)
+                winreg.SetValueEx(key, "SNMP Index", 0, winreg.REG_DWORD, 1)
+            
+            logger.info(f"Porta criada via registro: {port_name}")
+            
+            # Reiniciar o spooler para aplicar mudanças
+            self._restart_spooler()
+            
+            return True
+        except Exception as e:
+            logger.warning(f"Erro ao criar porta via registro: {e}")
+        
+        return False
+    
+    def _create_printer(self, name, port_name, is_server=False):
+        """Cria a impressora usando diferentes métodos"""
+        # Método 1: PowerShell (Windows 8+)
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -ErrorAction Stop'
+            ]
+            
+            # Para servidores, adicionar configurações específicas
+            if is_server:
+                cmd = [
+                    'powershell', '-command',
+                    f'Add-Printer -Name "{name}" -DriverName "{self.default_driver}" -PortName "{port_name}" -Shared $true -ErrorAction Stop'
+                ]
+            
+            result = run_hidden(cmd, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"Impressora criada via PowerShell: {name}")
+                return True
+            else:
+                logger.warning(f"PowerShell Add-Printer falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via PowerShell: {e}")
+        
+        # Método 2: rundll32 printui.dll
+        try:
+            cmd = [
+                'rundll32', 'printui.dll,PrintUIEntry',
+                '/if', '/b', name, '/r', port_name, '/m', self.default_driver
+            ]
+            
+            result = run_hidden(cmd, timeout=30)
+            
+            # rundll32 não retorna códigos de erro confiáveis, verificar se foi criada
+            time.sleep(2)
+            if self.check_printer_exists(name):
+                logger.info(f"Impressora criada via rundll32: {name}")
+                return True
+            else:
+                logger.warning("rundll32 printui.dll executado mas impressora não foi criada")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via rundll32: {e}")
+        
+        # Método 3: cscript prnmngr.vbs
+        try:
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnmngr.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnmngr.vbs',
+                r'C:\Windows\System32\prnmngr.vbs'
+            ]
+            
+            script_path = None
+            for path in script_paths:
+                if os.path.exists(path):
+                    script_path = path
+                    break
+            
+            if script_path:
+                cmd = [
+                    'cscript', script_path,
+                    '-a', '-p', name, '-m', self.default_driver, '-r', port_name
+                ]
+                
+                result = run_hidden(cmd, timeout=30)
+                
+                if result.returncode == 0 or 'added printer' in result.stdout.lower():
+                    logger.info(f"Impressora criada via prnmngr.vbs: {name}")
+                    return True
+                else:
+                    logger.warning(f"prnmngr.vbs falhou: {result.stderr}")
+        except Exception as e:
+            logger.warning(f"Erro ao criar impressora via prnmngr.vbs: {e}")
+        
+        return False
+    
+    def _restart_spooler(self):
+        """Reinicia o serviço de spooler"""
+        try:
+            run_hidden(['net', 'stop', 'spooler'], timeout=10)
+            time.sleep(1)
+            run_hidden(['net', 'start', 'spooler'], timeout=10)
+            time.sleep(2)
+            logger.info("Serviço de spooler reiniciado")
+        except Exception as e:
+            logger.warning(f"Erro ao reiniciar spooler: {e}")
+    
+    def _set_printer_comment(self, name, comment):
+        """Adiciona um comentário à impressora"""
+        try:
+            # PowerShell
+            comment_escaped = comment.replace('"', '`"').replace('\n', ' ')
+            cmd = [
+                'powershell', '-command',
+                f'Set-Printer -Name "{name}" -Comment "{comment_escaped}"'
+            ]
+            run_hidden(cmd, timeout=10)
+        except:
+            pass
+        
+        try:
+            # rundll32 como fallback
+            comment_escaped = comment.replace('"', '\\"').replace('\n', ' ')
+            cmd = [
+                'rundll32', 'printui.dll,PrintUIEntry',
+                '/Xs', '/n', name, 'comment', comment_escaped
+            ]
+            run_hidden(cmd, timeout=10)
+        except:
+            pass
+    
+    def remove_printer(self, name):
+        """Remove impressora no Windows"""
+        success = False
+        
+        # Método 1: PowerShell
+        try:
+            cmd = ['powershell', '-command', f'Remove-Printer -Name "{name}" -ErrorAction Stop']
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                success = True
+                logger.info(f"Impressora removida via PowerShell: {name}")
+        except:
+            pass
+        
+        # Método 2: rundll32
+        if not success:
+            try:
+                cmd = ['rundll32', 'printui.dll,PrintUIEntry', '/dl', '/n', name]
+                run_hidden(cmd, timeout=10)
+                time.sleep(1)
+                if not self.check_printer_exists(name):
+                    success = True
+                    logger.info(f"Impressora removida via rundll32: {name}")
+            except:
+                pass
+        
+        return success
+    
+    def remove_port(self, port_name):
+        """Remove porta no Windows"""
+        # Método 1: PowerShell
+        try:
+            cmd = ['powershell', '-command', f'Remove-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue']
+            run_hidden(cmd, timeout=10)
+        except:
+            pass
+        
+        # Método 2: prnport.vbs
+        try:
+            script_paths = [
+                r'C:\Windows\System32\Printing_Admin_Scripts\en-US\prnport.vbs',
+                r'C:\Windows\System32\Printing_Admin_Scripts\pt-BR\prnport.vbs'
+            ]
+            
+            for script_path in script_paths:
+                if os.path.exists(script_path):
+                    cmd = ['cscript', script_path, '-d', '-r', port_name]
+                    run_hidden(cmd, timeout=10)
+                    break
+        except:
+            pass
+    
+    def check_printer_exists(self, name):
+        """Verifica se impressora existe no Windows"""
+        # Método 1: PowerShell
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'$p = Get-Printer -Name "{name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
+            ]
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip().lower() == "true"
+        except Exception as e:
+            logger.debug(f"Erro ao verificar via PowerShell: {e}")
+        
+        # Método 2: wmic
+        try:
+            cmd = ['wmic', 'printer', 'where', f'name="{name}"', 'get', 'name']
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                return name in result.stdout
+        except Exception as e:
+            logger.debug(f"Erro ao verificar via wmic: {e}")
+        
+        # Método 3: Listar todas as impressoras
+        try:
+            # PowerShell list
+            cmd = ['powershell', '-command', 'Get-Printer | Select-Object -ExpandProperty Name']
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                printers = [p.strip() for p in result.stdout.splitlines() if p.strip()]
+                return name in printers
+        except:
+            pass
+        
+        try:
+            # wmic list
+            cmd = ['wmic', 'printer', 'get', 'name']
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                if len(lines) > 1:
+                    printers = [line.strip() for line in lines[1:] if line.strip()]
+                    return name in printers
+        except:
+            pass
+        
+        return False
+    
+    def check_port_exists(self, port_name):
+        """Verifica se porta existe no Windows"""
+        # Método 1: PowerShell
+        try:
+            cmd = [
+                'powershell', '-command',
+                f'$p = Get-PrinterPort -Name "{port_name}" -ErrorAction SilentlyContinue; if ($p) {{ "True" }} else {{ "False" }}'
+            ]
+            result = run_hidden(cmd, timeout=10)
+            if result.returncode == 0:
+                return result.stdout.strip().lower() == "true"
+        except:
+            pass
+        
+        # Método 2: Verificar no registro
+        try:
+            import winreg
+            port_key = rf"SYSTEM\CurrentControlSet\Control\Print\Monitors\Standard TCP/IP Port\Ports\{port_name}"
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, port_key):
+                return True
+        except:
+            pass
+        
+        return False
+
+class UnixPrinterManager(PrinterManager):
+    """Gerenciador de impressoras para sistemas Unix (Linux/macOS) usando CUPS"""
+    
+    def __init__(self):
+        self.system = platform.system()
+        self.cups_available = self._check_cups_availability()
+        
+        if not self.cups_available:
+            self._install_cups_suggestions()
+    
+    def _check_cups_availability(self):
+        """Verifica se CUPS está instalado e acessível"""
+        try:
+            result = run_hidden(['which', 'lpadmin'])
+            if result.returncode != 0:
+                return False
+            
+            result = run_hidden(['which', 'lpstat'])
+            if result.returncode != 0:
+                return False
+            
+            try:
+                result = run_hidden(['lpstat', '-r'], timeout=5)
+                if "not ready" in result.stdout.lower():
+                    self._start_cups_service()
+            except subprocess.TimeoutExpired:
+                return False
+            
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao verificar CUPS: {e}")
+            return False
+    
+    def _start_cups_service(self):
+        """Tenta iniciar o serviço CUPS"""
+        logger.info("Tentando iniciar o serviço CUPS...")
+        
+        if self.system == 'Linux':
+            service_commands = [
+                ['sudo', 'systemctl', 'start', 'cups'],
+                ['sudo', 'service', 'cups', 'start'],
+                ['sudo', '/etc/init.d/cups', 'start']
+            ]
+        elif self.system == 'Darwin':  # macOS
+            service_commands = [
+                ['sudo', 'launchctl', 'load', '/System/Library/LaunchDaemons/org.cups.cupsd.plist'],
+                ['sudo', 'brew', 'services', 'start', 'cups']
+            ]
+        else:
+            service_commands = []
+        
+        for cmd in service_commands:
+            try:
+                result = run_hidden(cmd, timeout=100)
+                if result.returncode == 0:
+                    logger.info("Serviço CUPS iniciado com sucesso.")
+                    return True
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+        
+        return False
+    
+    def _install_cups_suggestions(self):
+        """Fornece sugestões para instalar CUPS"""
+        logger.warning("CUPS não encontrado no sistema")
+        if self.system == 'Linux':
+            logger.info("Para instalar CUPS no Linux: sudo apt-get install cups cups-client")
+        elif self.system == 'Darwin':
+            logger.info("No macOS, CUPS geralmente está pré-instalado. Tente: brew install cups")
+    
+    def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
+        """Adiciona impressora no Unix usando CUPS"""
+        if not self.cups_available:
+            logger.error("CUPS não está disponível. Não é possível adicionar impressora.")
+            return False
+
+        device_uri = f"socket://{ip}:{port}"
+        
+        cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+        
+        if os.geteuid() != 0:
+            cmd.insert(0, 'sudo')
+        
+        # Tentar diferentes drivers
+        drivers = ['raw', 'drv:///generic.drv/generic.ppd', 'textonly.ppd']
+        
+        success = False
+        for driver in drivers:
+            try:
+                current_cmd = cmd + ['-m', driver]
+                result = run_hidden(current_cmd, timeout=30)
+                
+                if result.returncode == 0:
+                    logger.info(f"Impressora '{name}' instalada com sucesso usando driver: {driver}")
+                    success = True
+                    break
+            except subprocess.TimeoutExpired:
+                continue
+            except Exception as e:
+                logger.warning(f"Erro ao instalar com driver {driver}: {e}")
+                continue
+        
+        if not success:
+            logger.error("Não foi possível instalar a impressora com nenhum driver disponível.")
+            return False
+        
+        # Configurações adicionais
+        try:
+            if comment:
+                cmd_comment = ['lpadmin', '-p', name, '-D', comment]
+                if os.geteuid() != 0:
+                    cmd_comment.insert(0, 'sudo')
+                run_hidden(cmd_comment, timeout=10)
+        except Exception as e:
+            logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
+        
+        return True
+    
+    def remove_printer(self, name):
+        """Remove impressora no Unix"""
+        if not self.cups_available:
+            return False
+        
+        cmd = ['lpadmin', '-x', name]
+        if os.geteuid() != 0:
+            cmd.insert(0, 'sudo')
+        
+        try:
+            result = run_hidden(cmd, timeout=15)
+            if result.returncode == 0:
+                logger.info(f"Impressora '{name}' removida com sucesso.")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Erro ao remover impressora: {e}")
+            return False
+    
+    def remove_port(self, port_name):
+        """No Unix/CUPS, as portas são gerenciadas automaticamente"""
+        pass
+    
+    def check_printer_exists(self, name):
+        """Verifica se impressora existe no Unix"""
+        try:
+            result = run_hidden(['lpstat', '-p', name], timeout=5)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def check_port_exists(self, port_name):
+        """No Unix/CUPS, não é necessário verificar portas separadamente"""
+        return True
+
+class VirtualPrinterInstaller:
+    """Instalador da impressora virtual cross-platform com suporte multi-usuário"""
+    
+    PRINTER_NAME = "Impressora LoQQuei"
+    
+    def __init__(self, config):
         """
-        Inicializa o gerenciador da impressora virtual
+        Inicializa o instalador
         
         Args:
             config: Configuração da aplicação
-            api_client: Cliente da API (opcional)
-            on_new_document: Callback chamado quando um novo documento é detectado
         """
         self.config = config
-        self.api_client = api_client
-        self.on_new_document = on_new_document
-        
-        # Componentes
-        self.printer_server = None
-        self.installer = None
-        self.file_monitor = None
-        
-        # Estado
-        self.is_running = False
-        self.processed_ids = set()
-        
-        # Sistema
         self.system = platform.system()
-        
-        # Inicializar componentes
-        self._init_components()
+        self.printer_manager = self._init_printer_manager()
+        self.server_info = None
+        self.is_multiuser_env = self._detect_multiuser_environment()
     
-    def _init_components(self):
-        """Inicializa os componentes da impressora virtual"""
-        # Criar servidor de impressão
-        self.printer_server = PrinterServer(
-            self.config, 
-            self._on_server_document_created
-        )
-        
-        # Criar instalador
-        self.installer = VirtualPrinterInstaller(self.config)
-        
-        # Monitor de arquivos (será inicializado quando necessário)
-        self.file_monitor = None
+    def _init_printer_manager(self):
+        """Inicializa o gerenciador de impressoras baseado no sistema"""
+        if self.system == 'Windows':
+            return WindowsPrinterManager()
+        else:  # Linux ou macOS
+            return UnixPrinterManager()
     
-    def _diagnose_system(self):
-        """Diagnostica o sistema e registra informações detalhadas"""
-               
-        logger.info("=" * 50)
-        logger.info("=== DIAGNÓSTICO COMPLETO DO SISTEMA ===")
-        logger.info("=" * 50)
-        
-        # === INFORMAÇÕES BÁSICAS DO SISTEMA ===
-        logger.info("\n[SISTEMA OPERACIONAL]")
-        logger.info(f"Sistema: {platform.system()} {platform.release()}")
-        logger.info(f"Versão: {platform.version()}")
-        logger.info(f"Arquitetura: {platform.machine()}")
-        logger.info(f"Processador: {platform.processor()}")
-        logger.info(f"Nome da máquina: {platform.node()}")
-        logger.info(f"Python: {platform.python_version()}")
-        logger.info(f"Data/Hora atual: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        
-        # === INFORMAÇÕES DE HARDWARE ===
-        try:
-            logger.info("\n[HARDWARE]")
-            # CPU
-            cpu_count = psutil.cpu_count(logical=False)
-            cpu_count_logical = psutil.cpu_count(logical=True)
-            cpu_freq = psutil.cpu_freq()
-            logger.info(f"CPU físicos: {cpu_count}")
-            logger.info(f"CPU lógicos: {cpu_count_logical}")
-            if cpu_freq:
-                logger.info(f"Frequência CPU: {cpu_freq.current:.2f} MHz (max: {cpu_freq.max:.2f})")
-            
-            # Uso atual da CPU
-            cpu_percent = psutil.cpu_percent(interval=1)
-            logger.info(f"Uso atual da CPU: {cpu_percent}%")
-            
-            # Memória
-            memory = psutil.virtual_memory()
-            logger.info(f"Memória total: {memory.total / (1024**3):.2f} GB")
-            logger.info(f"Memória disponível: {memory.available / (1024**3):.2f} GB")
-            logger.info(f"Uso de memória: {memory.percent}%")
-            
-            # Disco
-            logger.info("\n[ARMAZENAMENTO]")
-            for partition in psutil.disk_partitions():
-                try:
-                    partition_usage = psutil.disk_usage(partition.mountpoint)
-                    logger.info(f"Disco {partition.device}: {partition_usage.total / (1024**3):.2f} GB total, "
-                            f"{partition_usage.free / (1024**3):.2f} GB livre ({partition_usage.percent}% usado)")
-                except PermissionError:
-                    logger.info(f"Disco {partition.device}: Sem permissão para acessar")
-        except Exception as e:
-            logger.error(f"Erro ao obter informações de hardware: {e}")
-        
-        # === INFORMAÇÕES DE REDE ===
-        try:
-            logger.info("\n[REDE]")
-            # Interfaces de rede
-            interfaces = psutil.net_if_addrs()
-            for interface_name, interface_addresses in interfaces.items():
-                logger.info(f"Interface: {interface_name}")
-                for address in interface_addresses:
-                    if address.family == socket.AF_INET:
-                        logger.info(f"  IPv4: {address.address}")
-                    elif address.family == socket.AF_INET6:
-                        logger.info(f"  IPv6: {address.address}")
-                    elif address.family == psutil.AF_LINK:
-                        logger.info(f"  MAC: {address.address}")
-            
-            # Estatísticas de rede
-            net_io = psutil.net_io_counters()
-            logger.info(f"Bytes enviados: {net_io.bytes_sent / (1024**2):.2f} MB")
-            logger.info(f"Bytes recebidos: {net_io.bytes_recv / (1024**2):.2f} MB")
-            
-            # Conexões ativas
-            connections = psutil.net_connections()
-            active_connections = [conn for conn in connections if conn.status == 'ESTABLISHED']
-            logger.info(f"Conexões ativas: {len(active_connections)}")
-            
-        except Exception as e:
-            logger.error(f"Erro ao obter informações de rede: {e}")
-        
-        # === INFORMAÇÕES ESPECÍFICAS DO WINDOWS ===
-        if platform.system() == 'Windows':
-            logger.info("\n[WINDOWS]")
-            
-            # Privilégios de administrador
+    def _detect_multiuser_environment(self):
+        """Detecta se está em um ambiente multi-usuário"""
+        if self.system == 'Windows':
             try:
-                is_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
-                logger.info(f"Executando como administrador: {is_admin}")
-            except:
-                logger.info("Não foi possível verificar privilégios de administrador")
-            
-            # Versão detalhada do Windows
-            try:
-                result = run_hidden(['wmic', 'os', 'get', 'Caption,Version,BuildNumber'], timeout=10)
-                if result.returncode == 0:
-                    logger.info("Versão detalhada do Windows:")
-                    for line in result.stdout.strip().split('\n')[1:]:
-                        if line.strip():
-                            logger.info(f"  {line.strip()}")
-            except:
-                pass
-            
-            # Informações do computador
-            try:
-                result = run_hidden(['wmic', 'computersystem', 'get', 'Manufacturer,Model,TotalPhysicalMemory'], timeout=10)
-                if result.returncode == 0:
-                    logger.info("Informações do computador:")
-                    for line in result.stdout.strip().split('\n')[1:]:
-                        if line.strip():
-                            logger.info(f"  {line.strip()}")
-            except:
-                pass
-            
-            # Firewall
-            try:
-                result = run_hidden(['netsh', 'advfirewall', 'show', 'currentprofile'], timeout=5)
-                if result.returncode == 0:
-                    if 'State                                 ON' in result.stdout:
-                        logger.warning("Firewall do Windows está ATIVO - pode bloquear conexões")
-                    else:
-                        logger.info("Firewall do Windows está desativado")
-            except:
-                pass
-            
-            # Windows Defender
-            try:
-                result = run_hidden(['powershell', '-Command', 'Get-MpComputerStatus | Select-Object AntivirusEnabled,RealTimeProtectionEnabled'], timeout=10)
-                if result.returncode == 0:
-                    logger.info("Status do Windows Defender:")
-                    logger.info(f"  {result.stdout.strip()}")
-            except:
-                pass
-            
-            # Serviços importantes
-            try:
-                important_services = ['Themes', 'AudioSrv', 'Spooler', 'BITS', 'EventLog']
-                for service_name in important_services:
-                    result = run_hidden(['sc', 'query', service_name], timeout=5)
-                    if result.returncode == 0:
-                        if 'RUNNING' in result.stdout:
-                            logger.info(f"Serviço {service_name}: ATIVO")
-                        else:
-                            logger.warning(f"Serviço {service_name}: INATIVO")
-            except:
-                pass
-            
-            # Configurações de energia
-            try:
-                result = run_hidden(['powercfg', '/query'], timeout=10)
-                if result.returncode == 0:
-                    lines = result.stdout.split('\n')
-                    for line in lines[:10]:  # Primeiras 10 linhas
-                        if 'Power Scheme GUID' in line or 'GUID' in line:
-                            logger.info(f"Energia: {line.strip()}")
-            except:
-                pass
+                # Verificar se é Windows Server
+                result = run_hidden(['wmic', 'os', 'get', 'ProductType'], timeout=5)
+                if result.returncode == 0 and 'Server' in result.stdout:
+                    return True
                 
-        # === CONFIGURAÇÕES DE REDE AVANÇADAS ===
-        try:
-            logger.info("\n[CONFIGURAÇÕES DE REDE]")
-            
-            # DNS
-            if platform.system() == 'Windows':
-                result = run_hidden(['nslookup', 'google.com'], timeout=10)
+                # Verificar se há múltiplas sessões ativas
+                result = run_hidden(['query', 'user'], timeout=5)
                 if result.returncode == 0:
-                    dns_lines = [line for line in result.stdout.split('\n') if 'Server:' in line]
-                    for line in dns_lines:
-                        logger.info(f"DNS: {line.strip()}")
-            
-            # Gateway padrão
-            if platform.system() == 'Windows':
-                result = run_hidden(['ipconfig'], timeout=10)
-                if result.returncode == 0:
-                    gateway_lines = [line for line in result.stdout.split('\n') if 'Gateway' in line and ':' in line]
-                    for line in gateway_lines:
-                        logger.info(f"Gateway: {line.strip()}")
-            
-            # Teste de conectividade
-            try:
-                response_time = subprocess.run(['ping', '-n', '1', 'google.com'], 
-                                            capture_output=True, text=True, timeout=5)
-                if response_time.returncode == 0:
-                    logger.info("Conectividade com internet: OK")
-                else:
-                    logger.warning("Conectividade com internet: FALHA")
-            except:
-                logger.warning("Não foi possível testar conectividade")
-                
-        except Exception as e:
-            logger.error(f"Erro ao obter configurações de rede: {e}")
-        
-        # === VARIÁVEIS DE AMBIENTE IMPORTANTES ===
-        try:
-            logger.info("\n[VARIÁVEIS DE AMBIENTE]")
-            important_env_vars = ['PATH', 'TEMP', 'USERNAME', 'COMPUTERNAME', 'PROCESSOR_ARCHITECTURE']
-            for var in important_env_vars:
-                value = os.environ.get(var, 'Não definida')
-                if var == 'PATH':
-                    logger.info(f"{var}: {len(value.split(';'))} entradas")
-                else:
-                    logger.info(f"{var}: {value}")
-        except Exception as e:
-            logger.error(f"Erro ao obter variáveis de ambiente: {e}")
-        
-        # === TEMPO DE ATIVIDADE ===
-        try:
-            logger.info("\n[SISTEMA]")
-            boot_time = psutil.boot_time()
-            boot_time_formatted = datetime.fromtimestamp(boot_time).strftime('%Y-%m-%d %H:%M:%S')
-            uptime_seconds = time.time() - boot_time
-            uptime_hours = uptime_seconds / 3600
-            logger.info(f"Último boot: {boot_time_formatted}")
-            logger.info(f"Tempo ativo: {uptime_hours:.1f} horas")
-        except Exception as e:
-            logger.error(f"Erro ao obter tempo de atividade: {e}")
-        
-        logger.info("=" * 50)
-        logger.info("=== FIM DO DIAGNÓSTICO COMPLETO ===")
-        logger.info("=" * 50)
-
-    def _on_server_document_created(self, document):
-        """Callback chamado quando o servidor cria um novo documento"""
-        try:
-            # Marcar como processado
-            if document.id not in self.processed_ids:
-                self.processed_ids.add(document.id)
-                
-                logger.info(f"Novo documento criado pela impressora virtual: {document.name}")
-                logger.info(f"Caminho do documento: {document.path}")
-                
-                # Verificar se o arquivo realmente existe
-                if not os.path.exists(document.path):
-                    logger.warning(f"O arquivo do documento não foi encontrado no caminho: {document.path}")
-                    return
-                
-                # Atualizar o monitor de arquivos para garantir que o diretório esteja sendo monitorado
-                if self.file_monitor:
-                    # Se o diretório do documento não estiver na lista de diretórios monitorados
-                    document_dir = os.path.dirname(document.path)
-                    monitored_dirs = getattr(self.file_monitor, 'pdf_dirs', [])
+                    lines = result.stdout.strip().split('\n')
+                    active_sessions = [line for line in lines if 'Active' in line]
+                    return len(active_sessions) > 1
                     
-                    if document_dir not in monitored_dirs:
-                        logger.info(f"Atualizando monitoramento para incluir: {document_dir}")
-                        self.refresh_pdf_directories()
-                
-                # Aplicar impressão automática se configurado
-                self._auto_print_if_enabled(document)
-                
-                # Chamar callback do usuário
-                if self.on_new_document:
-                    self.on_new_document(document)
-            
-        except Exception as e:
-            logger.error(f"Erro ao processar documento do servidor: {e}")
-
+            except:
+                pass
+        
+        return False
     
-    def start(self):
+    def install_with_server_info(self, server_info):
         """
-        Inicia o sistema completo da impressora virtual
+        Instala a impressora virtual com informações do servidor
         
+        Args:
+            server_info: Dicionário com ip e port do servidor
+            
         Returns:
-            bool: True se foi iniciado com sucesso
+            bool: True se a instalação foi bem-sucedida
         """
-        if self.is_running:
-            logger.info("Sistema de impressora virtual já está rodando")
-            return True
-        
-        # CORREÇÃO: Diagnóstico em thread separada para não atrasar inicialização
-        diagnose_thread = threading.Thread(target=self._diagnose_system, daemon=True)
-        diagnose_thread.start()
+        self.server_info = server_info
         
         try:
-            # 1. Iniciar servidor de impressão
-            logger.info("Iniciando servidor de impressão...")
-            if not self.printer_server.start():
-                logger.error("Falha ao iniciar servidor de impressão")
-                return False
+            # Verificar se já existe antes de tentar remover
+            if self.is_installed():
+                logger.info("Impressora virtual já está instalada, reinstalando...")
+                self.uninstall()
+                time.sleep(2)  # Aguardar um pouco após remover
             
-            # 2. Instalar impressora virtual
-            logger.info("Verificando impressora virtual...")
-            server_info = self.printer_server.get_server_info()
+            ip = server_info['ip']
+            port = server_info['port']
             
-            # CORREÇÃO: Verifica se já existe antes de tentar instalar
-            if self.installer.is_installed():
-                logger.info("Impressora virtual já está instalada")
-                printer_installed = True
+            # Comentário adaptado para ambiente multi-usuário
+            if self.is_multiuser_env:
+                comment = f'Impressora virtual PDF multi-usuário que salva na pasta Documents de cada usuário (Servidor: {ip}:{port})'
             else:
-                logger.info("Instalando impressora virtual...")
-                printer_installed = self.installer.install_with_server_info(server_info)
+                comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir} (Servidor: {ip}:{port})'
+            
+            logger.info(f"Iniciando instalação da impressora virtual...")
+            logger.info(f"Nome: {self.PRINTER_NAME}")
+            logger.info(f"Servidor: {ip}:{port}")
+            logger.info(f"Ambiente multi-usuário: {self.is_multiuser_env}")
+            
+            success = self.printer_manager.add_printer(
+                self.PRINTER_NAME, ip, port,
+                None, False, comment
+            )
+            
+            if success:
+                # Verificar se realmente foi instalada
+                time.sleep(2)  # Aguardar um pouco para o sistema processar
+                if self.is_installed():
+                    logger.info(f"Impressora virtual '{self.PRINTER_NAME}' instalada e verificada com sucesso!")
+                    
+                    if self.is_multiuser_env:
+                        logger.info("IMPORTANTE: A impressora está configurada para ambiente multi-usuário.")
+                        logger.info("Cada usuário terá seus PDFs salvos em sua própria pasta Documents/Impressora_LoQQuei")
+                    
+                    return True
+                else:
+                    logger.error("Impressora foi instalada mas não é detectável pelo sistema")
+                    return False
+            else:
+                logger.error("Falha ao instalar a impressora virtual")
+                return False
                 
-                if not printer_installed:
-                    logger.warning("Falha ao instalar impressora virtual")
-                    # CORREÇÃO: Não para o sistema se a impressora falhar
-                    logger.info("Sistema continuará funcionando sem impressora virtual")
-            
-            # 3. Iniciar monitoramento de arquivos
-            logger.info("Iniciando monitoramento de arquivos...")
-            self._start_file_monitoring()
-            
-            self.is_running = True
-            logger.info("Sistema de impressora virtual iniciado")
-            
-            # Log das informações do servidor
-            server_info = self.printer_server.get_server_info()
-            logger.info(f"Servidor: {server_info['ip']}:{server_info['port']}")
-            logger.info(f"Impressora virtual: {'Instalada' if printer_installed else 'Não instalada'}")
-            
-            return True
-            
         except Exception as e:
-            logger.error(f"Erro ao iniciar sistema: {e}")
-            self.stop()
+            logger.error(f"Erro ao instalar impressora virtual: {str(e)}")
             return False
     
-    def stop(self):
-        """
-        Para o sistema da impressora virtual
-        
-        Returns:
-            bool: True se foi parado com sucesso
-        """
-        logger.info("Parando sistema de impressora virtual...")
-        
-        try:
-            # Parar monitoramento de arquivos
-            if self.file_monitor:
-                self.file_monitor.stop()
-                self.file_monitor = None
-            
-            # Parar servidor de impressão
-            if self.printer_server:
-                self.printer_server.stop()
-            
-            # Nota: Não removemos a impressora virtual intencionalmente
-            # para que ela permaneça disponível mesmo quando a aplicação não está rodando
-            
-            self.is_running = False
-            logger.info("Sistema de impressora virtual parado")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Erro ao parar sistema de impressora virtual: {e}")
-            return False
-    
-    def reinstall_printer(self):
+    def reinstall(self):
         """
         Reinstala a impressora virtual
         
         Returns:
             bool: True se a reinstalação foi bem-sucedida
         """
+        if not self.server_info:
+            logger.error("Informações do servidor não disponíveis para reinstalação")
+            return False
+        
         logger.info("Reinstalando impressora virtual...")
+        self.uninstall()
+        time.sleep(2)  # Aguardar entre desinstalar e reinstalar
+        return self.install_with_server_info(self.server_info)
+    
+    def install(self):
+        """
+        Instala a impressora virtual (método legado)
+        
+        Returns:
+            bool: True se a instalação foi bem-sucedida
+        """
+        logger.warning("Método install() é legado. Use install_with_server_info() em vez disso.")
+        return False
+    
+    def uninstall(self):
+        """
+        Remove a impressora virtual
+        
+        Returns:
+            bool: True se a remoção foi bem-sucedida
+        """
+        logger.info(f"Removendo impressora virtual")
+        
+        if not self.is_installed():
+            logger.info("Impressora virtual não está instalada")
+            return True
         
         try:
-            if self.installer and self.printer_server:
-                server_info = self.printer_server.get_server_info()
-                if server_info['running']:
-                    return self.installer.reinstall()
-                else:
-                    logger.error("Servidor não está rodando, não é possível reinstalar")
-                    return False
-            else:
-                logger.error("Componentes não inicializados")
-                return False
+            success = self.printer_manager.remove_printer(self.PRINTER_NAME)
+            if success:
+                logger.info("Impressora virtual removida com sucesso")
+                # Remover porta associada se existir
+                if self.server_info:
+                    port_name = f"IP_{self.server_info['ip']}:{self.server_info['port']}"
+                    self.printer_manager.remove_port(port_name)
+            return success
         except Exception as e:
-            logger.error(f"Erro ao reinstalar impressora virtual: {e}")
+            logger.error(f"Erro ao remover impressora virtual: {str(e)}")
             return False
     
-    def _start_file_monitoring(self):
-        """Inicia o monitoramento das pastas de PDFs para todos os usuários"""
-        try:
-            def on_documents_changed(documents):
-                if self.on_new_document and documents:
-                    for doc in documents:
-                        # Só processa documentos que não vieram do servidor
-                        if doc.id not in self.processed_ids:
-                            logger.info(f"Novo documento detectado no sistema de arquivos: {doc.name}")
-                            
-                            # Marcar como processado
-                            self.processed_ids.add(doc.id)
-                            
-                            # Aplicar impressão automática se configurado
-                            self._auto_print_if_enabled(doc)
-                            
-                            # Chamar callback do usuário
-                            self.on_new_document(doc)
-            
-            # Criar e iniciar o monitor de arquivos
-            self.file_monitor = FileMonitor(self.config, on_documents_changed)
-            self.file_monitor.start()
-            
-            # Verificar se o monitoramento foi iniciado com sucesso
-            if hasattr(self.file_monitor, 'observers') and self.file_monitor.observers:
-                logger.info(f"Monitoramento de arquivos iniciado com {len(self.file_monitor.observers)} observadores")
-            else:
-                logger.warning("Monitoramento de arquivos pode não estar funcionando corretamente")
-            
-        except Exception as e:
-            logger.error(f"Erro ao iniciar monitoramento de arquivos: {e}")
-    
-    def _auto_print_if_enabled(self, document):
+    def is_installed(self):
         """
-        Imprime automaticamente o documento se a impressão automática estiver ativada
-        
-        Args:
-            document (Document): Documento a ser impresso
-        """
-        if not self.config.get("auto_print", False):
-            return
-        
-        default_printer = self.config.get("default_printer", "")
-        if not default_printer:
-            logger.warning("Impressão automática ativada, mas nenhuma impressora padrão configurada")
-            return
-        
-        try:
-            logger.info(f"Enviando {document.name} para impressão automática na impressora {default_printer}")
-            
-            from src.utils.printer_utils import PrinterUtils
-            PrinterUtils.print_file(document.path, default_printer)
-            
-            logger.info(f"Documento {document.name} enviado para impressão automática com sucesso")
-            
-        except Exception as e:
-            logger.error(f"Erro ao imprimir automaticamente: {str(e)}")
-    
-    def get_status(self):
-        """
-        Obtém o status do sistema
+        Verifica se a impressora virtual está instalada
         
         Returns:
-            dict: Status dos componentes
+            bool: True se a impressora está instalada
         """
-        status = {
-            'running': self.is_running,
-            'printer_installed': False,
-            'server_running': False,
-            'server_info': None,
-            'monitoring_active': False
+        try:
+            exists = self.printer_manager.check_printer_exists(self.PRINTER_NAME)
+            logger.debug(f"Verificação de instalação: {exists}")
+            return exists
+        except Exception as e:
+            logger.error(f"Erro ao verificar instalação da impressora")
+            return False
+    
+    def get_installation_info(self):
+        """
+        Obtém informações sobre a instalação
+        
+        Returns:
+            dict: Informações da instalação
+        """
+        info = {
+            'installed': self.is_installed(),
+            'printer_name': self.PRINTER_NAME,
+            'system': self.system,
+            'multiuser_environment': self.is_multiuser_env,
+            'server_info': self.server_info
         }
         
-        try:
-            # Status da impressora
-            if self.installer:
-                status['printer_installed'] = self.installer.is_installed()
-            
-            # Status do servidor
-            if self.printer_server:
-                server_info = self.printer_server.get_server_info()
-                status['server_running'] = server_info['running']
-                status['server_info'] = server_info
-            
-            # Status do monitoramento
-            if self.file_monitor:
-                # Compatibilidade com o código existente
-                if hasattr(self.file_monitor, 'observer') and self.file_monitor.observer:
-                    status['monitoring_active'] = self.file_monitor.observer.is_alive()
-                # Novo código com múltiplos observadores
-                elif hasattr(self.file_monitor, 'observers'):
-                    status['monitoring_active'] = any(
-                        observer.is_alive() for observer in self.file_monitor.observers
-                    )
-            
-        except Exception as e:
-            logger.error(f"Erro ao obter status: {e}")
+        if self.is_multiuser_env:
+            info['description'] = 'Impressora configurada para ambiente multi-usuário'
+            info['save_location'] = 'Documents/Impressora_LoQQuei de cada usuário'
+        else:
+            info['description'] = 'Impressora configurada para usuário único'
+            info['save_location'] = self.config.pdf_dir if hasattr(self.config, 'pdf_dir') else 'Configuração padrão'
         
-        return status
-    
-    def get_recent_documents(self, limit=50):
-        """
-        Obtém a lista de documentos recentes
-        
-        Args:
-            limit (int): Limite de documentos a retornar
-            
-        Returns:
-            list: Lista de objetos Document
-        """
-        try:
-            if not self.file_monitor:
-                # Se o monitor não está ativo, cria um temporário para obter documentos
-                from src.utils.file_monitor import FileMonitor
-                temp_monitor = FileMonitor(self.config)
-                temp_monitor._load_initial_documents()
-                documents = temp_monitor.get_documents()
-            else:
-                documents = self.file_monitor.get_documents()
-            
-            # Ordena por data de criação (mais recente primeiro)
-            documents.sort(key=lambda d: d.created_at, reverse=True)
-            
-            return documents[:limit]
-        except Exception as e:
-            logger.error(f"Erro ao obter documentos recentes: {e}")
-            return []
-    
-    def refresh_pdf_directories(self):
-        """
-        Atualiza a lista de diretórios monitorados
-        """
-        if self.file_monitor:
-            # Verifica se o método refresh_directories existe no file_monitor
-            if hasattr(self.file_monitor, 'refresh_directories'):
-                logger.info("Atualizando diretórios de PDF monitorados")
-                self.file_monitor.refresh_directories()
-                
-                # Verificar se a atualização foi bem-sucedida
-                if hasattr(self.file_monitor, 'observers'):
-                    logger.info(f"Monitoramento atualizado: {len(self.file_monitor.observers)} observadores ativos")
-                else:
-                    logger.warning("A atualização pode não ter sido bem-sucedida")
-            else:
-                # Reinicia o monitor para atualizar diretórios (compatibilidade)
-                logger.info("Reiniciando monitor de arquivos para atualizar diretórios")
-                self.file_monitor.stop()
-                self.file_monitor.start()
-
-# Para compatibilidade com código existente
-class PrintFolderMonitor(VirtualPrinterManager):
-    """Alias para compatibilidade com código existente"""
-    
-    def __init__(self, config, api_client=None, on_new_document=None):
-        super().__init__(config, api_client, on_new_document)
-        logger.warning("PrintFolderMonitor é deprecated. Use VirtualPrinterManager em vez disso.")
+        return info
