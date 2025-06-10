@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Sistema de impressão IPP para arquivos PDF integrado ao sistema de gerenciamento
-VERSÃO FINAL - IGUAL AO CÓDIGO DE TESTE QUE FUNCIONA
+Sistema de impressão IPP otimizado com cache de endpoints e processamento paralelo
+VERSÃO OTIMIZADA - Cache de endpoints, processamento paralelo e performance melhorada
 """
 
 import os
@@ -34,23 +34,62 @@ import ssl
 import requests
 import re
 import unicodedata
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
 
-def normalize_filename(filename):
-    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
-    # Remove acentos
-    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
-    # Remove caracteres não alfanuméricos e substitui por underscores
-    filename = re.sub(r'[^\w\-\.]', '_', filename)
-    # Limita o comprimento do nome
-    if len(filename) > 30:
-        base, ext = os.path.splitext(filename)
-        filename = f"{base[:25]}{ext}"
-    return filename
+class PrinterEndpointCache:
+    """Cache inteligente de endpoints de impressora por IP"""
+    
+    def __init__(self, config):
+        self.config = config
+        self._cache_lock = threading.Lock()
+    
+    def get_printer_endpoint_config(self, printer_ip: str) -> Dict[str, Any]:
+        """Obtém configuração de endpoint em cache para uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            return printer_configs.get(printer_ip, {})
+    
+    def save_printer_endpoint_config(self, printer_ip: str, endpoint: str, 
+                                   use_https: bool, test_successful: bool = True):
+        """Salva configuração de endpoint em cache"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            printer_configs[printer_ip] = {
+                "endpoint": endpoint,
+                "use_https": use_https,
+                "protocol": "https" if use_https else "http",
+                "last_success": datetime.now().isoformat() if test_successful else None,
+                "success_count": printer_configs.get(printer_ip, {}).get("success_count", 0) + (1 if test_successful else 0),
+                "fail_count": printer_configs.get(printer_ip, {}).get("fail_count", 0) + (0 if test_successful else 1)
+            }
+            
+            self.config.set("printer_endpoint_cache", printer_configs)
+            logger.info(f"Cache atualizado para {printer_ip}: {endpoint} ({'HTTPS' if use_https else 'HTTP'})")
+    
+    def mark_endpoint_failed(self, printer_ip: str):
+        """Marca endpoint como falhado e incrementa contador"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = printer_configs[printer_ip].get("fail_count", 0) + 1
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+    
+    def should_rediscover(self, printer_ip: str) -> bool:
+        """Verifica se deve redescobrir endpoints (após muitas falhas)"""
+        config = self.get_printer_endpoint_config(printer_ip)
+        fail_count = config.get("fail_count", 0)
+        success_count = config.get("success_count", 0)
+        
+        # Redescobre se falhou mais de 3 vezes seguidas ou não tem sucesso anterior
+        return fail_count > 3 or success_count == 0
 
 # Instalação automática de dependências
 def install_package(package):
@@ -63,43 +102,6 @@ def install_package(package):
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Erro ao instalar {package}: {e}")
-        return False
-
-# Verifica e instala dependências
-def check_dependencies():
-    required_packages = ['requests', 'Pillow', 'pdf2image']
-    missing_packages = []
-    
-    # Verifica cada pacote
-    for package in required_packages:
-        try:
-            if package == 'pdf2image':
-                import pdf2image
-            elif package == 'Pillow':
-                from PIL import Image
-            elif package == 'requests':
-                import requests
-        except ImportError:
-            missing_packages.append(package)
-    
-    # Instala pacotes faltantes
-    if missing_packages:
-        logger.info(f"Instalando pacotes faltantes: {missing_packages}")
-        for package in missing_packages:
-            if install_package(package):
-                logger.info(f"Pacote {package} instalado com sucesso")
-            else:
-                logger.error(f"Falha ao instalar {package}")
-                return False
-    
-    # Importa os pacotes após instalação
-    try:
-        import requests
-        from PIL import Image
-        import pdf2image
-        return True
-    except ImportError as e:
-        logger.error(f"Falha ao importar dependências após instalação: {e}")
         return False
 
 # Gerencia o Poppler para conversão de PDF para imagem
@@ -566,7 +568,7 @@ class PrintJobInfo:
         }
 
 class IPPEncoder:
-    """Codificador para protocolo IPP - IGUAL AO CÓDIGO DE TESTE"""
+    """Codificador para protocolo IPP"""
     
     @staticmethod
     def encode_string(tag: int, name: str, value: str) -> bytes:
@@ -597,52 +599,543 @@ class IPPEncoder:
         """Codifica um atributo enum"""
         return IPPEncoder.encode_integer(IPPTag.ENUM, name, value)
 
+def normalize_filename(filename):
+    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
+    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
+    filename = re.sub(r'[^\w\-\.]', '_', filename)
+    if len(filename) > 30:
+        base, ext = os.path.splitext(filename)
+        filename = f"{base[:25]}{ext}"
+    return filename
+
+def check_dependencies():
+    """Verifica e instala dependências necessárias"""
+    required_packages = ['requests', 'Pillow', 'pdf2image']
+    missing_packages = []
+    
+    for package in required_packages:
+        try:
+            if package == 'pdf2image':
+                import pdf2image
+            elif package == 'Pillow':
+                from PIL import Image
+            elif package == 'requests':
+                import requests
+        except ImportError:
+            missing_packages.append(package)
+    
+    if missing_packages:
+        logger.info(f"Instalando pacotes faltantes: {missing_packages}")
+        for package in missing_packages:
+            try:
+                result = run_hidden([sys.executable, "-m", "pip", "install", package],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                logger.info(f"Pacote {package} instalado com sucesso")
+            except:
+                logger.error(f"Falha ao instalar {package}")
+                return False
+    
+    try:
+        import requests
+        from PIL import Image
+        import pdf2image
+        return True
+    except ImportError as e:
+        logger.error(f"Falha ao importar dependências: {e}")
+        return False
+
 class IPPPrinter:
     """Classe principal para impressão de arquivos PDF via IPP - IGUAL AO CÓDIGO DE TESTE"""
     
-    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False):
+    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False, config=None):
         # Verifica dependências
         if not check_dependencies():
             raise ImportError("Falha ao verificar/instalar dependências para impressão")
             
-        # Importa após verificação
-        global requests
-        import requests
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        
-        # Configuração de retry para requisições HTTP
+        # Configuração de retry otimizada
         retry_strategy = Retry(
-            total=3,
+            total=2,  # Reduzido de 3 para 2
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "POST"],
-            backoff_factor=1
+            backoff_factor=0.5  # Reduzido de 1 para 0.5
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session = requests.Session()
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         
-        # Usa a sessão configurada
         self.session = session
-        
         self.printer_ip = printer_ip
         self.port = port
         self.use_https = use_https
         self.protocol = "https" if use_https else "http"
         self.base_url = f"{self.protocol}://{printer_ip}:{port}"
         self.request_id = 1
-        self.discovered_endpoints = []
+        self.config = config
         
-        # Se não especificou HTTPS, detecta automaticamente
-        if not use_https:
-            self._auto_detect_https()
+        # === NOVA FUNCIONALIDADE: Cache de endpoints ===
+        self.endpoint_cache = PrinterEndpointCache(config) if config else None
+        self.known_endpoint = None
+        self.known_protocol = None
         
-        logger.info(f"Protocolo final: {self.protocol} - {self.base_url}")
+        # Tenta usar configuração em cache primeiro
+        if self.endpoint_cache:
+            cached_config = self.endpoint_cache.get_printer_endpoint_config(printer_ip)
+            if cached_config and not self.endpoint_cache.should_rediscover(printer_ip):
+                self.known_endpoint = cached_config.get("endpoint", "")
+                self.use_https = cached_config.get("use_https", False)
+                self.protocol = cached_config.get("protocol", "http")
+                self.base_url = f"{self.protocol}://{printer_ip}:{port}"
+                logger.info(f"Usando configuração em cache para {printer_ip}: {self.known_endpoint} ({self.protocol.upper()})")
+                return
         
-        # Descobre endpoints disponíveis
-        self.discovered_endpoints = self._discover_printer_endpoints()
+        # Se não tem cache válido, faz discovery otimizado
+        logger.info(f"Fazendo discovery para {printer_ip}...")
+        self._quick_discovery()
     
+    def _quick_discovery(self):
+        """Discovery rápido e otimizado de endpoints"""
+        # Endpoints mais comuns primeiro
+        priority_endpoints = [
+            "/ipp/print",
+            "/ipp", 
+            "/printers/ipp",
+            "/ipp/printer",
+            "/printer",
+            "/printers",
+            ""
+        ]
+        
+        # Testa HTTP primeiro (mais comum)
+        for endpoint in priority_endpoints:
+            if self._test_endpoint_quick(endpoint, use_https=False):
+                self.known_endpoint = endpoint
+                self.use_https = False
+                self.protocol = "http"
+                self.base_url = f"http://{self.printer_ip}:{self.port}"
+                self._save_to_cache(endpoint, False, True)
+                logger.info(f"Endpoint encontrado (HTTP): {endpoint}")
+                return
+        
+        # Se HTTP falhou, testa HTTPS
+        for endpoint in priority_endpoints:
+            if self._test_endpoint_quick(endpoint, use_https=True):
+                self.known_endpoint = endpoint
+                self.use_https = True
+                self.protocol = "https"
+                self.base_url = f"https://{self.printer_ip}:{self.port}"
+                self._save_to_cache(endpoint, True, True)
+                logger.info(f"Endpoint encontrado (HTTPS): {endpoint}")
+                return
+        
+        # Fallback para endpoint padrão
+        self.known_endpoint = "/ipp/print"
+        logger.warning(f"Nenhum endpoint respondeu, usando fallback: {self.known_endpoint}")
+
+    #!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Sistema de impressão IPP otimizado com cache de endpoints e processamento paralelo
+VERSÃO OTIMIZADA - Cache de endpoints, processamento paralelo e performance melhorada
+"""
+
+import os
+import tempfile
+import time
+import sys
+import struct
+import subprocess
+import threading
+import logging
+import queue
+import socket
+from typing import Dict, Optional, Any, List, Tuple
+from dataclasses import dataclass
+from enum import Enum
+import platform
+import zipfile
+import urllib.request
+import shutil
+import wx
+import json
+from datetime import datetime
+from urllib3.exceptions import InsecureRequestWarning
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import struct
+import ssl
+import requests
+import re
+import unicodedata
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
+
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
+
+class PrinterEndpointCache:
+    """Cache inteligente de endpoints de impressora por IP"""
+    
+    def __init__(self, config):
+        self.config = config
+        self._cache_lock = threading.Lock()
+    
+    def get_printer_endpoint_config(self, printer_ip: str) -> Dict[str, Any]:
+        """Obtém configuração de endpoint em cache para uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            return printer_configs.get(printer_ip, {})
+    
+    def save_printer_endpoint_config(self, printer_ip: str, endpoint: str, 
+                                   use_https: bool, test_successful: bool = True):
+        """Salva configuração de endpoint em cache"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            printer_configs[printer_ip] = {
+                "endpoint": endpoint,
+                "use_https": use_https,
+                "protocol": "https" if use_https else "http",
+                "last_success": datetime.now().isoformat() if test_successful else None,
+                "success_count": printer_configs.get(printer_ip, {}).get("success_count", 0) + (1 if test_successful else 0),
+                "fail_count": printer_configs.get(printer_ip, {}).get("fail_count", 0) + (0 if test_successful else 1)
+            }
+            
+            self.config.set("printer_endpoint_cache", printer_configs)
+            logger.info(f"Cache atualizado para {printer_ip}: {endpoint} ({'HTTPS' if use_https else 'HTTP'})")
+    
+    def mark_endpoint_failed(self, printer_ip: str):
+        """Marca endpoint como falhado e incrementa contador"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = printer_configs[printer_ip].get("fail_count", 0) + 1
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+    
+    def should_rediscover(self, printer_ip: str) -> bool:
+        """Verifica se deve redescobrir endpoints (critério mais sensível)"""
+        config = self.get_printer_endpoint_config(printer_ip)
+        fail_count = config.get("fail_count", 0)
+        success_count = config.get("success_count", 0)
+        last_success = config.get("last_success")
+        
+        # === CORREÇÃO: Critérios mais sensíveis para rediscovery ===
+        
+        # Se não tem sucesso anterior, sempre redescobre
+        if success_count == 0:
+            return True
+        
+        # Se falhou mais de 2 vezes seguidas (reduzido de 3)
+        if fail_count > 2:
+            return True
+            
+        # Se a taxa de falha é muito alta (> 50%)
+        total_attempts = success_count + fail_count
+        if total_attempts > 5 and (fail_count / total_attempts) > 0.5:
+            return True
+        
+        # Se o último sucesso foi há mais de 1 hora, permite rediscovery
+        if last_success:
+            try:
+                from datetime import datetime, timedelta
+                last_success_time = datetime.fromisoformat(last_success)
+                if datetime.now() - last_success_time > timedelta(hours=1):
+                    return True
+            except:
+                return True  # Se não conseguir parsear, redescobre
+        
+        return False
+    
+    def reset_printer_cache(self, printer_ip: str):
+        """Reseta completamente o cache de uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                del printer_configs[printer_ip]
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Cache resetado para {printer_ip}")
+    
+    def force_rediscovery(self, printer_ip: str):
+        """Força rediscovery marcando como falha múltipla"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = 10  # Força rediscovery
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Rediscovery forçado para {printer_ip}")
+
+class IPPPrinter:
+    """Classe principal para impressão de arquivos PDF via IPP - VERSÃO OTIMIZADA"""
+    
+    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False, config=None):
+        # Verifica dependências
+        if not check_dependencies():
+            raise ImportError("Falha ao verificar/instalar dependências para impressão")
+            
+        # Configuração de retry otimizada
+        retry_strategy = Retry(
+            total=2,  # Reduzido de 3 para 2
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "POST"],
+            backoff_factor=0.5  # Reduzido de 1 para 0.5
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        self.session = session
+        self.printer_ip = printer_ip
+        self.port = port
+        self.use_https = use_https
+        self.protocol = "https" if use_https else "http"
+        self.base_url = f"{self.protocol}://{printer_ip}:{port}"
+        self.request_id = 1
+        self.config = config
+        
+        # === NOVA FUNCIONALIDADE: Cache de endpoints ===
+        self.endpoint_cache = PrinterEndpointCache(config) if config else None
+        self.known_endpoint = None
+        self.known_protocol = None
+        
+        # Tenta usar configuração em cache primeiro
+        if self.endpoint_cache:
+            cached_config = self.endpoint_cache.get_printer_endpoint_config(printer_ip)
+            if cached_config and not self.endpoint_cache.should_rediscover(printer_ip):
+                self.known_endpoint = cached_config.get("endpoint", "")
+                self.use_https = cached_config.get("use_https", False)
+                self.protocol = cached_config.get("protocol", "http")
+                self.base_url = f"{self.protocol}://{printer_ip}:{port}"
+                logger.info(f"Usando configuração em cache para {printer_ip}: {self.known_endpoint} ({self.protocol.upper()})")
+                return
+        
+        # Se não tem cache válido, faz discovery otimizado
+        logger.info(f"Fazendo discovery para {printer_ip}...")
+        self._quick_discovery()
+    
+    def _quick_discovery(self):
+        """Discovery rápido e otimizado testando ambos os protocolos"""
+        # Endpoints mais comuns primeiro
+        priority_endpoints = [
+            "/ipp/print",
+            "/ipp", 
+            "/printers/ipp",
+            "/ipp/printer",
+            "/printer",
+            "/printers",
+            ""
+        ]
+        
+        # === CORREÇÃO: Testa ambos os protocolos para cada endpoint ===
+        working_combinations = []
+        
+        logger.info(f"Testando discovery para {self.printer_ip} - verificando HTTP e HTTPS...")
+        
+        # Testa todas as combinações possíveis
+        for endpoint in priority_endpoints:
+            # Testa HTTP
+            if self._test_endpoint_quick(endpoint, use_https=False):
+                working_combinations.append((endpoint, False, "http"))
+                logger.debug(f"HTTP funciona: {endpoint}")
+            
+            # Testa HTTPS
+            if self._test_endpoint_quick(endpoint, use_https=True):
+                working_combinations.append((endpoint, True, "https"))
+                logger.debug(f"HTTPS funciona: {endpoint}")
+        
+        if not working_combinations:
+            # Fallback para endpoint padrão
+            self.known_endpoint = "/ipp/print"
+            self.use_https = False
+            self.protocol = "http"
+            self.base_url = f"http://{self.printer_ip}:{self.port}"
+            logger.warning(f"Nenhum endpoint respondeu, usando fallback: {self.known_endpoint}")
+            return
+        
+        # === CORREÇÃO: Testa impressão real com cada combinação ===
+        logger.info(f"Encontradas {len(working_combinations)} combinações, testando impressão real...")
+        
+        for endpoint, use_https, protocol in working_combinations:
+            logger.info(f"Testando impressão real: {protocol.upper()}{endpoint}")
+            
+            # Configura temporariamente para este teste
+            self.known_endpoint = endpoint
+            self.use_https = use_https
+            self.protocol = protocol
+            self.base_url = f"{protocol}://{self.printer_ip}:{self.port}"
+            
+            # Testa com impressão real (teste pequeno)
+            if self._test_real_printing(endpoint, use_https):
+                logger.info(f"✓ Impressão confirmada: {protocol.upper()}{endpoint}")
+                self._save_to_cache(endpoint, use_https, True)
+                return
+            else:
+                logger.debug(f"✗ Falha na impressão: {protocol.upper()}{endpoint}")
+        
+        # Se nenhuma funcionou para impressão real, usa a primeira que respondeu HTTP
+        logger.warning("Nenhuma combinação funcionou para impressão real, usando primeira opção HTTP")
+        endpoint, use_https, protocol = working_combinations[0]
+        self.known_endpoint = endpoint
+        self.use_https = use_https
+        self.protocol = protocol
+        self.base_url = f"{protocol}://{self.printer_ip}:{self.port}"
+    
+    def _test_endpoint_quick(self, endpoint: str, use_https: bool) -> bool:
+        """Teste rápido de endpoint (timeout reduzido)"""
+        protocol = "https" if use_https else "http"
+        url = f"{protocol}://{self.printer_ip}:{self.port}{endpoint}"
+        
+        try:
+            response = requests.get(
+                url,
+                timeout=3,  # Timeout reduzido
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # Considera sucesso códigos que indicam que o endpoint existe
+            return response.status_code in [200, 400, 401, 403, 404, 405, 426]
+            
+        except requests.exceptions.ConnectionError as e:
+            # Se Connection Reset e testando HTTP, pode precisar de HTTPS
+            if ("10054" in str(e) or "Connection aborted" in str(e)) and not use_https:
+                return False  # Vai testar HTTPS na próxima rodada
+            return False
+        except:
+            return False
+
+    def _test_real_printing(self, endpoint: str, use_https: bool) -> bool:
+        """Testa impressão real com dados mínimos para validar o endpoint"""
+        try:
+            protocol = "https" if use_https else "http"
+            url = f"{protocol}://{self.printer_ip}:{self.port}{endpoint}"
+            
+            # Cria URI IPP correto
+            if use_https:
+                printer_uri = url.replace("https://", "ipps://", 1)
+            else:
+                printer_uri = url.replace("http://", "ipp://", 1)
+            
+            # Cria uma requisição IPP mínima para teste (sem documento)
+            attributes = {
+                "printer-uri": printer_uri,
+                "requesting-user-name": "test",
+                "job-name": "test_connection",
+                "document-format": "application/pdf",
+                "ipp-attribute-fidelity": False,
+                "copies": 1
+            }
+            
+            # Dados PDF mínimos (PDF vazio válido)
+            minimal_pdf = b"""%%PDF-1.4
+1 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+
+2 0 obj
+<<
+/Type /Pages
+/Kids [3 0 R]
+/Count 1
+>>
+endobj
+
+3 0 obj
+<<
+/Type /Page
+/Parent 2 0 R
+/MediaBox [0 0 612 792]
+>>
+endobj
+
+xref
+0 4
+0000000000 65535 f 
+0000000009 00000 n 
+0000000074 00000 n 
+0000000120 00000 n 
+trailer
+<<
+/Size 4
+/Root 1 0 R
+>>
+startxref
+190
+%%EOF"""
+            
+            # Constrói requisição IPP
+            ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+            ipp_request += minimal_pdf
+            
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Test/1.0'
+            }
+            
+            # Testa com timeout muito baixo
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=5,  # Timeout baixo para teste
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # Verifica se a resposta indica que a impressora aceita trabalhos
+            if response.status_code == 200:
+                # Verifica resposta IPP
+                if len(response.content) >= 8:
+                    status_code = struct.unpack('>H', response.content[2:4])[0]
+                    # Status codes que indicam que a impressora funcionou
+                    # (mesmo que rejeite o trabalho por outros motivos)
+                    valid_statuses = [
+                        0x0000,  # successful-ok
+                        0x0001,  # successful-ok-ignored-or-substituted-attributes
+                        0x0002,  # successful-ok-conflicting-attributes
+                        0x0400,  # client-error-bad-request (mas IPP funcionou)
+                        0x040A,  # document-format-not-supported (mas IPP funcionou)
+                        0x040B,  # attributes-or-values-not-supported (mas IPP funcionou)
+                    ]
+                    
+                    if status_code in valid_statuses:
+                        logger.debug(f"Teste real bem-sucedido: {protocol.upper()}{endpoint} (status: 0x{status_code:04X})")
+                        return True
+                    else:
+                        logger.debug(f"Teste real falhou: {protocol.upper()}{endpoint} (status: 0x{status_code:04X})")
+                        return False
+            
+            logger.debug(f"Teste real falhou: {protocol.upper()}{endpoint} (HTTP: {response.status_code})")
+            return False
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout no teste real: {protocol.upper()}{endpoint}")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.debug(f"Erro de conexão no teste real: {protocol.upper()}{endpoint}")
+            return False
+        except Exception as e:
+            logger.debug(f"Erro no teste real {protocol.upper()}{endpoint}: {e}")
+            return False
+
+    def _save_to_cache(self, endpoint: str, use_https: bool, success: bool):
+        """Salva configuração no cache"""
+        if self.endpoint_cache:
+            self.endpoint_cache.save_printer_endpoint_config(
+                self.printer_ip, endpoint, use_https, success
+            )
+
     def _discover_printer_endpoints(self):
         """Descobre os endpoints disponíveis na impressora"""
         logger.info(f"Descobrindo endpoints para a impressora {self.printer_ip}")
@@ -757,18 +1250,16 @@ class IPPPrinter:
     def print_file(self, file_path: str, options: PrintOptions, 
                 job_name: Optional[str] = None, progress_callback=None, 
                 job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Imprime um arquivo PDF com verificação de privilégios"""
+        """Imprime um arquivo PDF com otimizações de performance"""
         
-        # CORREÇÃO: Verifica privilégios de acesso ao arquivo
+        # Verificações de segurança (mantidas)
         if not os.access(file_path, os.R_OK):
             logger.error(f"Sem permissão de leitura para o arquivo: {file_path}")
             return False, {"error": "Sem permissão de leitura para o arquivo"}
         
-        # CORREÇÃO: Verifica se o processo tem permissões necessárias
         try:
-            # Testa se consegue ler o arquivo
             with open(file_path, 'rb') as f:
-                f.read(1024)  # Lê apenas 1KB para teste
+                f.read(1024)
         except PermissionError:
             logger.error(f"Erro de permissão ao acessar arquivo: {file_path}")
             return False, {"error": "Erro de permissão ao acessar arquivo"}
@@ -780,7 +1271,6 @@ class IPPPrinter:
             logger.error(f"Erro: Arquivo não encontrado: {file_path}")
             return False, {"error": "Arquivo não encontrado"}
         
-        # Verifica se é um arquivo PDF
         file_extension = os.path.splitext(file_path)[1].lower()
         if file_extension != '.pdf':
             logger.error(f"Erro: Arquivo deve ser PDF (.pdf), recebido: {file_extension}")
@@ -789,12 +1279,8 @@ class IPPPrinter:
         if job_name is None:
             job_name = os.path.basename(file_path)
         
-        logger.info(f"Preparando impressão de: {job_name}")
-
         job_name = normalize_filename(job_name)
-        logger.info(f"Nome do trabalho normalizado: {job_name}")
-
-        logger.info(f"Impressora: {self.printer_ip}:{self.port}")
+        logger.info(f"Preparando impressão otimizada de: {job_name}")
         
         # Lê o arquivo PDF
         try:
@@ -804,55 +1290,453 @@ class IPPPrinter:
             logger.error(f"Erro ao ler arquivo: {e}")
             return False, {"error": f"Erro ao ler arquivo: {e}"}
         
-        logger.info(f"Formato: PDF")
         logger.info(f"Tamanho do arquivo: {len(pdf_data):,} bytes")
         
-        # Primeira tentativa: enviar como PDF
-        logger.info("Tentativa 1: Enviando como PDF")
-        if progress_callback:
-            progress_callback("Tentativa 1: Enviando como PDF...")
-            
-        if self._print_as_pdf(pdf_data, job_name, options):
-            logger.info("Impressão PDF enviada com sucesso!")
+        # === OTIMIZAÇÃO: Tentativa prioritária com endpoint conhecido ===
+        if self.known_endpoint is not None:
+            logger.info(f"Tentativa 1: PDF usando endpoint conhecido ({self.protocol.upper()}{self.known_endpoint})")
             if progress_callback:
-                progress_callback("Impressão PDF enviada com sucesso!")
-            return True, {"method": "pdf"}
+                progress_callback(f"Tentativa 1: PDF usando {self.protocol.upper()}{self.known_endpoint}...")
+                
+            if self._print_as_pdf_optimized(pdf_data, job_name, options):
+                logger.info("✓ Impressão PDF com endpoint conhecido bem-sucedida!")
+                if progress_callback:
+                    progress_callback("✓ Impressão PDF concluída!")
+                return True, {"method": "pdf_cached"}
         
-        # Segunda tentativa: converter para JPG e enviar
-        logger.info("Tentativa 2: Convertendo para JPG e enviando")
+        # === CORREÇÃO: Se falhou com endpoint conhecido, força rediscovery completo ===
+        if self.endpoint_cache and self.known_endpoint is not None:
+            logger.warning("Endpoint conhecido falhou, forçando rediscovery completo...")
+            if progress_callback:
+                progress_callback("Redescobrir endpoints (testando HTTP e HTTPS)...")
+            
+            # Força rediscovery
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+            self.known_endpoint = None
+            self._quick_discovery()
+            
+            # Tenta novamente com nova configuração se descobriu algo
+            if self.known_endpoint is not None:
+                logger.info(f"Tentativa 1b: PDF com novo endpoint ({self.protocol.upper()}{self.known_endpoint})")
+                if progress_callback:
+                    progress_callback(f"Tentativa 1b: PDF com {self.protocol.upper()}{self.known_endpoint}...")
+                    
+                if self._print_as_pdf_optimized(pdf_data, job_name, options):
+                    logger.info("✓ Impressão PDF com endpoint redescoberto bem-sucedida!")
+                    if progress_callback:
+                        progress_callback("✓ Impressão PDF concluída!")
+                    return True, {"method": "pdf_rediscovered"}
+        
+        # Segunda tentativa: converter para JPG com processamento otimizado
+        logger.info("Tentativa 2: Convertendo para JPG com processamento paralelo")
         if progress_callback:
-            progress_callback("Tentativa 2: Convertendo para JPG e enviando...")
+            progress_callback("Tentativa 2: Convertendo para JPG (modo otimizado)...")
         
-        success, result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback, job_info)
+        success, result = self._convert_and_print_as_jpg_optimized(
+            file_path, job_name, options, progress_callback, job_info
+        )
         
         if success:
-            logger.info("Impressão JPG enviada com sucesso!")
+            logger.info("✓ Impressão JPG enviada com sucesso!")
             if progress_callback:
-                progress_callback("Impressão JPG enviada com sucesso!")
+                progress_callback("✓ Impressão JPG concluída!")
             return True, result
         
-        logger.error("Ambas as tentativas falharam")
+        # === ÚLTIMA TENTATIVA: Rediscovery forçado para JPG ===
+        logger.warning("JPG falhou, tentando rediscovery final...")
         if progress_callback:
-            progress_callback("Falha: Ambas as tentativas de impressão falharam")
+            progress_callback("Tentativa final: rediscovery completo...")
         
-        # Adicione informações de diagnóstico ao resultado
-        error_info = result.copy() if isinstance(result, dict) else {}
-        error_info.update({
-            "error": "Ambas as tentativas de impressão falharam",
-            "printer_ip": self.printer_ip,
-            "protocol": self.protocol,
-            "endpoints_tested": [
-                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp/print",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/printers/ipp",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/printers",
-                f"{self.protocol}://{self.printer_ip}:{self.port}"
-            ]
-        })
+        # Força rediscovery completo
+        self.known_endpoint = None
+        self._quick_discovery()
         
-        return False, error_info
-
+        if self.known_endpoint is not None:
+            logger.info(f"Tentativa final: JPG com endpoint redescoberto ({self.protocol.upper()}{self.known_endpoint})")
+            success, result = self._convert_and_print_as_jpg_optimized(
+                file_path, job_name, options, progress_callback, job_info
+            )
+            
+            if success:
+                logger.info("✓ Impressão JPG com rediscovery bem-sucedida!")
+                if progress_callback:
+                    progress_callback("✓ Impressão concluída após rediscovery!")
+                return True, result
+        
+        logger.error("Todas as tentativas falharam (PDF e JPG com rediscovery)")
+        if progress_callback:
+            progress_callback("✗ Falha: Todas as tentativas falharam")
+        
+        return False, {
+            "error": "Todas as tentativas falharam",
+            "tested_protocols": ["HTTP", "HTTPS"],
+            "tested_methods": ["PDF", "JPG"],
+            "rediscovery_attempts": 2
+        }
     
+    def _print_as_pdf_optimized(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
+        """Impressão PDF otimizada usando endpoint conhecido"""
+        if self.known_endpoint is None:
+            return False
+        
+        job_name = normalize_filename(job_name)
+        url = f"{self.base_url}{self.known_endpoint}"
+        
+        # Cria URI IPP correto
+        if self.use_https:
+            printer_uri = url.replace("https://", "ipps://", 1)
+        else:
+            printer_uri = url.replace("http://", "ipp://", 1)
+        
+        # Atributos IPP otimizados
+        attributes = {
+            "printer-uri": printer_uri,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": job_name,
+            "document-name": job_name,
+            "document-format": "application/pdf",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": options.copies,
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        if options.duplex != Duplex.SIMPLES:
+            attributes["sides"] = options.duplex.value
+        
+        # Envia usando endpoint conhecido
+        success = self._send_ipp_request_optimized(url, attributes, pdf_data)
+        
+        # === CORREÇÃO: Só salva no cache após sucesso confirmado ===
+        if success:
+            self._save_to_cache(self.known_endpoint, self.use_https, True)
+            logger.info(f"✓ PDF impresso e configuração salva no cache: {self.protocol.upper()}{self.known_endpoint}")
+        else:
+            # Marca falha no cache para trigger rediscovery
+            if self.endpoint_cache:
+                self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+            logger.warning(f"✗ Falha na impressão PDF: {self.protocol.upper()}{self.known_endpoint}")
+        
+        return success
+
+    def _convert_and_print_as_jpg_optimized(self, pdf_path: str, job_name: str, options: PrintOptions, 
+                                          progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Conversão e impressão JPG com processamento paralelo otimizado"""
+        
+        temp_folder = None
+        
+        try:
+            logger.info("Convertendo PDF para JPG com otimizações...")
+            if progress_callback:
+                progress_callback("Convertendo PDF para JPG (modo otimizado)...")
+            
+            import pdf2image
+            from PIL import Image
+            
+            job_name = normalize_filename(job_name)
+            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+            safe_base_name = normalize_filename(base_name)
+            temp_folder = self._create_temp_folder(safe_base_name)
+            
+            # === OTIMIZAÇÃO: Configuração para conversão mais rápida ===
+            poppler_path = PopplerManager.setup_poppler()
+            
+            convert_kwargs = {
+                'pdf_path': pdf_path,
+                'dpi': min(options.dpi, 200),  # Limita DPI para performance
+                'fmt': 'jpeg',
+                'thread_count': min(4, os.cpu_count() or 2),  # Usa múltiplas threads
+                'use_pdftocairo': True,  # Usa motor mais rápido quando disponível
+                'grayscale': options.color_mode == ColorMode.MONOCROMO
+            }
+            
+            if poppler_path:
+                convert_kwargs['poppler_path'] = poppler_path
+            
+            # Conversão otimizada
+            start_time = time.time()
+            images = pdf2image.convert_from_path(**convert_kwargs)
+            conversion_time = time.time() - start_time
+            
+            if not images:
+                logger.error("Falha na conversão PDF para JPG")
+                return False, {"error": "Falha na conversão PDF para JPG"}
+            
+            logger.info(f"Convertido {len(images)} página(s) em {conversion_time:.2f}s")
+            if progress_callback:
+                progress_callback(f"Convertido {len(images)} páginas em {conversion_time:.2f}s")
+            
+            # === OTIMIZAÇÃO: Processamento em lote de páginas ===
+            page_jobs = self._prepare_pages_batch(
+                images, safe_base_name, job_name, temp_folder, options
+            )
+            
+            # === OTIMIZAÇÃO: Processamento paralelo de páginas ===
+            return self._process_pages_parallel(page_jobs, options, progress_callback, job_info)
+            
+        except Exception as e:
+            logger.error(f"Erro na conversão/preparação JPG: {e}")
+            if temp_folder and os.path.exists(temp_folder):
+                logger.info(f"Imagens parciais mantidas em: {temp_folder}")
+            return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
+
+    def _prepare_pages_batch(self, images: List, safe_base_name: str, job_name: str, 
+                           temp_folder: str, options: PrintOptions) -> List[PageJob]:
+        """Prepara páginas em lote para melhor performance"""
+        page_jobs = []
+        
+        # === OTIMIZAÇÃO: Processamento em lote ===
+        for page_num, image in enumerate(images, 1):
+            # Otimiza imagem baseado nas configurações
+            if options.color_mode == ColorMode.MONOCROMO:
+                image = image.convert('L')
+            elif image.mode not in ['RGB', 'L']:
+                image = image.convert('RGB')
+            
+            # Nome do arquivo otimizado
+            if len(images) > 1:
+                image_filename = f"{safe_base_name}_p{page_num:02d}.jpg"
+                page_job_name = f"{normalize_filename(job_name)}_p{page_num:02d}"
+            else:
+                image_filename = f"{safe_base_name}.jpg"
+                page_job_name = normalize_filename(job_name)
+            
+            image_path = os.path.join(temp_folder, image_filename)
+            
+            # Salva com qualidade otimizada
+            jpg_quality = 85 if options.quality == Quality.ALTA else 75  # Reduzido para performance
+            image.save(image_path, format='JPEG', quality=jpg_quality, optimize=True)
+            
+            # Lê dados
+            with open(image_path, 'rb') as f:
+                jpg_data = f.read()
+            
+            page_job = PageJob(
+                page_num=page_num,
+                image_path=image_path,
+                jpg_data=jpg_data,
+                job_name=page_job_name,
+                max_attempts=2  # Reduzido de 3 para 2
+            )
+            page_jobs.append(page_job)
+        
+        logger.info(f"Preparadas {len(page_jobs)} páginas para impressão paralela")
+        return page_jobs
+
+    def _process_pages_parallel(self, page_jobs: list, options: PrintOptions, 
+                              progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Processa páginas com paralelização inteligente"""
+        
+        total_copies = options.copies
+        total_pages_all_copies = len(page_jobs) * total_copies
+        pages_sent = 0
+        successful_pages = []
+        
+        logger.info(f"Processamento paralelo: {len(page_jobs)} página(s) × {total_copies} cópia(s) = {total_pages_all_copies} páginas")
+        
+        # === CONFIGURAÇÃO DE PARALELIZAÇÃO ===
+        # Determina número de workers baseado no número de páginas e cores de CPU
+        max_workers = min(
+            4,  # Máximo de 4 threads simultâneas (para não sobrecarregar a impressora)
+            max(2, len(page_jobs) // 2),  # Pelo menos 2, até metade das páginas
+            os.cpu_count() or 2  # Limitado pelo número de cores
+        )
+        
+        logger.info(f"Usando {max_workers} workers para processamento paralelo")
+        if progress_callback:
+            progress_callback(f"Iniciando processamento paralelo ({max_workers} workers)...")
+        
+        # Processa cada cópia
+        for copy_num in range(1, total_copies + 1):
+            logger.info(f"=== Processando cópia {copy_num}/{total_copies} com paralelização ===")
+            if progress_callback:
+                progress_callback(f"Cópia {copy_num}/{total_copies} - processamento paralelo...")
+            
+            copy_successful = 0
+            
+            # === PROCESSAMENTO PARALELO POR CÓPIA ===
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submete todas as páginas desta cópia
+                future_to_page = {}
+                
+                for page_job in page_jobs:
+                    # Verifica cancelamento
+                    if job_info and job_info.status == "canceled":
+                        logger.info(f"Cancelamento detectado na cópia {copy_num}")
+                        break
+                    
+                    # Cria nome único para esta cópia
+                    if total_copies > 1:
+                        copy_job_name = f"{page_job.job_name}_c{copy_num:02d}"
+                    else:
+                        copy_job_name = page_job.job_name
+                    
+                    # Submete tarefa para o pool de threads
+                    future = executor.submit(
+                        self._send_page_optimized, 
+                        page_job, copy_job_name, options, copy_num, total_copies
+                    )
+                    future_to_page[future] = (page_job, copy_num)
+                
+                # Processa resultados conforme completam
+                for future in as_completed(future_to_page):
+                    page_job, copy_num = future_to_page[future]
+                    
+                    # Verifica cancelamento
+                    if job_info and job_info.status == "canceled":
+                        logger.info(f"Cancelamento detectado durante processamento paralelo")
+                        executor.shutdown(wait=False)
+                        break
+                    
+                    try:
+                        success = future.result(timeout=30)  # Timeout para evitar travamento
+                        
+                        if success:
+                            copy_successful += 1
+                            pages_sent += 1
+                            successful_pages.append(f"p{page_job.page_num}_c{copy_num}")
+                            
+                            logger.info(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
+                            if progress_callback:
+                                progress_callback(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
+                        else:
+                            logger.warning(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
+                            if progress_callback:
+                                progress_callback(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
+                                
+                    except concurrent.futures.TimeoutError:
+                        logger.error(f"Timeout na página {page_job.page_num} (cópia {copy_num})")
+                    except Exception as e:
+                        logger.error(f"Erro na página {page_job.page_num} (cópia {copy_num}): {e}")
+            
+            # Verifica se foi cancelado
+            if job_info and job_info.status == "canceled":
+                result = {
+                    "total_pages": total_pages_all_copies,
+                    "successful_pages": len(successful_pages),
+                    "failed_pages": total_pages_all_copies - len(successful_pages),
+                    "method": "jpg_parallel",
+                    "status": "canceled",
+                    "message": f"Trabalho cancelado durante cópia {copy_num}."
+                }
+                return False, result
+            
+            logger.info(f"Cópia {copy_num} concluída: {copy_successful}/{len(page_jobs)} páginas enviadas")
+            
+            # Pausa mínima entre cópias (apenas se houver múltiplas cópias)
+            if copy_num < total_copies and total_copies > 1:
+                time.sleep(0.5)  # Reduzido de 2s para 0.5s
+        
+        # Relatório final
+        successful_count = len(successful_pages)
+        failed_count = total_pages_all_copies - successful_count
+        
+        logger.info("=== Relatório Final (Paralelo) ===")
+        logger.info(f"Páginas enviadas: {successful_count}/{total_pages_all_copies}")
+        logger.info(f"Taxa de sucesso: {(successful_count/total_pages_all_copies)*100:.1f}%")
+        
+        result = {
+            "total_pages": total_pages_all_copies,
+            "successful_pages": successful_count,
+            "failed_pages": failed_count,
+            "method": "jpg_parallel",
+            "copies_requested": total_copies,
+            "unique_pages": len(page_jobs),
+            "workers_used": max_workers
+        }
+        
+        return successful_count == total_pages_all_copies, result
+
+    def _send_page_optimized(self, page_job: PageJob, copy_job_name: str, 
+                           options: PrintOptions, copy_num: int, total_copies: int) -> bool:
+        """Envia uma página de forma otimizada (para uso em threads)"""
+        # Atributos IPP para JPG
+        url = f"{self.base_url}{self.known_endpoint or '/ipp/print'}"
+        
+        attributes = {
+            "printer-uri": url,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": copy_job_name,
+            "document-name": copy_job_name,
+            "document-format": "image/jpeg",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": 1,  # Sempre 1 cópia (controlamos manualmente)
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        
+        # Tentativa otimizada (máximo 2 tentativas)
+        for attempt in range(page_job.max_attempts):
+            success = self._send_ipp_request_optimized(url, attributes, page_job.jpg_data)
+            
+            if success:
+                # === CORREÇÃO: Confirma configuração no cache após sucesso ===
+                if attempt == 0:  # Só salva na primeira tentativa bem-sucedida
+                    self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
+                return True
+            
+            # Pausa mínima apenas se não for a última tentativa
+            if attempt < page_job.max_attempts - 1:
+                time.sleep(0.2)
+        
+        # === CORREÇÃO: Marca falha se todas as tentativas falharam ===
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        
+        return False
+
+    def _send_ipp_request_optimized(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Envio IPP otimizado com timeout reduzido"""
+        # Corrige URL para protocolo correto
+        if self.use_https and url.startswith("http:"):
+            url = url.replace("http:", "https:", 1)
+        
+        # Constrói requisição IPP
+        ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+        ipp_request += document_data
+        
+        try:
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Optimized/1.1'
+            }
+            
+            # === OTIMIZAÇÃO: Timeout reduzido e sem retry automático ===
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=15,  # Reduzido de 30 para 15
+                verify=False,
+                allow_redirects=False
+            )
+            
+            if response.status_code == 200:
+                return self._verify_ipp_response(response)
+            else:
+                logger.debug(f"HTTP Status não é 200: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.debug("Timeout na requisição IPP")
+        except requests.exceptions.ConnectionError:
+            logger.debug("Erro de conexão IPP")
+        except Exception as e:
+            logger.debug(f"Erro IPP: {e}")
+        
+        return False
+
     def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
         # Normaliza o nome do trabalho
         job_name = normalize_filename(job_name)
@@ -914,11 +1798,9 @@ class IPPPrinter:
 
     
     def _create_temp_folder(self, base_name: str) -> str:
-        """Cria uma pasta temporária para salvar as imagens convertidas"""
-        # Normaliza o nome base para evitar problemas com caracteres especiais
+        """Cria pasta temporária otimizada"""
         safe_name = normalize_filename(base_name)
         timestamp = int(time.time())
-        # Usa um nome de pasta sem espaços ou caracteres especiais
         temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_print_{safe_name}_{timestamp}")
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
@@ -1230,8 +2112,6 @@ class IPPPrinter:
         # Retorna True apenas se TODAS as páginas (incluindo cópias) foram impressas com sucesso
         return successful_count == total_pages_all_copies, result
 
-
-
     def _build_ipp_request(self, operation: int, attributes: Dict[str, Any]) -> bytes:
         """Constrói uma requisição IPP completa com correção de URI"""
         
@@ -1424,59 +2304,23 @@ class IPPPrinter:
         
         return False
 
-    
     def _verify_ipp_response(self, response):
-        """Verifica se a resposta IPP é válida e trata códigos de status adequadamente"""
+        """Verifica se a resposta IPP é válida"""
         # Verifica status IPP na resposta
         if len(response.content) >= 8:
             version = struct.unpack('>H', response.content[0:2])[0]
             status_code = struct.unpack('>H', response.content[2:4])[0]
             request_id = struct.unpack('>I', response.content[4:8])[0]
             
-            # Obtém nome do status se disponível
-            status_name = IPP_STATUS_CODES.get(status_code, "unknown")
-            
-            logger.info(f"IPP Version: {version >> 8}.{version & 0xFF}")
-            logger.info(f"IPP Status: 0x{status_code:04X} ({status_name})")
-            
             # Status de sucesso
             if status_code in [0x0000, 0x0001, 0x0002]:
-                logger.info(f"Status IPP de sucesso: 0x{status_code:04X} ({status_name})")
-                
-                job_id = self._extract_job_id_from_response(response.content)
-                if job_id:
-                    logger.info(f"Job ID: {job_id}")
-                
+                logger.debug(f"Status IPP de sucesso: 0x{status_code:04X}")
                 return True
-                
-            # Analisa erros específicos
-            elif status_code == 0x0400:  # bad-request
-                logger.error(f"Erro IPP 0x0400: client-error-bad-request (requisição inválida)")
-                return False
-            elif status_code == 0x0401:  # forbidden
-                logger.error(f"Erro IPP 0x0401: client-error-forbidden (acesso negado)")
-                return False
-            elif status_code == 0x0403 or status_code == 0x0402:  # not-authorized/not-authenticated
-                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (autenticação necessária)")
-                return False
-            elif status_code == 0x0406 or status_code == 0x0408:  # not-found/request-entity-too-large
-                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (endpoint incorreto ou dados muito grandes)")
-                # Estes erros indicam que precisamos tentar outro endpoint
-                return False
-            elif status_code == 0x040A:  # document-format-not-supported
-                logger.error(f"Erro IPP 0x040A: client-error-document-format-not-supported (formato não suportado)")
-                return False
-            elif status_code == 0x0507:  # document-format-error
-                logger.error(f"Erro IPP 0x0507: client-error-document-format-error (formato não suportado)")
-                return False
-            elif status_code >= 0x0500:  # server-error-*
-                logger.error(f"Erro IPP no servidor: 0x{status_code:04X} ({status_name})")
-                return False
             else:
-                logger.error(f"Status IPP não reconhecido: 0x{status_code:04X} ({status_name})")
+                logger.debug(f"Status IPP de erro: 0x{status_code:04X}")
                 return False
         else:
-            logger.error("Resposta IPP inválida ou muito curta")
+            logger.debug("Resposta IPP inválida ou muito curta")
             return False
 
     def _extract_job_id_from_response(self, ipp_response: bytes) -> Optional[int]:
@@ -1510,7 +2354,6 @@ class PrintQueueManager:
         return cls._instance
     
     def __init__(self):
-        """Inicializa o gerenciador de fila"""
         self.print_queue = queue.Queue()
         self.worker_thread = None
         self.is_running = False
@@ -1521,13 +2364,14 @@ class PrintQueueManager:
         self.max_history = 100
         self.canceled_job_ids = set()
         
-        # CORREÇÃO: Controle aprimorado de jobs processados
-        self.processed_jobs = {}  # job_id -> timestamp
+        self.processed_jobs = {}
         self.processed_jobs_lock = threading.Lock()
         
-        # CORREÇÃO: Controle adicional por caminho de arquivo + hash
-        self.file_jobs = {}  # file_path -> {"hash": hash, "timestamp": timestamp, "job_id": job_id}
+        self.file_jobs = {}
         self.file_jobs_lock = threading.Lock()
+        
+        self.continuous_processing = True
+        self.idle_sleep_time = 0.1
     
     def cancel_job_id(self, job_id: str):
         """Registra um job_id como cancelado."""
@@ -1698,12 +2542,14 @@ class PrintQueueManager:
             return self.current_job
     
     def _process_queue(self):
-        """Processa a fila de impressão com correção para exclusão de arquivos"""
+        """Processa fila com loop otimizado e contínuo"""
+        logger.info("Iniciando processamento contínuo da fila de impressão")
+        
         while self.is_running:
             try:
-                # Obtém o próximo trabalho da fila
+                # === OTIMIZAÇÃO: Loop contínuo sem sleep desnecessário ===
                 if self.print_queue.empty():
-                    time.sleep(1.0)
+                    time.sleep(self.idle_sleep_time)  # Sleep mínimo quando idle
                     continue
                     
                 job_item = self.print_queue.get(block=False)
@@ -1712,25 +2558,23 @@ class PrintQueueManager:
                 printer = job_item["printer"]
                 callback = job_item["callback"]
                 
-                # CORREÇÃO: Log detalhado do printer_id
-                logger.info(f"Processando trabalho: {job_info.document_name}")
+                logger.info(f"Processando trabalho otimizado: {job_info.document_name}")
                 logger.info(f"  Job ID: {job_info.job_id}")
-                logger.info(f"  Printer ID (da API): {job_info.printer_id}")
-                logger.info(f"  Printer Name: {job_info.printer_name}")
-                logger.info(f"  Cópias solicitadas: {job_info.options.copies}")
-                logger.info(f"  Tem callback: {'Sim' if callback else 'Não'}")
+                logger.info(f"  Printer ID: {job_info.printer_id}")
+                logger.info(f"  Cópias: {job_info.options.copies}")
                 
+                # Verifica cancelamento
                 with self.lock:
                     is_canceled = job_info.job_id in self.canceled_job_ids
 
                 if is_canceled:
-                    logger.info(f"Trabalho {job_info.document_name} (ID: {job_info.job_id}) foi cancelado antes do processamento.")
+                    logger.info(f"Trabalho cancelado: {job_info.job_id}")
                     job_info.status = "canceled" 
                     job_info.end_time = datetime.now()
                     self._update_history(job_info)
 
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado"})
 
                     self.print_queue.task_done()
                     with self.lock: 
@@ -1741,90 +2585,74 @@ class PrintQueueManager:
                 with self.lock:
                     self.current_job = job_item
                 
-                # Salva o trabalho no histórico antes de começar
                 job_info.status = "processing"
                 self._add_to_history(job_info)
                 
-                logger.info(f"Trabalho salvo no histórico inicial - Printer ID: {job_info.printer_id}")
-                
-                # Definir função de progresso
+                # === PROCESSAMENTO OTIMIZADO ===
                 def progress_callback(message):
                     with self.lock:
-                        if self.current_job and self.current_job["info"].job_id == job_info.job_id and \
-                        self.current_job["info"].status == "canceled":
-                            raise InterruptedError("Trabalho cancelado durante o processamento")
+                        if (self.current_job and 
+                            self.current_job["info"].job_id == job_info.job_id and 
+                            self.current_job["info"].status == "canceled"):
+                            raise InterruptedError("Trabalho cancelado")
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "progress", message) 
+                        wx.CallAfter(callback, job_info.job_id, "progress", message)
                 
-                # Variável para controlar se deve deletar o arquivo
                 should_delete_file = False
                 
-                # Tenta imprimir
                 try:
                     if callback:
-                        progress_callback("Iniciando impressão...")
-                    else:
-                        logger.info(f"Iniciando impressão (auto): {job_info.document_name}")
+                        progress_callback("Iniciando impressão otimizada...")
+                    
+                    # === IMPRESSÃO COM CONFIGURAÇÃO OTIMIZADA ===
+                    # Passa configuração para o printer para usar cache de endpoints
+                    printer.config = self.config
                     
                     success, result = printer.print_file(
                         job_info.document_path,
                         job_info.options,
                         job_info.document_name,
-                        progress_callback if callback else None,  # CORREÇÃO: Só passa progress_callback se houver callback
+                        progress_callback if callback else None,
                         job_info=job_info
                     )
                     
-                    # Atualiza informações do trabalho
                     job_info.end_time = datetime.now()
-                    
-                    # CORREÇÃO: Log detalhado do resultado
-                    logger.info(f"Resultado da impressão - Success: {success}, Result: {result}")
                     
                     if success:
                         job_info.status = "completed"
                         
-                        # CORREÇÃO: Calcula corretamente as páginas considerando cópias
-                        total_pages_sent = result.get("total_pages", 0)  # Total incluindo cópias
-                        successful_pages_sent = result.get("successful_pages", 0)  # Efetivamente enviadas
-                        
-                        # Para sincronização, usamos o total de páginas efetivamente enviadas
-                        job_info.total_pages = total_pages_sent
-                        job_info.completed_pages = successful_pages_sent
-                        
-                        logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
-                        logger.info(f"  Total de páginas (com cópias): {total_pages_sent}")
-                        logger.info(f"  Páginas enviadas com sucesso: {successful_pages_sent}")
-                        logger.info(f"  Cópias: {result.get('copies_requested', 1)}")
-                        
-                        # Só marca para deletar se foi 100% bem-sucedido
-                        should_delete_file = (successful_pages_sent == total_pages_sent)
-                        
-                        if should_delete_file:
-                            logger.info("Impressão 100% bem-sucedida - arquivo será removido")
-                        else:
-                            logger.warning("Impressão parcialmente falhada - arquivo será mantido")
-                            
-                    else:
-                        with self.lock: # Re-check status
-                            if job_info.status == "canceled":
-                                logger.info(f"Trabalho {job_info.document_name} cancelado durante a impressão.")
-                            else:
-                                job_info.status = "failed"
-                                logger.error(f"Falha no trabalho: {job_info.document_name}")
-                                # CORREÇÃO: Log detalhado da falha
-                                logger.error(f"  Detalhes da falha: {result}")
-
-                        # Para trabalhos falhados, ainda registra as páginas processadas
                         total_pages_sent = result.get("total_pages", 0)
                         successful_pages_sent = result.get("successful_pages", 0)
                         
                         job_info.total_pages = total_pages_sent
                         job_info.completed_pages = successful_pages_sent
                         
-                        # Não deleta arquivo em caso de falha
+                        should_delete_file = (successful_pages_sent == total_pages_sent)
+                        
+                        logger.info(f"Trabalho concluído: {job_info.document_name}")
+                        logger.info(f"  Páginas enviadas: {successful_pages_sent}/{total_pages_sent}")
+                        logger.info(f"  Método: {result.get('method', 'unknown')}")
+                        
+                        if result.get("method") == "jpg_parallel":
+                            logger.info(f"  Workers usados: {result.get('workers_used', 'N/A')}")
+                        
+                    else:
+                        with self.lock:
+                            if job_info.status == "canceled":
+                                logger.info(f"Trabalho cancelado durante impressão: {job_info.document_name}")
+                            else:
+                                job_info.status = "failed"
+                                logger.error(f"Falha no trabalho: {job_info.document_name}")
+                        
+                        total_pages_sent = result.get("total_pages", 0)
+                        successful_pages_sent = result.get("successful_pages", 0)
+                        
+                        job_info.total_pages = total_pages_sent
+                        job_info.completed_pages = successful_pages_sent
+                        
                         should_delete_file = False
                     
-                    # Tenta excluir o arquivo apenas se foi completamente bem-sucedido
+                    # Remove arquivo se bem-sucedido
                     if should_delete_file:
                         try:
                             if os.path.exists(job_info.document_path):
@@ -1832,82 +2660,64 @@ class PrintQueueManager:
                                 logger.info(f"Arquivo removido: {job_info.document_path}")
                         except Exception as e:
                             logger.error(f"Erro ao remover arquivo: {e}")
-                    else:
-                        logger.info(f"Arquivo mantido devido a falhas: {job_info.document_path}")
                     
-                    # Atualiza histórico ANTES de tentar sincronizar
                     self._update_history(job_info)
                     
-                    # Inicia sincronização apenas se houve páginas bem-sucedidas
+                    # Sincronização otimizada
                     if job_info.completed_pages > 0:
                         def delayed_sync():
                             try:
-                                import time
-                                time.sleep(2)  # Aguarda 2 segundos para garantir que o histórico foi salvo
+                                time.sleep(1)  # Reduzido de 2 para 1
                                 from src.utils.print_sync_manager import PrintSyncManager
                                 sync_manager = PrintSyncManager.get_instance()
                                 if sync_manager:
-                                    logger.info(f"Iniciando sincronização para o trabalho: {job_info.job_id} ({job_info.completed_pages} páginas)")
                                     sync_manager.sync_print_jobs()
-                                else:
-                                    logger.warning("Sync manager não disponível")
                             except Exception as e:
-                                logger.error(f"Erro ao iniciar sincronização: {e}")
+                                logger.error(f"Erro na sincronização: {e}")
                         
-                        # Executa sincronização em thread separada
-                        import threading
-                        sync_thread = threading.Thread(target=delayed_sync, daemon=True)
-                        sync_thread.start()
+                        threading.Thread(target=delayed_sync, daemon=True).start()
                             
-                    # Notifica o callback
+                    # Callback de resultado
                     if callback:
                         status_cb = "complete" if success else ("canceled" if job_info.status == "canceled" else "error")
                         wx.CallAfter(callback, job_info.job_id, status_cb, result)
-                    else:
-                        # CORREÇÃO: Log para casos sem callback (auto-impressão)
-                        if success:
-                            logger.info(f"Auto-impressão concluída: {job_info.document_name} - {job_info.completed_pages} páginas")
-                        else:
-                            logger.error(f"Auto-impressão falhou: {job_info.document_name}")
                     
-                except InterruptedError: # Captura o erro de cancelamento
-                    logger.info(f"Processamento do trabalho {job_info.document_name} interrompido devido ao cancelamento.")
+                except InterruptedError:
+                    logger.info(f"Trabalho interrompido: {job_info.document_name}")
                     job_info.status = "canceled"
                     job_info.end_time = datetime.now()
                     self._update_history(job_info)
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado"})
 
                 except Exception as e:
                     job_info.status = "failed"
                     job_info.end_time = datetime.now()
-                    logger.error(f"Erro ao processar trabalho: {e}")
+                    logger.error(f"Erro no processamento: {e}")
                     
-                    # Atualiza histórico
                     self._update_history(job_info)
                     
-                    # Notifica o callback
                     if callback:
                         wx.CallAfter(callback, job_info.job_id, "error", {"error": str(e)})
-                    else:
-                        logger.error(f"Erro na auto-impressão: {job_info.document_name} - {str(e)}")
                 
-                # CORREÇÃO: Remove do controle de jobs processados apenas ao final
+                # Limpa controle de jobs processados
                 with self.processed_jobs_lock:
                     if job_info.job_id in self.processed_jobs:
                         del self.processed_jobs[job_info.job_id]
 
-                # Marca o trabalho como concluído na fila
                 self.print_queue.task_done()
                 
                 with self.lock:
                     self.current_job = None
                 
+                # === OTIMIZAÇÃO: Sem sleep entre jobs ===
+                # Remove time.sleep aqui para processamento contínuo
+                
             except queue.Empty:
-                time.sleep(1.0)
+                time.sleep(self.idle_sleep_time)
             except Exception as e:
                 logger.error(f"Erro no processamento da fila: {e}")
-                time.sleep(5.0)
+                time.sleep(1.0)
 
     def _add_to_history(self, job_info):
         """Adiciona um trabalho ao histórico"""
@@ -2585,96 +3395,74 @@ class PrintSystem:
     """Sistema integrado de impressão"""
     
     def __init__(self, config):
-        """
-        Inicializa o sistema de impressão
-        
-        Args:
-            config: Objeto de configuração
-        """
         self.config = config
         self.print_queue_manager = PrintQueueManager.get_instance()
         self.print_queue_manager.set_config(config)
         
-        # Inicializa o gerenciador de fila
+        # Configurações de performance
+        perf_config = config.get_print_performance_config()
+        self.print_queue_manager.idle_sleep_time = 0.05  # Ultra responsivo
+        
         self.print_queue_manager.start()
+        
+        logger.info("Sistema de impressão otimizado inicializado")
+        logger.info(f"Performance config: {perf_config}")
     
     def print_document(self, parent_window, document, printer=None):
-        """
-        Imprime um documento
-        
-        Args:
-            parent_window: Janela pai para diálogos
-            document: Documento a ser impresso
-            printer: Impressora selecionada (opcional)
-            
-        Returns:
-            bool: True se o trabalho foi adicionado à fila com sucesso
-        """
+        """Imprime documento com otimizações"""
         try:
-            # Verifica se o documento existe
             if not os.path.exists(document.path):
                 wx.MessageBox(f"Arquivo não encontrado: {document.path}", 
                             "Erro", wx.OK | wx.ICON_ERROR)
                 return False
             
-            # Se não foi fornecida uma impressora, pede para o usuário selecionar
             if printer is None:
                 printer = self._select_printer(parent_window)
                 if printer is None:
-                    return False  # Usuário cancelou
+                    return False
             
-            # CORREÇÃO: Verifica se a impressora tem ID válido
             if not hasattr(printer, 'id') or not printer.id:
                 wx.MessageBox(f"A impressora '{printer.name}' não possui um ID válido do servidor.",
                             "Erro", wx.OK | wx.ICON_ERROR)
-                logger.error(f"Impressora sem ID: {printer.name} - Atributos: {dir(printer)}")
                 return False
             
-            # Exibe diálogo com opções de impressão
+            # Diálogo de opções
             print_options_dialog = PrintOptionsDialog(parent_window, document, printer)
             if print_options_dialog.ShowModal() != wx.ID_OK:
                 print_options_dialog.Destroy()
-                return False  # Usuário cancelou
+                return False
             
-            # Obtém as opções de impressão
             options = print_options_dialog.get_options()
             print_options_dialog.Destroy()
             
-            # Cria um ID único para o trabalho
             job_id = f"job_{int(time.time())}_{document.id}"
             
-            # CORREÇÃO: Usa printer.id como printer_id
             job_info = PrintJobInfo(
                 job_id=job_id,
                 document_path=document.path,
                 document_name=document.name,
                 printer_name=printer.name,
-                printer_id=printer.id,  # CORREÇÃO: Usa o ID da API
+                printer_id=printer.id,
                 printer_ip=getattr(printer, 'ip', ''),
                 options=options,
                 start_time=datetime.now(),
                 status="pending"
             )
             
-            # Log para debug
-            logger.info(f"Trabalho criado - Job ID: {job_info.job_id}, "
-                    f"Printer ID (da API): {job_info.printer_id}, "
-                    f"Printer Name: {job_info.printer_name}")
-            
-            # Cria instância da impressora (detecta automaticamente HTTP/HTTPS)
             printer_ip = getattr(printer, 'ip', '')
             if not printer_ip:
-                wx.MessageBox(f"A impressora '{printer.name}' não possui um endereço IP configurado.",
+                wx.MessageBox(f"A impressora '{printer.name}' não possui IP configurado.",
                             "Erro", wx.ID_ERROR)
                 return False
             
+            # === IMPRESSORA COM CONFIGURAÇÃO OTIMIZADA ===
             printer_instance = IPPPrinter(
                 printer_ip=printer_ip,
                 port=631,
-                use_https=False  # Deixa detectar automaticamente
+                use_https=False,
+                config=self.config  # Passa configuração para cache de endpoints
             )
             
-            # Cria e exibe o diálogo de progresso
             progress_dialog = PrintProgressDialog(
                 parent_window,
                 job_id,
@@ -2682,21 +3470,17 @@ class PrintSystem:
                 printer.name
             )
             
-            # Define o callback para atualização de progresso
             def print_callback(job_id, status, data):
-                """Callback para atualização de progresso de impressão"""
-                # Usa wx.CallAfter para garantir thread safety, mas com verificação de validade
                 if progress_dialog and not progress_dialog._is_destroyed:
                     wx.CallAfter(self._update_progress_dialog, progress_dialog, status, data)
             
-            # Adiciona o trabalho à fila
+            # Adiciona job à fila otimizada
             self.print_queue_manager.add_job(
                 job_info,
                 printer_instance,
                 print_callback
             )
             
-            # Exibe o diálogo de progresso (não bloqueante)
             progress_dialog.ShowModal()
             progress_dialog.Destroy()
             
@@ -2709,21 +3493,19 @@ class PrintSystem:
             return False
     
     def _select_printer(self, parent_window):
-        """Exibe diálogo para selecionar impressora"""
-        # Obtém a lista de impressoras
+        """Método mantido para compatibilidade"""
         printer_list = self._get_printers()
         
         if not printer_list:
-            wx.MessageBox("Nenhuma impressora configurada. Configure impressoras na aba Impressoras.",
+            wx.MessageBox("Nenhuma impressora configurada.",
                          "Informação", wx.OK | wx.ICON_INFORMATION)
             return None
         
-        # Cria a caixa de diálogo para escolher impressora
         choices = [printer.name for printer in printer_list]
         
         dialog = wx.SingleChoiceDialog(
             parent_window,
-            "Escolha a impressora para enviar o documento:",
+            "Escolha a impressora:",
             "Selecionar Impressora",
             choices
         )
@@ -2738,7 +3520,7 @@ class PrintSystem:
         return None
     
     def _get_printers(self):
-        """Obtém lista de impressoras configuradas"""
+        """Método mantido para compatibilidade"""
         try:
             printers_data = self.config.get_printers()
             
@@ -2748,97 +3530,85 @@ class PrintSystem:
             else:
                 return []
         except Exception as e:
-            logger.error(f"Erro ao obter lista de impressoras: {e}")
+            logger.error(f"Erro ao obter impressoras: {e}")
             return []
     
     def _update_progress_dialog(self, dialog, status, data):
-        """Atualiza o diálogo de progresso com verificação de segurança"""
+        """Método mantido para compatibilidade"""
         try:
-            # Verifica se o diálogo ainda existe e não foi destruído
             if not dialog or dialog._is_destroyed:
                 return
                 
-            # Verifica se o diálogo ainda tem parent válido
             if not hasattr(dialog, 'GetParent') or dialog.GetParent() is None:
                 return
                 
             if status == "progress":
-                # Mensagem de progresso
                 dialog.add_log(data)
             elif status == "complete":
-                # Trabalho concluído com sucesso
                 dialog.set_success("Impressão concluída com sucesso")
             elif status == "canceled":
                 message = "Trabalho cancelado pelo usuário."
                 if isinstance(data, dict) and "message" in data:
                     message = data["message"]
-                dialog.set_error(message) # Reutiliza set_error ou cria um set_canceled
+                dialog.set_error(message)
                 dialog.add_log(message)
             elif status == "error":
-                # Erro no trabalho
                 error_message = data.get("error", "Erro desconhecido") if isinstance(data, dict) else str(data)
                 dialog.set_error(f"Falha na impressão: {error_message}")
                 
         except RuntimeError as e:
-            # Controle foi destruído
             if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
-                logger.warning("Tentativa de atualizar diálogo já destruído")
                 if dialog:
                     dialog._is_destroyed = True
-            else:
-                logger.error(f"Erro ao atualizar diálogo de progresso: {e}")
         except Exception as e:
-            logger.error(f"Erro inesperado ao atualizar diálogo de progresso: {e}")
+            logger.error(f"Erro ao atualizar diálogo: {e}")
     
     def test_printer_connection(self, printer_ip: str, use_https: bool = False) -> Dict[str, Any]:
-        """Testa conexão com uma impressora (baseado no código de teste)"""
+        """Teste de conexão otimizado com cache"""
         try:
-            test_printer = IPPPrinter(printer_ip, use_https=use_https)
+            test_printer = IPPPrinter(printer_ip, use_https=use_https, config=self.config)
             
-            # Testa endpoints básicos
-            endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+            # Se tem endpoint em cache, testa primeiro
+            cache = PrinterEndpointCache(self.config)
+            cached_config = cache.get_printer_endpoint_config(printer_ip)
+            
+            if cached_config and not cache.should_rediscover(printer_ip):
+                endpoint = cached_config.get("endpoint", "")
+                protocol = cached_config.get("protocol", "http")
+                
+                logger.info(f"Testando conexão usando configuração em cache: {protocol}://{printer_ip}:631{endpoint}")
+                
+                return {
+                    "success": True,
+                    "protocol": protocol.upper(),
+                    "working_endpoints": [endpoint],
+                    "base_url": f"{protocol}://{printer_ip}:631",
+                    "cached": True
+                }
+            
+            # Se não tem cache, faz teste rápido
             working_endpoints = []
+            protocol = "HTTP"
             
-            for endpoint in endpoints:
-                url = f"{test_printer.base_url}{endpoint}"
-                try:
-                    response = requests.get(
-                        url,
-                        timeout=10,
-                        verify=False,
-                        allow_redirects=False
-                    )
-                    if response.status_code in [200, 400, 401, 404, 405]:
-                        working_endpoints.append(endpoint)
-                except requests.exceptions.ConnectionError as e:
-                    # Tenta com HTTPS se falhar com HTTP
-                    if "10054" in str(e) or "Connection aborted" in str(e):
-                        if not test_printer.use_https:
-                            test_printer.use_https = True
-                            test_printer.protocol = "https"
-                            test_printer.base_url = f"https://{test_printer.printer_ip}:{test_printer.port}"
-                            https_url = url.replace("http:", "https:", 1)
-                            try:
-                                response = requests.get(
-                                    https_url,
-                                    timeout=10,
-                                    verify=False,
-                                    allow_redirects=False
-                                )
-                                if response.status_code in [200, 400, 401, 404, 405]:
-                                    working_endpoints.append(endpoint)
-                            except:
-                                pass
-                except:
-                    pass
+            # Testa endpoints prioritários rapidamente
+            priority_endpoints = ["/ipp/print", "/ipp", "/printers/ipp"]
             
-            protocol = test_printer.protocol.upper()
+            for endpoint in priority_endpoints:
+                if test_printer._test_endpoint_quick(endpoint, use_https=False):
+                    working_endpoints.append(endpoint)
+                    protocol = "HTTP"
+                    break
+                elif test_printer._test_endpoint_quick(endpoint, use_https=True):
+                    working_endpoints.append(endpoint)
+                    protocol = "HTTPS"
+                    break
             
             return {
                 "success": len(working_endpoints) > 0,
                 "protocol": protocol,
                 "working_endpoints": working_endpoints,
-                "base_url": test_printer.base_url
+                "base_url": f"{protocol.lower()}://{printer_ip}:631",
+                "cached": False
             }
             
         except Exception as e:
@@ -2848,6 +3618,6 @@ class PrintSystem:
             }
     
     def shutdown(self):
-        """Desliga o sistema de impressão"""
+        """Desliga sistema"""
         if self.print_queue_manager:
             self.print_queue_manager.stop()

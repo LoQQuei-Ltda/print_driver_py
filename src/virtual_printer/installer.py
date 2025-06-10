@@ -775,9 +775,9 @@ class VirtualPrinterInstaller:
             
             # Comentário adaptado para ambiente multi-usuário
             if self.is_multiuser_env:
-                comment = f'Impressora virtual PDF multi-usuário que salva na pasta Documents de cada usuário (Servidor: {ip}:{port})'
+                comment = f'LoQQuei {ip}:{port}'
             else:
-                comment = f'Impressora virtual PDF que salva automaticamente em {self.config.pdf_dir} (Servidor: {ip}:{port})'
+                comment = f'LoQQuei {ip}:{port} Single'
             
             logger.info(f"Iniciando instalação da impressora virtual...")
             logger.info(f"Nome: {self.PRINTER_NAME}")
