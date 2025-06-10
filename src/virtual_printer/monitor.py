@@ -10,6 +10,7 @@ import logging
 import ctypes
 import psutil
 import socket
+import threading
 import subprocess
 import time
 from datetime import datetime
@@ -333,7 +334,9 @@ class VirtualPrinterManager:
             logger.info("Sistema de impressora virtual já está rodando")
             return True
         
-        self._diagnose_system()
+        # CORREÇÃO: Diagnóstico em thread separada para não atrasar inicialização
+        diagnose_thread = threading.Thread(target=self._diagnose_system, daemon=True)
+        diagnose_thread.start()
         
         try:
             # 1. Iniciar servidor de impressão
@@ -343,29 +346,38 @@ class VirtualPrinterManager:
                 return False
             
             # 2. Instalar impressora virtual
-            logger.info("Instalando impressora virtual...")
+            logger.info("Verificando impressora virtual...")
             server_info = self.printer_server.get_server_info()
-            if not self.installer.install_with_server_info(server_info):
-                logger.error("Falha ao instalar impressora virtual")
-                self.printer_server.stop()
-                return False
+            
+            # CORREÇÃO: Verifica se já existe antes de tentar instalar
+            if self.installer.is_installed():
+                logger.info("Impressora virtual já está instalada")
+                printer_installed = True
+            else:
+                logger.info("Instalando impressora virtual...")
+                printer_installed = self.installer.install_with_server_info(server_info)
+                
+                if not printer_installed:
+                    logger.warning("Falha ao instalar impressora virtual")
+                    # CORREÇÃO: Não para o sistema se a impressora falhar
+                    logger.info("Sistema continuará funcionando sem impressora virtual")
             
             # 3. Iniciar monitoramento de arquivos
             logger.info("Iniciando monitoramento de arquivos...")
             self._start_file_monitoring()
             
             self.is_running = True
-            logger.info("Sistema de impressora virtual iniciado com sucesso")
+            logger.info("Sistema de impressora virtual iniciado")
             
             # Log das informações do servidor
             server_info = self.printer_server.get_server_info()
-            logger.info(f"Servidor rodando em {server_info['ip']}:{server_info['port']}")
-            logger.info(f"PDFs serão salvos para cada usuário conforme configurado")
+            logger.info(f"Servidor: {server_info['ip']}:{server_info['port']}")
+            logger.info(f"Impressora virtual: {'Instalada' if printer_installed else 'Não instalada'}")
             
             return True
             
         except Exception as e:
-            logger.error(f"Erro ao iniciar sistema de impressora virtual: {e}")
+            logger.error(f"Erro ao iniciar sistema: {e}")
             self.stop()
             return False
     

@@ -11,8 +11,10 @@ import sys
 import logging
 import wx
 import appdirs
+import threading
 import time
 import platform
+from src.utils.subprocess_utils import run_hidden
 from src.ui.app import PrintManagementApp
 from src.config import AppConfig
 
@@ -90,45 +92,53 @@ def setup_user_data_dir():
 
 def setup_multi_user_directories():
     """
-    Configura diretórios para múltiplos usuários em ambientes Windows Server
+    Configura diretórios para múltiplos usuários - VERSÃO OTIMIZADA
     """
-    # Só executamos isso no Windows
+    # Só executa no Windows
     if platform.system() != 'Windows':
         return
+    
+    try:
+        # Verificação rápida se é realmente multi-usuário
+        result = run_hidden(['query', 'user'], timeout=3)
+        if result.returncode != 0:
+            return  # Comando falhou, provavelmente não é servidor
+        
+        lines = result.stdout.strip().split('\n')
+        active_sessions = [line for line in lines if 'Active' in line]
+        if len(active_sessions) <= 1:
+            return  # Apenas uma sessão ativa, não precisa configurar multi-usuário
+            
+    except:
+        return  # Em caso de erro, pula a configuração
+    
+    logger = logging.getLogger("PrintManagementSystem")
+    logger.info("Configurando para ambiente multi-usuário...")
     
     # Diretório Users
     users_dir = os.path.join(os.environ.get('SystemDrive', 'C:'), 'Users')
     
-    # Verificar se estamos em um servidor
-    is_server = 'server' in platform.release().lower() or 'server' in platform.version().lower()
-    
     if os.path.exists(users_dir):
-        logger = logging.getLogger("PrintManagementSystem")
-        logger.info(f"Verificando diretórios de usuários em: {users_dir}")
-        logger.info(f"Sistema operacional: {platform.system()} {platform.release()}")
-        logger.info(f"Versão: {platform.version()}")
-        logger.info(f"Detectado como servidor: {is_server}")
-        
-        # Lista todos os usuários
-        for username in os.listdir(users_dir):
-            user_profile = os.path.join(users_dir, username)
+        try:
+            # Limita a 5 usuários para evitar demora
+            users = [u for u in os.listdir(users_dir)[:5] if not u.startswith('.')]
             
-            # Verifica se é um diretório de usuário válido
-            if os.path.isdir(user_profile) and not username.startswith('.'):
-                # Localização padrão AppData para o usuário
-                app_data = os.path.join(user_profile, 'AppData', 'Local')
+            for username in users:
+                user_profile = os.path.join(users_dir, username)
                 
-                if os.path.exists(app_data):
-                    user_pdf_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                if os.path.isdir(user_profile):
+                    app_data = os.path.join(user_profile, 'AppData', 'Local')
                     
-                    # Tenta criar o diretório do usuário
-                    try:
-                        os.makedirs(user_pdf_dir, exist_ok=True)
-                        logger.info(f"Diretório criado para usuário {username}: {user_pdf_dir}")
-                    except PermissionError:
-                        logger.warning(f"Sem permissão para criar diretório para o usuário {username}")
-                    except Exception as e:
-                        logger.warning(f"Erro ao criar diretório para usuário {username}: {e}")
+                    if os.path.exists(app_data):
+                        user_pdf_dir = os.path.join(app_data, 'PrintManagementSystem', 'LoQQuei', 'pdfs')
+                        
+                        try:
+                            os.makedirs(user_pdf_dir, exist_ok=True)
+                        except:
+                            pass  # Falha silenciosa para não interromper
+                            
+        except Exception as e:
+            logger.warning(f"Erro na configuração multi-usuário: {e}")
 
 def main():
     """Função principal da aplicação"""
@@ -144,7 +154,9 @@ def main():
         
         # Configura diretórios para múltiplos usuários (especialmente em servidores)
         if config.get("multi_user_mode", True):
-            setup_multi_user_directories()
+            # EXECUTAR EM THREAD SEPARADA PARA NÃO ATRASAR INICIALIZAÇÃO
+            setup_thread = threading.Thread(target=setup_multi_user_directories, daemon=True)
+            setup_thread.start()
             
             # Garante que a configuração conheça os diretórios
             if hasattr(config, '_ensure_user_directories'):

@@ -755,9 +755,26 @@ class IPPPrinter:
         return False
         
     def print_file(self, file_path: str, options: PrintOptions, 
-               job_name: Optional[str] = None, progress_callback=None, 
-               job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Imprime um arquivo PDF com fallback automático para JPG e discovery de endpoints"""
+                job_name: Optional[str] = None, progress_callback=None, 
+                job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Imprime um arquivo PDF com verificação de privilégios"""
+        
+        # CORREÇÃO: Verifica privilégios de acesso ao arquivo
+        if not os.access(file_path, os.R_OK):
+            logger.error(f"Sem permissão de leitura para o arquivo: {file_path}")
+            return False, {"error": "Sem permissão de leitura para o arquivo"}
+        
+        # CORREÇÃO: Verifica se o processo tem permissões necessárias
+        try:
+            # Testa se consegue ler o arquivo
+            with open(file_path, 'rb') as f:
+                f.read(1024)  # Lê apenas 1KB para teste
+        except PermissionError:
+            logger.error(f"Erro de permissão ao acessar arquivo: {file_path}")
+            return False, {"error": "Erro de permissão ao acessar arquivo"}
+        except Exception as e:
+            logger.error(f"Erro ao acessar arquivo: {e}")
+            return False, {"error": f"Erro ao acessar arquivo: {e}"}
         
         if not os.path.exists(file_path):
             logger.error(f"Erro: Arquivo não encontrado: {file_path}")
