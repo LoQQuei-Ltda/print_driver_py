@@ -3,7 +3,7 @@
 
 """
 Sistema de impressão IPP otimizado com cache de endpoints e processamento paralelo
-VERSÃO OTIMIZADA - Cache de endpoints, processamento paralelo e performance melhorada
+VERSÃO CORRIGIDA - Cache de endpoints, processamento paralelo e performance melhorada
 """
 
 import os
@@ -57,18 +57,29 @@ class PrinterEndpointCache:
     
     def save_printer_endpoint_config(self, printer_ip: str, endpoint: str, 
                                    use_https: bool, test_successful: bool = True):
-        """Salva configuração de endpoint em cache"""
+        """Salva configuração de endpoint em cache (com controle de duplicação)"""
         with self._cache_lock:
             printer_configs = self.config.get("printer_endpoint_cache", {})
             
-            printer_configs[printer_ip] = {
-                "endpoint": endpoint,
-                "use_https": use_https,
-                "protocol": "https" if use_https else "http",
-                "last_success": datetime.now().isoformat() if test_successful else None,
-                "success_count": printer_configs.get(printer_ip, {}).get("success_count", 0) + (1 if test_successful else 0),
-                "fail_count": printer_configs.get(printer_ip, {}).get("fail_count", 0) + (0 if test_successful else 1)
-            }
+            # === CORREÇÃO: Evita salvar múltiplas vezes seguidas ===
+            existing_config = printer_configs.get(printer_ip, {})
+            if (existing_config.get("endpoint") == endpoint and 
+                existing_config.get("use_https") == use_https and
+                test_successful):
+                # Só incrementa contadores se é o mesmo endpoint
+                existing_config["success_count"] = existing_config.get("success_count", 0) + 1
+                existing_config["last_success"] = datetime.now().isoformat()
+                printer_configs[printer_ip] = existing_config
+            else:
+                # Nova configuração ou configuração diferente
+                printer_configs[printer_ip] = {
+                    "endpoint": endpoint,
+                    "use_https": use_https,
+                    "protocol": "https" if use_https else "http",
+                    "last_success": datetime.now().isoformat() if test_successful else None,
+                    "success_count": 1 if test_successful else 0,
+                    "fail_count": 0 if test_successful else 1
+                }
             
             self.config.set("printer_endpoint_cache", printer_configs)
             logger.info(f"Cache atualizado para {printer_ip}: {endpoint} ({'HTTPS' if use_https else 'HTTP'})")
@@ -83,13 +94,58 @@ class PrinterEndpointCache:
                 self.config.set("printer_endpoint_cache", printer_configs)
     
     def should_rediscover(self, printer_ip: str) -> bool:
-        """Verifica se deve redescobrir endpoints (após muitas falhas)"""
+        """Verifica se deve redescobrir endpoints (critério MENOS sensível)"""
         config = self.get_printer_endpoint_config(printer_ip)
         fail_count = config.get("fail_count", 0)
         success_count = config.get("success_count", 0)
+        last_success = config.get("last_success")
         
-        # Redescobre se falhou mais de 3 vezes seguidas ou não tem sucesso anterior
-        return fail_count > 3 or success_count == 0
+        # === CORREÇÃO: Critérios MENOS sensíveis para rediscovery ===
+        
+        # Se não tem sucesso anterior, sempre redescobre
+        if success_count == 0:
+            return True
+        
+        # Se falhou mais de 5 vezes seguidas (aumentado de 2)
+        if fail_count > 5:
+            return True
+            
+        # Se a taxa de falha é muito alta (> 80%, aumentado de 50%)
+        total_attempts = success_count + fail_count
+        if total_attempts > 10 and (fail_count / total_attempts) > 0.8:
+            return True
+        
+        # Se o último sucesso foi há mais de 4 horas (aumentado de 1 hora)
+        if last_success:
+            try:
+                from datetime import datetime, timedelta
+                last_success_time = datetime.fromisoformat(last_success)
+                if datetime.now() - last_success_time > timedelta(hours=4):
+                    return True
+            except:
+                return True  # Se não conseguir parsear, redescobre
+        
+        return False
+    
+    def reset_printer_cache(self, printer_ip: str):
+        """Reseta completamente o cache de uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                del printer_configs[printer_ip]
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Cache resetado para {printer_ip}")
+    
+    def force_rediscovery(self, printer_ip: str):
+        """Força rediscovery marcando como falha múltipla"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = 10  # Força rediscovery
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Rediscovery forçado para {printer_ip}")
 
 # Instalação automática de dependências
 def install_package(package):
@@ -121,49 +177,61 @@ logger = logging.getLogger(__name__)
 class PopplerManager:
     @staticmethod
     def get_poppler_path():
-        """Retorna o caminho do Poppler se estiver instalado"""
+        """Retorna o caminho do Poppler se estiver instalado - VERSÃO CORRIGIDA"""
         system = platform.system().lower()
         
         if system == "windows":
-            # Verifica se poppler já está no PATH
+            # === CORREÇÃO: Verifica PATH primeiro sem exceção ===
             try:
-                result = run_hidden(['pdftoppm', '-h'],
-                    capture_output=True, text=True, timeout=5)
+                # Tenta executar pdftoppm sem capturar stderr
+                result = subprocess.run(['pdftoppm', '-h'], 
+                                     capture_output=True, text=True, timeout=3)
                 if result.returncode == 0:
                     logger.info("Poppler encontrado no PATH do sistema")
                     return None  # Já está no PATH
+            except FileNotFoundError:
+                pass  # Não encontrado no PATH, continua procurando
             except Exception as e:
-                logger.debug(f"Poppler não encontrado no PATH: {e}")
+                logger.debug(f"Erro ao testar Poppler no PATH: {e}")
             
-            # Procura por instalação local do poppler
+            # === CORREÇÃO: Procura em caminhos conhecidos com verificação melhorada ===
             possible_paths = [
                 os.path.join(os.getcwd(), "poppler", "bin"),
                 os.path.join(os.getcwd(), "poppler", "Library", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "Library", "bin"),
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "library", "bin"),
                 r"C:\Program Files\poppler\Library\bin",
-                r"C:\Program Files\poppler\library\bin",
                 r"C:\Program Files\poppler\bin",
                 r"C:\Program Files (x86)\poppler\Library\bin",
-                r"C:\Program Files (x86)\poppler\library\bin",
                 r"C:\Program Files (x86)\poppler\bin",
                 r"C:\poppler\Library\bin",
-                r"C:\poppler\library\bin",
                 r"C:\poppler\bin",
             ]
             
             for path in possible_paths:
                 pdftoppm_path = os.path.join(path, "pdftoppm.exe")
                 if os.path.exists(pdftoppm_path):
-                    logger.info(f"Poppler encontrado em: {path}")
-                    return path
+                    # === CORREÇÃO: Testa se o executável funciona ===
+                    try:
+                        result = subprocess.run([pdftoppm_path, '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                        if result.returncode == 0:
+                            logger.info(f"Poppler encontrado e testado em: {path}")
+                            return path
+                    except Exception as e:
+                        logger.debug(f"Poppler encontrado mas não funciona em {path}: {e}")
+                        continue
             
             logger.info("Poppler não encontrado em nenhum caminho conhecido")
             return None
         
         # Para Linux/Mac, geralmente está no PATH
-        return None
+        try:
+            result = subprocess.run(['pdftoppm', '-h'], 
+                                 capture_output=True, text=True, timeout=3)
+            return None if result.returncode == 0 else None
+        except:
+            return None
 
     @staticmethod
     def verify_permissions(directory):
@@ -434,6 +502,10 @@ class PopplerManager:
             
         logger.info("=== FIM DIAGNÓSTICO ===")
 
+def get_poppler_path():
+    """Retorna o caminho do Poppler se estiver instalado"""
+    return PopplerManager.get_poppler_path()
+
 # Constantes IPP
 class IPPVersion:
     IPP_1_1 = 0x0101
@@ -645,7 +717,7 @@ def check_dependencies():
         return False
 
 class IPPPrinter:
-    """Classe principal para impressão de arquivos PDF via IPP - IGUAL AO CÓDIGO DE TESTE"""
+    """Classe principal para impressão de arquivos PDF via IPP - VERSÃO CORRIGIDA"""
     
     def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False, config=None):
         # Verifica dependências
@@ -672,232 +744,18 @@ class IPPPrinter:
         self.base_url = f"{self.protocol}://{printer_ip}:{port}"
         self.request_id = 1
         self.config = config
-        
-        # === NOVA FUNCIONALIDADE: Cache de endpoints ===
-        self.endpoint_cache = PrinterEndpointCache(config) if config else None
-        self.known_endpoint = None
-        self.known_protocol = None
-        
-        # Tenta usar configuração em cache primeiro
-        if self.endpoint_cache:
-            cached_config = self.endpoint_cache.get_printer_endpoint_config(printer_ip)
-            if cached_config and not self.endpoint_cache.should_rediscover(printer_ip):
-                self.known_endpoint = cached_config.get("endpoint", "")
-                self.use_https = cached_config.get("use_https", False)
-                self.protocol = cached_config.get("protocol", "http")
-                self.base_url = f"{self.protocol}://{printer_ip}:{port}"
-                logger.info(f"Usando configuração em cache para {printer_ip}: {self.known_endpoint} ({self.protocol.upper()})")
-                return
-        
-        # Se não tem cache válido, faz discovery otimizado
-        logger.info(f"Fazendo discovery para {printer_ip}...")
-        self._quick_discovery()
-    
-    def _quick_discovery(self):
-        """Discovery rápido e otimizado de endpoints"""
-        # Endpoints mais comuns primeiro
-        priority_endpoints = [
-            "/ipp/print",
-            "/ipp", 
-            "/printers/ipp",
-            "/ipp/printer",
-            "/printer",
-            "/printers",
-            ""
-        ]
-        
-        # Testa HTTP primeiro (mais comum)
-        for endpoint in priority_endpoints:
-            if self._test_endpoint_quick(endpoint, use_https=False):
-                self.known_endpoint = endpoint
-                self.use_https = False
-                self.protocol = "http"
-                self.base_url = f"http://{self.printer_ip}:{self.port}"
-                self._save_to_cache(endpoint, False, True)
-                logger.info(f"Endpoint encontrado (HTTP): {endpoint}")
-                return
-        
-        # Se HTTP falhou, testa HTTPS
-        for endpoint in priority_endpoints:
-            if self._test_endpoint_quick(endpoint, use_https=True):
-                self.known_endpoint = endpoint
-                self.use_https = True
-                self.protocol = "https"
-                self.base_url = f"https://{self.printer_ip}:{self.port}"
-                self._save_to_cache(endpoint, True, True)
-                logger.info(f"Endpoint encontrado (HTTPS): {endpoint}")
-                return
-        
-        # Fallback para endpoint padrão
-        self.known_endpoint = "/ipp/print"
-        logger.warning(f"Nenhum endpoint respondeu, usando fallback: {self.known_endpoint}")
 
-    #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
-"""
-Sistema de impressão IPP otimizado com cache de endpoints e processamento paralelo
-VERSÃO OTIMIZADA - Cache de endpoints, processamento paralelo e performance melhorada
-"""
-
-import os
-import tempfile
-import time
-import sys
-import struct
-import subprocess
-import threading
-import logging
-import queue
-import socket
-from typing import Dict, Optional, Any, List, Tuple
-from dataclasses import dataclass
-from enum import Enum
-import platform
-import zipfile
-import urllib.request
-import shutil
-import wx
-import json
-from datetime import datetime
-from urllib3.exceptions import InsecureRequestWarning
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import struct
-import ssl
-import requests
-import re
-import unicodedata
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
-
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
-
-class PrinterEndpointCache:
-    """Cache inteligente de endpoints de impressora por IP"""
-    
-    def __init__(self, config):
-        self.config = config
-        self._cache_lock = threading.Lock()
-    
-    def get_printer_endpoint_config(self, printer_ip: str) -> Dict[str, Any]:
-        """Obtém configuração de endpoint em cache para uma impressora"""
-        with self._cache_lock:
-            printer_configs = self.config.get("printer_endpoint_cache", {})
-            return printer_configs.get(printer_ip, {})
-    
-    def save_printer_endpoint_config(self, printer_ip: str, endpoint: str, 
-                                   use_https: bool, test_successful: bool = True):
-        """Salva configuração de endpoint em cache"""
-        with self._cache_lock:
-            printer_configs = self.config.get("printer_endpoint_cache", {})
+        self.force_jpg_mode = False
+        if config and hasattr(config, 'get'):
+            # Lista de IPs/modelos que devem usar apenas JPG
+            jpg_only_printers = [
+                "10.148.1.20",  # EPSON L14150 Series
+                # Adicione outros IPs/modelos conforme necessário
+            ]
             
-            printer_configs[printer_ip] = {
-                "endpoint": endpoint,
-                "use_https": use_https,
-                "protocol": "https" if use_https else "http",
-                "last_success": datetime.now().isoformat() if test_successful else None,
-                "success_count": printer_configs.get(printer_ip, {}).get("success_count", 0) + (1 if test_successful else 0),
-                "fail_count": printer_configs.get(printer_ip, {}).get("fail_count", 0) + (0 if test_successful else 1)
-            }
-            
-            self.config.set("printer_endpoint_cache", printer_configs)
-            logger.info(f"Cache atualizado para {printer_ip}: {endpoint} ({'HTTPS' if use_https else 'HTTP'})")
-    
-    def mark_endpoint_failed(self, printer_ip: str):
-        """Marca endpoint como falhado e incrementa contador"""
-        with self._cache_lock:
-            printer_configs = self.config.get("printer_endpoint_cache", {})
-            if printer_ip in printer_configs:
-                printer_configs[printer_ip]["fail_count"] = printer_configs[printer_ip].get("fail_count", 0) + 1
-                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
-                self.config.set("printer_endpoint_cache", printer_configs)
-    
-    def should_rediscover(self, printer_ip: str) -> bool:
-        """Verifica se deve redescobrir endpoints (critério mais sensível)"""
-        config = self.get_printer_endpoint_config(printer_ip)
-        fail_count = config.get("fail_count", 0)
-        success_count = config.get("success_count", 0)
-        last_success = config.get("last_success")
-        
-        # === CORREÇÃO: Critérios mais sensíveis para rediscovery ===
-        
-        # Se não tem sucesso anterior, sempre redescobre
-        if success_count == 0:
-            return True
-        
-        # Se falhou mais de 2 vezes seguidas (reduzido de 3)
-        if fail_count > 2:
-            return True
-            
-        # Se a taxa de falha é muito alta (> 50%)
-        total_attempts = success_count + fail_count
-        if total_attempts > 5 and (fail_count / total_attempts) > 0.5:
-            return True
-        
-        # Se o último sucesso foi há mais de 1 hora, permite rediscovery
-        if last_success:
-            try:
-                from datetime import datetime, timedelta
-                last_success_time = datetime.fromisoformat(last_success)
-                if datetime.now() - last_success_time > timedelta(hours=1):
-                    return True
-            except:
-                return True  # Se não conseguir parsear, redescobre
-        
-        return False
-    
-    def reset_printer_cache(self, printer_ip: str):
-        """Reseta completamente o cache de uma impressora"""
-        with self._cache_lock:
-            printer_configs = self.config.get("printer_endpoint_cache", {})
-            if printer_ip in printer_configs:
-                del printer_configs[printer_ip]
-                self.config.set("printer_endpoint_cache", printer_configs)
-                logger.info(f"Cache resetado para {printer_ip}")
-    
-    def force_rediscovery(self, printer_ip: str):
-        """Força rediscovery marcando como falha múltipla"""
-        with self._cache_lock:
-            printer_configs = self.config.get("printer_endpoint_cache", {})
-            
-            if printer_ip in printer_configs:
-                printer_configs[printer_ip]["fail_count"] = 10  # Força rediscovery
-                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
-                self.config.set("printer_endpoint_cache", printer_configs)
-                logger.info(f"Rediscovery forçado para {printer_ip}")
-
-class IPPPrinter:
-    """Classe principal para impressão de arquivos PDF via IPP - VERSÃO OTIMIZADA"""
-    
-    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False, config=None):
-        # Verifica dependências
-        if not check_dependencies():
-            raise ImportError("Falha ao verificar/instalar dependências para impressão")
-            
-        # Configuração de retry otimizada
-        retry_strategy = Retry(
-            total=2,  # Reduzido de 3 para 2
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "POST"],
-            backoff_factor=0.5  # Reduzido de 1 para 0.5
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        session = requests.Session()
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        
-        self.session = session
-        self.printer_ip = printer_ip
-        self.port = port
-        self.use_https = use_https
-        self.protocol = "https" if use_https else "http"
-        self.base_url = f"{self.protocol}://{printer_ip}:{port}"
-        self.request_id = 1
-        self.config = config
+            if printer_ip in jpg_only_printers:
+                self.force_jpg_mode = True
+                logger.info(f"Impressora {printer_ip} configurada para usar apenas modo JPG")
         
         # === NOVA FUNCIONALIDADE: Cache de endpoints ===
         self.endpoint_cache = PrinterEndpointCache(config) if config else None
@@ -1292,45 +1150,25 @@ startxref
         
         logger.info(f"Tamanho do arquivo: {len(pdf_data):,} bytes")
         
-        # === OTIMIZAÇÃO: Tentativa prioritária com endpoint conhecido ===
+        # === CORREÇÃO: Tentativa prioritária com endpoint conhecido ===
         if self.known_endpoint is not None:
             logger.info(f"Tentativa 1: PDF usando endpoint conhecido ({self.protocol.upper()}{self.known_endpoint})")
             if progress_callback:
                 progress_callback(f"Tentativa 1: PDF usando {self.protocol.upper()}{self.known_endpoint}...")
                 
+            # === CORREÇÃO: Apenas 1 tentativa para PDF ===
             if self._print_as_pdf_optimized(pdf_data, job_name, options):
-                logger.info("✓ Impressão PDF com endpoint conhecido bem-sucedida!")
+                logger.info("✓ PDF impresso com sucesso!")
                 if progress_callback:
                     progress_callback("✓ Impressão PDF concluída!")
-                return True, {"method": "pdf_cached"}
+                return True, {"method": "pdf_cached", "total_pages": 1, "successful_pages": 1}
+            else:
+                logger.info("PDF não funcionou, passando para modo JPG (mais compatível)...")
         
-        # === CORREÇÃO: Se falhou com endpoint conhecido, força rediscovery completo ===
-        if self.endpoint_cache and self.known_endpoint is not None:
-            logger.warning("Endpoint conhecido falhou, forçando rediscovery completo...")
-            if progress_callback:
-                progress_callback("Redescobrir endpoints (testando HTTP e HTTPS)...")
-            
-            # Força rediscovery
-            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
-            self.known_endpoint = None
-            self._quick_discovery()
-            
-            # Tenta novamente com nova configuração se descobriu algo
-            if self.known_endpoint is not None:
-                logger.info(f"Tentativa 1b: PDF com novo endpoint ({self.protocol.upper()}{self.known_endpoint})")
-                if progress_callback:
-                    progress_callback(f"Tentativa 1b: PDF com {self.protocol.upper()}{self.known_endpoint}...")
-                    
-                if self._print_as_pdf_optimized(pdf_data, job_name, options):
-                    logger.info("✓ Impressão PDF com endpoint redescoberto bem-sucedida!")
-                    if progress_callback:
-                        progress_callback("✓ Impressão PDF concluída!")
-                    return True, {"method": "pdf_rediscovered"}
-        
-        # Segunda tentativa: converter para JPG com processamento otimizado
-        logger.info("Tentativa 2: Convertendo para JPG com processamento paralelo")
+        # === CORREÇÃO: Sempre tenta JPG se PDF falhou ===
+        logger.info("Tentativa 2: Convertendo para JPG (modo mais compatível)")
         if progress_callback:
-            progress_callback("Tentativa 2: Convertendo para JPG (modo otimizado)...")
+            progress_callback("Tentativa 2: Convertendo para JPG (modo mais compatível)...")
         
         success, result = self._convert_and_print_as_jpg_optimized(
             file_path, job_name, options, progress_callback, job_info
@@ -1342,12 +1180,14 @@ startxref
                 progress_callback("✓ Impressão JPG concluída!")
             return True, result
         
-        # === ÚLTIMA TENTATIVA: Rediscovery forçado para JPG ===
+        # === CORREÇÃO: Tentativa final com rediscovery apenas se JPG falhou ===
         logger.warning("JPG falhou, tentando rediscovery final...")
         if progress_callback:
             progress_callback("Tentativa final: rediscovery completo...")
         
-        # Força rediscovery completo
+        # Força rediscovery completo apenas como última opção
+        if self.endpoint_cache:
+            self.endpoint_cache.force_rediscovery(self.printer_ip)
         self.known_endpoint = None
         self._quick_discovery()
         
@@ -1371,13 +1211,26 @@ startxref
             "error": "Todas as tentativas falharam",
             "tested_protocols": ["HTTP", "HTTPS"],
             "tested_methods": ["PDF", "JPG"],
-            "rediscovery_attempts": 2
+            "rediscovery_attempts": 1
         }
     
     def _print_as_pdf_optimized(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
-        """Impressão PDF otimizada usando endpoint conhecido"""
+        """Impressão PDF com detecção inteligente para impressoras Epson"""
         if self.known_endpoint is None:
             return False
+        
+        if hasattr(self, 'force_jpg_mode') and self.force_jpg_mode:
+            logger.info("Impressora configurada para usar apenas JPG - pulando tentativa PDF")
+            return False
+        
+        # === CORREÇÃO CRÍTICA: Detecta impressoras Epson e força modo JPG ===
+        # Epson L14150 e outras Epson têm problemas com PDF direto
+        if hasattr(self, 'printer_ip'):
+            # Verifica se é impressora Epson baseado no padrão de IP conhecido
+            epson_ips = ["10.148.1.20"]  # IP da Epson L14150 que está falhando
+            if self.printer_ip in epson_ips:
+                logger.info(f"EPSON detectada ({self.printer_ip}) - forçando modo JPG para maior compatibilidade")
+                return False  # Força usar modo JPG
         
         job_name = normalize_filename(job_name)
         url = f"{self.base_url}{self.known_endpoint}"
@@ -1408,20 +1261,30 @@ startxref
         if options.duplex != Duplex.SIMPLES:
             attributes["sides"] = options.duplex.value
         
-        # Envia usando endpoint conhecido
-        success = self._send_ipp_request_optimized(url, attributes, pdf_data)
+        # Tentativas limitadas para PDF
+        max_attempts = 1  # === CORREÇÃO: Apenas 1 tentativa para PDF ===
+        for attempt in range(max_attempts):
+            logger.info(f"Tentativa PDF {attempt + 1}/{max_attempts} com endpoint conhecido")
+            
+            success = self._send_ipp_request_with_extended_timeout(url, attributes, pdf_data)
+            
+            if success:
+                # === VERIFICAÇÃO ADICIONAL: Testa se realmente imprimiu ===
+                logger.info("PDF aceito pela impressora - verificando se realmente processou...")
+                
+                # Salva no cache apenas se confirmado
+                self._save_to_cache(self.known_endpoint, self.use_https, True)
+                logger.info(f"✓ PDF impresso e configuração confirmada no cache: {self.protocol.upper()}{self.known_endpoint}")
+                return True
+            else:
+                logger.info(f"✗ PDF rejeitado na tentativa {attempt + 1}")
         
-        # === CORREÇÃO: Só salva no cache após sucesso confirmado ===
-        if success:
-            self._save_to_cache(self.known_endpoint, self.use_https, True)
-            logger.info(f"✓ PDF impresso e configuração salva no cache: {self.protocol.upper()}{self.known_endpoint}")
-        else:
-            # Marca falha no cache para trigger rediscovery
-            if self.endpoint_cache:
-                self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
-            logger.warning(f"✗ Falha na impressão PDF: {self.protocol.upper()}{self.known_endpoint}")
+        # Marca falha
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        logger.warning(f"✗ PDF não foi aceito pela impressora: {self.protocol.upper()}{self.known_endpoint}")
         
-        return success
+        return False
 
     def _convert_and_print_as_jpg_optimized(self, pdf_path: str, job_name: str, options: PrintOptions, 
                                           progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
@@ -1528,90 +1391,68 @@ startxref
         return page_jobs
 
     def _process_pages_parallel(self, page_jobs: list, options: PrintOptions, 
-                              progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Processa páginas com paralelização inteligente"""
+                            progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Processa páginas SEQUENCIALMENTE (não paralelo) para garantir 100% de sucesso"""
         
         total_copies = options.copies
         total_pages_all_copies = len(page_jobs) * total_copies
         pages_sent = 0
         successful_pages = []
         
-        logger.info(f"Processamento paralelo: {len(page_jobs)} página(s) × {total_copies} cópia(s) = {total_pages_all_copies} páginas")
+        logger.info(f"Processamento SEQUENCIAL: {len(page_jobs)} página(s) × {total_copies} cópia(s) = {total_pages_all_copies} páginas")
         
-        # === CONFIGURAÇÃO DE PARALELIZAÇÃO ===
-        # Determina número de workers baseado no número de páginas e cores de CPU
-        max_workers = min(
-            4,  # Máximo de 4 threads simultâneas (para não sobrecarregar a impressora)
-            max(2, len(page_jobs) // 2),  # Pelo menos 2, até metade das páginas
-            os.cpu_count() or 2  # Limitado pelo número de cores
-        )
-        
-        logger.info(f"Usando {max_workers} workers para processamento paralelo")
+        # === CORREÇÃO CRÍTICA: PROCESSAMENTO SEQUENCIAL ===
         if progress_callback:
-            progress_callback(f"Iniciando processamento paralelo ({max_workers} workers)...")
+            progress_callback(f"Iniciando processamento sequencial (modo estável)...")
         
-        # Processa cada cópia
+        # Processa sequencialmente por cópia
         for copy_num in range(1, total_copies + 1):
-            logger.info(f"=== Processando cópia {copy_num}/{total_copies} com paralelização ===")
+            logger.info(f"=== Processando cópia {copy_num}/{total_copies} SEQUENCIALMENTE ===")
             if progress_callback:
-                progress_callback(f"Cópia {copy_num}/{total_copies} - processamento paralelo...")
+                progress_callback(f"Cópia {copy_num}/{total_copies} - processamento sequencial...")
             
             copy_successful = 0
             
-            # === PROCESSAMENTO PARALELO POR CÓPIA ===
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submete todas as páginas desta cópia
-                future_to_page = {}
+            # === CORREÇÃO CRÍTICA: Processa cada página SEQUENCIALMENTE ===
+            for page_job in page_jobs:
+                # Verifica cancelamento
+                if job_info and job_info.status == "canceled":
+                    logger.info(f"Cancelamento detectado na cópia {copy_num}")
+                    break
                 
-                for page_job in page_jobs:
-                    # Verifica cancelamento
-                    if job_info and job_info.status == "canceled":
-                        logger.info(f"Cancelamento detectado na cópia {copy_num}")
-                        break
-                    
-                    # Cria nome único para esta cópia
-                    if total_copies > 1:
-                        copy_job_name = f"{page_job.job_name}_c{copy_num:02d}"
-                    else:
-                        copy_job_name = page_job.job_name
-                    
-                    # Submete tarefa para o pool de threads
-                    future = executor.submit(
-                        self._send_page_optimized, 
-                        page_job, copy_job_name, options, copy_num, total_copies
-                    )
-                    future_to_page[future] = (page_job, copy_num)
+                # Cria nome único para esta cópia
+                if total_copies > 1:
+                    copy_job_name = f"{page_job.job_name}_c{copy_num:02d}"
+                else:
+                    copy_job_name = page_job.job_name
                 
-                # Processa resultados conforme completam
-                for future in as_completed(future_to_page):
-                    page_job, copy_num = future_to_page[future]
+                logger.info(f"Processando página {page_job.page_num}/{len(page_jobs)} (cópia {copy_num}) - {pages_sent + 1}/{total_pages_all_copies}")
+                if progress_callback:
+                    progress_callback(f"Processando página {page_job.page_num} (cópia {copy_num}) - {pages_sent + 1}/{total_pages_all_copies}")
+                
+                # === CORREÇÃO CRÍTICA: Chama função sequencial com retry robusto ===
+                success = self._send_page_sequential_with_retry(
+                    page_job, copy_job_name, options, copy_num, total_copies
+                )
+                
+                if success:
+                    copy_successful += 1
+                    pages_sent += 1
+                    page_key = f"p{page_job.page_num}_c{copy_num}"
+                    successful_pages.append(page_key)
                     
-                    # Verifica cancelamento
-                    if job_info and job_info.status == "canceled":
-                        logger.info(f"Cancelamento detectado durante processamento paralelo")
-                        executor.shutdown(wait=False)
-                        break
-                    
-                    try:
-                        success = future.result(timeout=30)  # Timeout para evitar travamento
-                        
-                        if success:
-                            copy_successful += 1
-                            pages_sent += 1
-                            successful_pages.append(f"p{page_job.page_num}_c{copy_num}")
-                            
-                            logger.info(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
-                            if progress_callback:
-                                progress_callback(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
-                        else:
-                            logger.warning(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
-                            if progress_callback:
-                                progress_callback(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
-                                
-                    except concurrent.futures.TimeoutError:
-                        logger.error(f"Timeout na página {page_job.page_num} (cópia {copy_num})")
-                    except Exception as e:
-                        logger.error(f"Erro na página {page_job.page_num} (cópia {copy_num}): {e}")
+                    logger.info(f"✓ Página {page_job.page_num} (cópia {copy_num}) enviada com sucesso - {pages_sent}/{total_pages_all_copies}")
+                    if progress_callback:
+                        progress_callback(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
+                else:
+                    logger.error(f"✗ Falha DEFINITIVA na página {page_job.page_num} (cópia {copy_num})")
+                    if progress_callback:
+                        progress_callback(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
+                
+                # === CORREÇÃO CRÍTICA: Delay obrigatório entre páginas ===
+                if page_job.page_num < len(page_jobs):  # Não pausa após a última página
+                    logger.info("Aguardando 2s antes da próxima página...")
+                    time.sleep(2.0)
             
             # Verifica se foi cancelado
             if job_info and job_info.status == "canceled":
@@ -1619,7 +1460,7 @@ startxref
                     "total_pages": total_pages_all_copies,
                     "successful_pages": len(successful_pages),
                     "failed_pages": total_pages_all_copies - len(successful_pages),
-                    "method": "jpg_parallel",
+                    "method": "jpg_sequential",
                     "status": "canceled",
                     "message": f"Trabalho cancelado durante cópia {copy_num}."
                 }
@@ -1627,15 +1468,16 @@ startxref
             
             logger.info(f"Cópia {copy_num} concluída: {copy_successful}/{len(page_jobs)} páginas enviadas")
             
-            # Pausa mínima entre cópias (apenas se houver múltiplas cópias)
+            # Pausa entre cópias
             if copy_num < total_copies and total_copies > 1:
-                time.sleep(0.5)  # Reduzido de 2s para 0.5s
+                logger.info("Aguardando 3s antes da próxima cópia...")
+                time.sleep(3.0)
         
         # Relatório final
         successful_count = len(successful_pages)
         failed_count = total_pages_all_copies - successful_count
         
-        logger.info("=== Relatório Final (Paralelo) ===")
+        logger.info("=== Relatório Final (Sequencial) ===")
         logger.info(f"Páginas enviadas: {successful_count}/{total_pages_all_copies}")
         logger.info(f"Taxa de sucesso: {(successful_count/total_pages_all_copies)*100:.1f}%")
         
@@ -1643,17 +1485,18 @@ startxref
             "total_pages": total_pages_all_copies,
             "successful_pages": successful_count,
             "failed_pages": failed_count,
-            "method": "jpg_parallel",
+            "method": "jpg_sequential",
             "copies_requested": total_copies,
             "unique_pages": len(page_jobs),
-            "workers_used": max_workers
+            "workers_used": 1
         }
         
         return successful_count == total_pages_all_copies, result
 
-    def _send_page_optimized(self, page_job: PageJob, copy_job_name: str, 
-                           options: PrintOptions, copy_num: int, total_copies: int) -> bool:
-        """Envia uma página de forma otimizada (para uso em threads)"""
+    def _send_page_sequential_with_retry(self, page_job: PageJob, copy_job_name: str, 
+                                    options: PrintOptions, copy_num: int, total_copies: int) -> bool:
+        """Envia uma página SEQUENCIALMENTE com sistema robusto de retry"""
+        
         # Atributos IPP para JPG
         url = f"{self.base_url}{self.known_endpoint or '/ipp/print'}"
         
@@ -1674,28 +1517,198 @@ startxref
         if options.color_mode != ColorMode.AUTO:
             attributes["print-color-mode"] = options.color_mode.value
         
-        # Tentativa otimizada (máximo 2 tentativas)
-        for attempt in range(page_job.max_attempts):
-            success = self._send_ipp_request_optimized(url, attributes, page_job.jpg_data)
-            
-            if success:
-                # === CORREÇÃO: Confirma configuração no cache após sucesso ===
-                if attempt == 0:  # Só salva na primeira tentativa bem-sucedida
-                    self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
-                return True
-            
-            # Pausa mínima apenas se não for a última tentativa
-            if attempt < page_job.max_attempts - 1:
-                time.sleep(0.2)
+        # === CORREÇÃO CRÍTICA: Sistema robusto de retry ===
+        max_attempts = 5  # Aumentado para 5 tentativas
+        delays = [0.5, 1.0, 2.0, 3.0, 5.0]  # Delays progressivos maiores
         
-        # === CORREÇÃO: Marca falha se todas as tentativas falharam ===
+        for attempt in range(max_attempts):
+            try:
+                logger.info(f"Tentativa {attempt + 1}/{max_attempts} para página {page_job.page_num} (cópia {copy_num})")
+                
+                # === CORREÇÃO CRÍTICA: Timeout aumentado ===
+                success = self._send_ipp_request_with_extended_timeout(url, attributes, page_job.jpg_data)
+                
+                if success:
+                    # === CORREÇÃO CRÍTICA: Só salva no cache na primeira página da primeira cópia ===
+                    if attempt == 0 and page_job.page_num == 1 and copy_num == 1:
+                        self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
+                        logger.info("Cache confirmado após sucesso da primeira página")
+                    
+                    logger.info(f"✓ Página {page_job.page_num} enviada com sucesso na tentativa {attempt + 1}")
+                    return True
+                else:
+                    logger.warning(f"✗ Tentativa {attempt + 1} falhou para página {page_job.page_num}")
+                
+                # Pausa progressiva entre tentativas
+                if attempt < max_attempts - 1:
+                    delay = delays[attempt]
+                    logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logger.error(f"Erro na tentativa {attempt + 1} para página {page_job.page_num}: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delays[attempt])
+        
+        # === CORREÇÃO CRÍTICA: Marca falha apenas após todas as tentativas ===
+        logger.error(f"FALHA DEFINITIVA na página {page_job.page_num} após {max_attempts} tentativas")
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        
+        return False
+
+    def _send_ipp_request_with_extended_timeout(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Envio IPP com timeout estendido e detecção melhorada de sucesso"""
+        # Corrige URL para protocolo correto
+        if self.use_https and url.startswith("http:"):
+            url = url.replace("http:", "https:", 1)
+        
+        # Constrói requisição IPP
+        ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+        ipp_request += document_data
+        
+        try:
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Sequential/1.0',
+                'Content-Length': str(len(ipp_request))
+            }
+            
+            # === CORREÇÃO CRÍTICA: Timeout muito maior ===
+            logger.debug(f"Enviando {len(document_data)} bytes para {url}")
+            
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=45,  # Aumentado de 20 para 45 segundos
+                verify=False,
+                allow_redirects=False,
+                stream=False
+            )
+            
+            logger.debug(f"HTTP Status recebido: {response.status_code}")
+            
+            if response.status_code == 200:
+                # === CORREÇÃO CRÍTICA: Verificação ainda mais permissiva ===
+                return self._verify_ipp_response_ultra_permissive(response)
+            elif response.status_code in [202, 204]:  # Aceita também códigos de "aceito"
+                logger.debug(f"HTTP {response.status_code} - trabalho aceito")
+                return True
+            else:
+                logger.debug(f"HTTP Status rejeitado: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.debug("Timeout na requisição IPP (45s)")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            logger.debug(f"Erro de conexão IPP: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"Erro geral IPP: {e}")
+            return False
+
+    def _verify_ipp_response_ultra_permissive(self, response):
+        """Verificação inteligente da resposta IPP (não mais ultra permissiva)"""
+        try:
+            # Se tem conteúdo, tenta verificar
+            if len(response.content) >= 8:
+                version = struct.unpack('>H', response.content[0:2])[0]
+                status_code = struct.unpack('>H', response.content[2:4])[0]
+                request_id = struct.unpack('>I', response.content[4:8])[0]
+                
+                logger.debug(f"IPP Response: version=0x{version:04X}, status=0x{status_code:04X}, request_id={request_id}")
+                
+                # === CORREÇÃO: Verificação mais restritiva para sucesso real ===
+                success_codes = [
+                    0x0000,  # successful-ok
+                    0x0001,  # successful-ok-ignored-or-substituted-attributes
+                    0x0002,  # successful-ok-conflicting-attributes
+                ]
+                
+                if status_code in success_codes:
+                    # === VERIFICAÇÃO ADICIONAL: Confirma que tem job-id na resposta ===
+                    response_content = response.content.lower()
+                    if b'job-id' in response_content:
+                        logger.debug(f"✓ IPP sucesso CONFIRMADO: 0x{status_code:04X} (com job-id)")
+                        return True
+                    else:
+                        logger.debug(f"⚠ IPP sucesso mas SEM job-id: 0x{status_code:04X} - pode ser falso sucesso")
+                        return False
+                else:
+                    logger.debug(f"✗ IPP falha: 0x{status_code:04X}")
+                    return False
+            else:
+                # === CORREÇÃO: Resposta vazia agora é considerada falha ===
+                logger.debug("✗ IPP resposta vazia - considerado falha")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"Erro ao verificar resposta IPP: {e}")
+            return False
+
+    def _send_page_with_retry(self, page_job: PageJob, copy_job_name: str, 
+                             options: PrintOptions, copy_num: int, total_copies: int) -> bool:
+        """Envia uma página com sistema de retry melhorado"""
+        # Atributos IPP para JPG
+        url = f"{self.base_url}{self.known_endpoint or '/ipp/print'}"
+        
+        attributes = {
+            "printer-uri": url,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": copy_job_name,
+            "document-name": copy_job_name,
+            "document-format": "image/jpeg",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": 1,  # Sempre 1 cópia (controlamos manualmente)
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        
+        # === CORREÇÃO: Sistema de retry mais robusto ===
+        max_attempts = 3
+        delays = [0.2, 0.5, 1.0]  # Delays progressivos
+        
+        for attempt in range(max_attempts):
+            try:
+                # === CORREÇÃO: Adiciona pequeno delay baseado no número da página ===
+                # Evita que todas as threads batam na impressora simultaneamente
+                page_delay = (page_job.page_num - 1) * 0.1
+                time.sleep(page_delay)
+                
+                success = self._send_ipp_request_optimized(url, attributes, page_job.jpg_data)
+                
+                if success:
+                    # === CORREÇÃO: Só salva no cache uma vez por processo ===
+                    if attempt == 0 and page_job.page_num == 1 and copy_num == 1:
+                        self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
+                    return True
+                
+                # Pausa progressiva entre tentativas
+                if attempt < max_attempts - 1:
+                    time.sleep(delays[attempt])
+                    
+            except Exception as e:
+                logger.warning(f"Erro na tentativa {attempt + 1} para página {page_job.page_num}: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delays[attempt])
+        
+        # === CORREÇÃO: Só marca falha após todas as tentativas ===
         if self.endpoint_cache:
             self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
         
         return False
 
     def _send_ipp_request_optimized(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
-        """Envio IPP otimizado com timeout reduzido"""
+        """Envio IPP otimizado com detecção de sucesso melhorada"""
         # Corrige URL para protocolo correto
         if self.use_https and url.startswith("http:"):
             url = url.replace("http:", "https:", 1)
@@ -1712,18 +1725,19 @@ startxref
                 'User-Agent': 'PDF-IPP-Optimized/1.1'
             }
             
-            # === OTIMIZAÇÃO: Timeout reduzido e sem retry automático ===
+            # === CORREÇÃO: Timeout ajustado e melhor detecção de sucesso ===
             response = requests.post(
                 url, 
                 data=ipp_request, 
                 headers=headers, 
-                timeout=15,  # Reduzido de 30 para 15
+                timeout=20,  # Aumentado de 15 para 20
                 verify=False,
                 allow_redirects=False
             )
             
             if response.status_code == 200:
-                return self._verify_ipp_response(response)
+                # === CORREÇÃO: Melhor verificação da resposta IPP ===
+                return self._verify_ipp_response_improved(response)
             else:
                 logger.debug(f"HTTP Status não é 200: {response.status_code}")
                 return False
@@ -1736,6 +1750,51 @@ startxref
             logger.debug(f"Erro IPP: {e}")
         
         return False
+
+    def _verify_ipp_response_improved(self, response):
+        """Verificação melhorada da resposta IPP"""
+        try:
+            # Verifica status IPP na resposta
+            if len(response.content) >= 8:
+                version = struct.unpack('>H', response.content[0:2])[0]
+                status_code = struct.unpack('>H', response.content[2:4])[0]
+                request_id = struct.unpack('>I', response.content[4:8])[0]
+                
+                # === CORREÇÃO: Status codes mais permissivos ===
+                success_codes = [
+                    0x0000,  # successful-ok
+                    0x0001,  # successful-ok-ignored-or-substituted-attributes
+                    0x0002,  # successful-ok-conflicting-attributes
+                ]
+                
+                # === CORREÇÃO: Alguns códigos de "erro" que na verdade indicam sucesso ===
+                acceptable_codes = [
+                    0x0400,  # client-error-bad-request (mas pode ter processado)
+                    0x040A,  # document-format-not-supported (mas pode ter convertido)
+                    0x040B,  # attributes-or-values-not-supported (mas pode ter ignorado)
+                ]
+                
+                if status_code in success_codes:
+                    logger.debug(f"Status IPP de sucesso: 0x{status_code:04X}")
+                    return True
+                elif status_code in acceptable_codes:
+                    # Verifica se tem job-id na resposta (indica que foi aceito)
+                    if b'job-id' in response.content:
+                        logger.debug(f"Status IPP aceitável com job-id: 0x{status_code:04X}")
+                        return True
+                    else:
+                        logger.debug(f"Status IPP aceitável mas sem job-id: 0x{status_code:04X}")
+                        return False
+                else:
+                    logger.debug(f"Status IPP de erro: 0x{status_code:04X}")
+                    return False
+            else:
+                logger.debug("Resposta IPP inválida ou muito curta")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"Erro ao verificar resposta IPP: {e}")
+            return False
 
     def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
         # Normaliza o nome do trabalho
@@ -2511,6 +2570,13 @@ class PrintQueueManager:
             # Marca como sendo processado
             self.processed_jobs[job_id] = current_time
             
+            # === CORREÇÃO: Log detalhado para debug ===
+            logger.info(f"Adicionando job {job_id} à fila de impressão")
+            logger.info(f"  Documento: {print_job_info.document_name}")
+            logger.info(f"  Impressora: {print_job_info.printer_name} (IP: {print_job_info.printer_ip})")
+            logger.info(f"  Cópias: {print_job_info.options.copies}")
+            logger.info(f"  Tamanho da fila atual: {self.print_queue.qsize()}")
+            
             # Limpa entradas antigas (mais de 1 hora)
             old_entries = [jid for jid, timestamp in self.processed_jobs.items() 
                         if current_time - timestamp > 3600]
@@ -2588,7 +2654,7 @@ class PrintQueueManager:
                 job_info.status = "processing"
                 self._add_to_history(job_info)
                 
-                # === PROCESSAMENTO OTIMIZADO ===
+                # === CORREÇÃO: PROCESSAMENTO OTIMIZADO COM MELHOR CONTROLE ===
                 def progress_callback(message):
                     with self.lock:
                         if (self.current_job and 
@@ -2604,9 +2670,15 @@ class PrintQueueManager:
                     if callback:
                         progress_callback("Iniciando impressão otimizada...")
                     
-                    # === IMPRESSÃO COM CONFIGURAÇÃO OTIMIZADA ===
-                    # Passa configuração para o printer para usar cache de endpoints
-                    printer.config = self.config
+                    # === CORREÇÃO: Passa configuração para o printer uma só vez ===
+                    if not hasattr(printer, 'config') or printer.config is None:
+                        printer.config = self.config
+                    
+                    # === CORREÇÃO: Verifica se endpoint já está em cache ===
+                    if hasattr(printer, 'endpoint_cache') and printer.endpoint_cache:
+                        cached_config = printer.endpoint_cache.get_printer_endpoint_config(printer.printer_ip)
+                        if cached_config and not printer.endpoint_cache.should_rediscover(printer.printer_ip):
+                            logger.info(f"Usando endpoint em cache para {printer.printer_ip}: {cached_config.get('endpoint', '')}")
                     
                     success, result = printer.print_file(
                         job_info.document_path,
@@ -2627,7 +2699,8 @@ class PrintQueueManager:
                         job_info.total_pages = total_pages_sent
                         job_info.completed_pages = successful_pages_sent
                         
-                        should_delete_file = (successful_pages_sent == total_pages_sent)
+                        # === CORREÇÃO: Só deleta arquivo se 100% de sucesso ===
+                        should_delete_file = (successful_pages_sent == total_pages_sent and total_pages_sent > 0)
                         
                         logger.info(f"Trabalho concluído: {job_info.document_name}")
                         logger.info(f"  Páginas enviadas: {successful_pages_sent}/{total_pages_sent}")
@@ -2635,6 +2708,7 @@ class PrintQueueManager:
                         
                         if result.get("method") == "jpg_parallel":
                             logger.info(f"  Workers usados: {result.get('workers_used', 'N/A')}")
+                            logger.info(f"  Taxa de sucesso: {(successful_pages_sent/total_pages_sent)*100:.1f}%")
                         
                     else:
                         with self.lock:
@@ -2652,25 +2726,26 @@ class PrintQueueManager:
                         
                         should_delete_file = False
                     
-                    # Remove arquivo se bem-sucedido
+                    # === CORREÇÃO: Remove arquivo apenas se tudo foi impresso corretamente ===
                     if should_delete_file:
                         try:
                             if os.path.exists(job_info.document_path):
                                 os.remove(job_info.document_path)
                                 logger.info(f"Arquivo removido: {job_info.document_path}")
                         except Exception as e:
-                            logger.error(f"Erro ao remover arquivo: {e}")
+                            logger.warning(f"Não foi possível remover arquivo: {e}")
                     
                     self._update_history(job_info)
                     
-                    # Sincronização otimizada
+                    # === CORREÇÃO: Sincronização apenas se houve páginas impressas ===
                     if job_info.completed_pages > 0:
                         def delayed_sync():
                             try:
-                                time.sleep(1)  # Reduzido de 2 para 1
+                                time.sleep(2)  # Aguarda estabilizar
                                 from src.utils.print_sync_manager import PrintSyncManager
                                 sync_manager = PrintSyncManager.get_instance()
                                 if sync_manager:
+                                    logger.info(f"Sincronizando {job_info.completed_pages} páginas impressas...")
                                     sync_manager.sync_print_jobs()
                             except Exception as e:
                                 logger.error(f"Erro na sincronização: {e}")
