@@ -1002,11 +1002,43 @@ def setup_auto_updater(config, api_client):
     # Configura verificação periódica de atualizações (a cada 4 horas)
     def periodic_check():
         import time
+        from datetime import datetime, timedelta
+        
+        # Define os minutos alvo para verificação
+        target_minutes = [0, 10, 20, 30, 40, 50]
+        
         while True:
-            # Aguarda 4 horas
-            time.sleep(4 * 60 * 60)  # 4 horas em segundos
-            # Verifica se há atualizações
-            updater.check_and_update(silent=True, auto_apply=True)
+            try:
+                # Obtém o tempo atual
+                now = datetime.now()
+                current_minute = now.minute
+                
+                # Encontra o próximo minuto alvo
+                next_minute = None
+                for minute in target_minutes:
+                    if minute > current_minute:
+                        next_minute = minute
+                        break
+                
+                if next_minute is None:
+                    next_minute = target_minutes[0]
+                    next_time = now.replace(minute=next_minute, second=0, microsecond=0) + timedelta(hours=1)
+                else:
+                    next_time = now.replace(minute=next_minute, second=0, microsecond=0)
+                
+                sleep_seconds = (next_time - now).total_seconds()
+                
+                if sleep_seconds > 0:
+                    logger.debug(f"Próxima verificação de atualização em {sleep_seconds:.1f} segundos ({next_time.strftime('%H:%M:%S')})")
+                    time.sleep(sleep_seconds)
+                
+                # Verifica se há atualizações no horário programado
+                logger.info(f"Executando verificação periódica de atualizações às {datetime.now().strftime('%H:%M:%S')}")
+                updater.check_and_update(silent=True, auto_apply=True)
+                
+            except Exception as e:
+                logger.error(f"Erro na verificação periódica de atualizações: {str(e)}")
+                time.sleep(60)
     
     periodic_thread = threading.Thread(target=periodic_check, daemon=True)
     periodic_thread.daemon = True
