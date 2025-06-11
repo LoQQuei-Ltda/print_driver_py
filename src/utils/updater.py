@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Sistema de atualização automática da aplicação - Com notificações e permissões melhoradas
+Sistema de atualização automática da aplicação - Sem requisito de privilégios administrativos
 """
 
 import os
@@ -458,8 +458,8 @@ class AppUpdater:
             if update_file.lower().endswith('.exe') and self.system == "Windows":
                 return self._apply_exe_update(update_file)
             else:
-                # Aplica a atualização com privilégios elevados (formato ZIP)
-                return self._apply_update_with_privileges(update_file)
+                # Aplica a atualização (formato ZIP) sem privilégios elevados
+                return self._apply_update_without_privileges(update_file)
             
         except Exception as e:
             logger.error(f"Erro ao aplicar atualização: {str(e)}")
@@ -477,7 +477,7 @@ class AppUpdater:
     
     def _apply_exe_update(self, exe_file):
         """
-        Aplica atualização usando um executável (.exe)
+        Aplica atualização usando um executável (.exe) - SEM requisito de admin
         
         Args:
             exe_file (str): Caminho para o arquivo executável de atualização
@@ -488,44 +488,58 @@ class AppUpdater:
         try:
             logger.info(f"Executando atualização via executável: {exe_file}")
             
-            # Executa o instalador de forma silenciosa
-            if self._is_admin():
-                # Se já tem privilégios, executa diretamente
-                subprocess.Popen([exe_file, '/S', '/VERYSILENT', '/NORESTART', '/SP-'], 
-                                creationflags=subprocess.CREATE_NO_WINDOW,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-            else:
-                # Executa com privilégios elevados
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_file, '/S /VERYSILENT /NORESTART /SP-', None, 0)
+            # Executa o instalador de forma silenciosa SEM solicitar elevação
+            # Adiciona parâmetros para instalação silenciosa
+            startup_info = None
+            creation_flags = 0
+            
+            # No Windows, esconde a janela do console
+            if self.system == "Windows":
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0  # SW_HIDE
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            # Executa o instalador com parâmetros para instalação silenciosa
+            subprocess.Popen(
+                [exe_file, '/VERYSILENT', '/NORESTART', '/NOICONS', '/SP-', '/CLOSEAPPLICATIONS', 
+                 '/RESTARTAPPLICATIONS', '/NOCANCEL', '/SUPPRESSMSGBOXES'], 
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
             
             logger.info("Instalador de atualização iniciado")
+            
+            # Notifica que a instalação está em andamento
+            self.notification_system.show_notification(
+                "Instalação em Andamento",
+                "O instalador está sendo executado em segundo plano. O aplicativo será reiniciado automaticamente.",
+                duration=10,
+                notification_type="info"
+            )
+            
             self.is_updating = False
             return True
             
         except Exception as e:
             logger.error(f"Erro ao executar instalador: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Não foi possível executar o instalador: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             self.is_updating = False
             return False
     
-    def _is_admin(self):
+    def _apply_update_without_privileges(self, update_file):
         """
-        Verifica se o aplicativo está sendo executado como administrador/root
-        
-        Returns:
-            bool: True se o aplicativo está sendo executado com privilégios elevados
-        """
-        try:
-            if self.system == "Windows":
-                return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            else:
-                return os.geteuid() == 0
-        except Exception:
-            return False
-    
-    def _apply_update_with_privileges(self, update_file):
-        """
-        Aplica a atualização com privilégios elevados
+        Aplica a atualização sem privilégios elevados
         
         Args:
             update_file (str): Caminho para o arquivo de atualização
@@ -533,12 +547,20 @@ class AppUpdater:
         Returns:
             bool: True se a atualização foi iniciada com sucesso
         """
-        # Cria um script para aplicar a atualização
-        temp_dir = tempfile.mkdtemp()
-        script_path = os.path.join(temp_dir, "apply_update.py")
-        
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write(f"""
+        try:
+            logger.info(f"Aplicando atualização sem privilégios elevados: {update_file}")
+            
+            # Cria um script para aplicar a atualização
+            temp_dir = tempfile.mkdtemp()
+            script_path = os.path.join(temp_dir, "apply_update.py")
+            
+            # Determina se a aplicação está instalada no diretório do usuário
+            is_user_install = self._is_user_installation()
+            
+            # Se for instalação de usuário, cria um script simplificado
+            # que não requer privilégios administrativos
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(f"""
 import os
 import sys
 import zipfile
@@ -547,197 +569,16 @@ import time
 import subprocess
 import tempfile
 import logging
-import stat
+import traceback
 
-# Configura logging secreto para não interferir com o usuário
+# Configura logging para não interferir com o usuário
 log_file = os.path.join(tempfile.gettempdir(), "loqquei_update.log")
 logging.basicConfig(filename=log_file, level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-def set_permissions_recursive(path):
-    try:
-        if os.name == 'nt':  # Windows
-            try:
-                import win32security
-                import win32con
-                import win32api
-                import win32net
-                
-                # Tenta usar a API win32 se disponível
-                try:
-                    # Obtém o SID para o grupo 'Everyone'
-                    everyone, domain, type = win32security.LookupAccountName("", "Everyone")
-                    users, domain, type = win32security.LookupAccountName("", "Users")
-                    
-                    # Define permissões de acesso para diretórios e arquivos
-                    for root, dirs, files in os.walk(path):
-                        for dir_name in dirs:
-                            dir_path = os.path.join(root, dir_name)
-                            try:
-                                # Obtém o DACL do diretório
-                                sd = win32security.GetFileSecurity(dir_path, win32security.DACL_SECURITY_INFORMATION)
-                                dacl = sd.GetSecurityDescriptorDacl()
-                                
-                                # Adiciona permissão de acesso total para 'Everyone'
-                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
-                                                        win32con.GENERIC_ALL, 
-                                                        everyone)
-                                
-                                # Adiciona permissão de acesso total para 'Users'
-                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
-                                                        win32con.GENERIC_ALL, 
-                                                        users)
-                                
-                                sd.SetSecurityDescriptorDacl(1, dacl, 0)
-                                win32security.SetFileSecurity(dir_path, 
-                                                            win32security.DACL_SECURITY_INFORMATION, 
-                                                            sd)
-                                
-                                logging.info(f"Permissões definidas para diretório: {{dir_path}}")
-                            except Exception as e:
-                                logging.warning(f"Erro ao definir permissões para diretório {{dir_path}}: {{e}}")
-                        
-                        for file_name in files:
-                            file_path = os.path.join(root, file_name)
-                            try:
-                                # Obtém o DACL do arquivo
-                                sd = win32security.GetFileSecurity(file_path, win32security.DACL_SECURITY_INFORMATION)
-                                dacl = sd.GetSecurityDescriptorDacl()
-                                
-                                # Adiciona permissão de acesso total para 'Everyone'
-                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
-                                                        win32con.GENERIC_ALL, 
-                                                        everyone)
-                                
-                                # Adiciona permissão de acesso total para 'Users'
-                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
-                                                        win32con.GENERIC_ALL, 
-                                                        users)
-                                
-                                sd.SetSecurityDescriptorDacl(1, dacl, 0)
-                                win32security.SetFileSecurity(file_path, 
-                                                            win32security.DACL_SECURITY_INFORMATION, 
-                                                            sd)
-                                
-                                # Remove flags de somente leitura, se existirem
-                                attrs = win32api.GetFileAttributes(file_path)
-                                if attrs & win32con.FILE_ATTRIBUTE_READONLY:
-                                    win32api.SetFileAttributes(file_path, attrs & ~win32con.FILE_ATTRIBUTE_READONLY)
-                                
-                                logging.info(f"Permissões definidas para arquivo: {{file_path}}")
-                            except Exception as e:
-                                logging.warning(f"Erro ao definir permissões para arquivo {{file_path}}: {{e}}")
-                                
-                    # Define proprietário para o grupo Administrators
-                    try:
-                        admins, domain, type = win32security.LookupAccountName("", "Administrators")
-                        sd = win32security.GetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION)
-                        sd.SetSecurityDescriptorOwner(admins, 0)
-                        win32security.SetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION, sd)
-                        logging.info(f"Proprietário definido como Administrators para: {{path}}")
-                    except Exception as e:
-                        logging.warning(f"Erro ao definir proprietário: {{e}}")
-                        
-                except Exception as e:
-                    logging.warning(f"Erro ao usar win32security, tentando método alternativo: {{e}}")
-                    
-                    # Método alternativo: usando icacls (disponível no Windows)
-                    try:
-                        # Garante que 'Everyone' tenha acesso total recursivamente
-                        subprocess.run(['icacls', path, '/grant', 'Everyone:(OI)(CI)F', '/T', '/Q'], 
-                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        
-                        # Garante que 'Users' tenha acesso total recursivamente
-                        subprocess.run(['icacls', path, '/grant', 'Users:(OI)(CI)F', '/T', '/Q'], 
-                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        
-                        # Remove atributos somente leitura recursivamente
-                        subprocess.run(['attrib', '-R', f"{{path}}\\*.*", '/S', '/D'], 
-                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        
-                        logging.info(f"Permissões definidas via icacls para: {{path}}")
-                    except Exception as e:
-                        logging.warning(f"Erro ao usar icacls: {{e}}")
-            
-            except ImportError:
-                logging.warning("win32security não disponível, usando icacls")
-                
-                # Usando icacls (disponível no Windows)
-                try:
-                    # Garante que 'Everyone' tenha acesso total recursivamente
-                    subprocess.run(['icacls', path, '/grant', 'Everyone:(OI)(CI)F', '/T', '/Q'], 
-                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    # Garante que 'Users' tenha acesso total recursivamente
-                    subprocess.run(['icacls', path, '/grant', 'Users:(OI)(CI)F', '/T', '/Q'], 
-                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    # Remove atributos somente leitura recursivamente
-                    subprocess.run(['attrib', '-R', f"{{path}}\\*.*", '/S', '/D'], 
-                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    
-                    logging.info(f"Permissões definidas via icacls para: {{path}}")
-                except Exception as e:
-                    logging.warning(f"Erro ao usar icacls: {{e}}")
-                    
-        else:  # Unix/Linux/Mac
-            # Define permissões 755 para diretórios e 644/755 para arquivos
-            for root, dirs, files in os.walk(path):
-                for dir_name in dirs:
-                    try:
-                        dir_path = os.path.join(root, dir_name)
-                        os.chmod(dir_path, 0o755)  # rwxr-xr-x
-                        logging.info(f"Permissões definidas para diretório: {{dir_path}}")
-                    except Exception as e:
-                        logging.warning(f"Erro ao definir permissões para diretório {{dir_path}}: {{e}}")
-                
-                for file_name in files:
-                    try:
-                        file_path = os.path.join(root, file_name)
-                        if os.access(file_path, os.X_OK):
-                            os.chmod(file_path, 0o755)  # rwxr-xr-x para executáveis
-                        else:
-                            os.chmod(file_path, 0o644)  # rw-r--r-- para arquivos normais
-                        logging.info(f"Permissões definidas para arquivo: {{file_path}}")
-                    except Exception as e:
-                        logging.warning(f"Erro ao definir permissões para arquivo {{file_path}}: {{e}}")
-                        
-            # Tenta definir o proprietário para o usuário/grupo padrão se estiver rodando como root
-            if os.geteuid() == 0:
-                try:
-                    import pwd
-                    import grp
-                    
-                    # Obtém UID/GID do usuário que provavelmente iniciou o app (não root)
-                    username = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'nobody'
-                    uid = pwd.getpwnam(username).pw_uid
-                    gid = pwd.getpwnam(username).pw_gid
-                    
-                    # Aplica recursivamente
-                    for root, dirs, files in os.walk(path):
-                        for dir_name in dirs:
-                            try:
-                                dir_path = os.path.join(root, dir_name)
-                                os.chown(dir_path, uid, gid)
-                            except:
-                                pass
-                                
-                        for file_name in files:
-                            try:
-                                file_path = os.path.join(root, file_name)
-                                os.chown(file_path, uid, gid)
-                            except:
-                                pass
-                                
-                    logging.info(f"Proprietário definido como {{username}} para: {{path}}")
-                except Exception as e:
-                    logging.warning(f"Erro ao definir proprietário: {{e}}")
-    except Exception as e:
-        logging.error(f"Erro ao definir permissões recursivas: {{e}}")
-
 def apply_update():
     try:
-        logging.info("Iniciando aplicação da atualização")
+        logging.info("Iniciando aplicação da atualização (sem privilégios)")
         
         # Caminho do arquivo de atualização
         update_file = {repr(update_file)}
@@ -751,14 +592,15 @@ def apply_update():
         temp_dir = tempfile.mkdtemp()
         logging.info(f"Diretório temporário: {{temp_dir}}")
         
+        # Verifica se o arquivo existe
+        if not os.path.exists(update_file):
+            logging.error(f"Arquivo de atualização não encontrado: {{update_file}}")
+            return False
+            
         # Extrai os arquivos
         logging.info("Extraindo arquivos...")
         with zipfile.ZipFile(update_file, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
-        
-        # Define permissões adequadas para os arquivos extraídos
-        logging.info("Definindo permissões para os arquivos extraídos...")
-        set_permissions_recursive(temp_dir)
         
         # Copia os arquivos para o diretório da aplicação
         logging.info("Copiando arquivos para o diretório da aplicação")
@@ -769,34 +611,59 @@ def apply_update():
                 dst_path = os.path.join(app_dir, rel_path)
                 
                 # Cria diretório de destino se não existir
-                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                try:
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                except Exception as e:
+                    logging.warning(f"Erro ao criar diretório {{os.path.dirname(dst_path)}}: {{e}}")
+                    continue
                 
                 # Tenta até 3 vezes para lidar com arquivos em uso
                 for attempt in range(3):
                     try:
+                        # Remove arquivos existentes primeiro (mais confiável do que substituir)
+                        if os.path.exists(dst_path):
+                            try:
+                                os.remove(dst_path)
+                            except Exception as remove_error:
+                                logging.warning(f"Não foi possível remover arquivo existente {{dst_path}}: {{remove_error}}")
+                                
+                                # Se não conseguir remover, tenta renomear
+                                try:
+                                    temp_name = dst_path + ".old"
+                                    if os.path.exists(temp_name):
+                                        os.remove(temp_name)
+                                    os.rename(dst_path, temp_name)
+                                except Exception as rename_error:
+                                    logging.warning(f"Não foi possível renomear arquivo existente {{dst_path}}: {{rename_error}}")
+                        
+                        # Copia o arquivo
                         shutil.copy2(src_path, dst_path)
                         logging.info(f"Copiado: {{rel_path}}")
                         break
                     except Exception as e:
                         logging.warning(f"Tentativa {{attempt+1}} falhou para {{rel_path}}: {{str(e)}}")
-                        time.sleep(1)
-        
-        # Define permissões adequadas para os arquivos copiados
-        logging.info("Definindo permissões para os arquivos instalados...")
-        set_permissions_recursive(app_dir)
+                        if attempt < 2:  # Só espera se não for a última tentativa
+                            time.sleep(1)
         
         # Reinicia a aplicação se estiver em execução
         logging.info("Tentando reiniciar a aplicação")
         try:
-            # Tenta encontrar o processo da aplicação
+            # Cria um script de reinicialização adequado para o sistema
             if sys.platform.startswith('win'):
                 # Cria um arquivo de script para iniciar a aplicação após a atualização
                 startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.bat")
                 with open(startup_script, 'w') as f:
                     f.write(f'''@echo off
-taskkill /IM "python.exe" /F >nul 2>&1
-timeout /t 1 >nul
-start "" /B "{{sys.executable}}" "{{os.path.join(app_dir, "main.py")}}"
+REM Espera 1 segundo
+timeout /t 1 /nobreak >nul
+REM Tenta encerrar o processo Python atual
+taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq PrintManagementSystem*" >nul 2>&1
+taskkill /F /IM "PrintManagementSystem.exe" >nul 2>&1
+REM Espera mais 1 segundo
+timeout /t 1 /nobreak >nul
+REM Inicia o aplicativo atualizado
+start "" "{{os.path.join(app_dir, "PrintManagementSystem.exe")}}"
+REM Remove este script
 del "%~f0"
 ''')
                 
@@ -810,9 +677,16 @@ del "%~f0"
                 startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.sh")
                 with open(startup_script, 'w') as f:
                     f.write(f'''#!/bin/bash
-pkill -f "python.*main.py" || true
+# Espera 1 segundo
 sleep 1
-nohup "{{sys.executable}}" "{{os.path.join(app_dir, "main.py")}}" > /dev/null 2>&1 &
+# Tenta encerrar o processo Python atual
+pkill -f "python.*PrintManagementSystem" || true
+pkill -f "PrintManagementSystem" || true
+# Espera mais 1 segundo
+sleep 1
+# Inicia o aplicativo atualizado
+nohup "{{os.path.join(app_dir, "PrintManagementSystem")}}" > /dev/null 2>&1 &
+# Remove este script
 rm "$0"
 ''')
                 os.chmod(startup_script, 0o755)
@@ -823,11 +697,14 @@ rm "$0"
                                 stderr=subprocess.DEVNULL)
                 
             logging.info("Script de reinicialização criado e executado")
+            
         except Exception as e:
             logging.error(f"Erro ao tentar reiniciar: {{str(e)}}")
+            logging.error(traceback.format_exc())
             
     except Exception as e:
         logging.error(f"Erro ao aplicar atualização: {{str(e)}}")
+        logging.error(traceback.format_exc())
         return False
     finally:
         # Limpa os arquivos temporários
@@ -849,80 +726,61 @@ rm "$0"
 # Aplica a atualização
 apply_update()
 """)
-        
-        if self._is_admin():
-            # Se já tem privilégios, executa diretamente
-            try:
-                subprocess.Popen([sys.executable, script_path], 
-                                 creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                self.is_updating = False
-                return True
-            except Exception as e:
-                logger.error(f"Erro ao executar script de atualização: {str(e)}")
-                self.is_updating = False
-                return False
-        else:
-            # Executa com privilégios elevados de forma invisível
-            try:
-                if self.system == "Windows":
-                    # No Windows, usa ShellExecute com o verbo "runas" e SW_HIDE
-                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, 
-                                                       f'"{script_path}"', None, 0)
-                elif self.system == "Darwin":  # macOS
-                    # Cria um script AppleScript temporário para execução invisível
-                    temp_script = os.path.join(tempfile.gettempdir(), "invisible_sudo.scpt")
-                    with open(temp_script, 'w') as f:
-                        f.write(f'''
-do shell script "\\"{{sys.executable}}\\" \\"{{script_path}}\\"" with administrator privileges without altering line endings
-''')
-                    
-                    # Executa o AppleScript
-                    subprocess.Popen(["osascript", temp_script],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-                    
-                    # Remove o script temporário após um atraso
-                    threading.Timer(5, lambda: os.remove(temp_script) if os.path.exists(temp_script) else None).start()
-                else:  # Linux ou outros
-                    # Cria um script para executar com sudo sem prompt visível
-                    temp_script = os.path.join(tempfile.gettempdir(), "invisible_sudo.sh")
-                    with open(temp_script, 'w') as f:
-                        f.write(f'''#!/bin/bash
-export SUDO_ASKPASS=/bin/true
-for cmd in pkexec gksudo kdesudo sudo; do
-    if command -v $cmd >/dev/null 2>&1; then
-        if [ "$cmd" = "sudo" ]; then
-            $cmd -A "{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-        else
-            $cmd "{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-        fi
-        exit 0
-    fi
-done
-
-# Fallback - tenta executar diretamente
-"{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-''')
-                    
-                    # Torna o script executável
-                    os.chmod(temp_script, 0o755)
-                    
-                    # Executa o script
-                    subprocess.Popen(["/bin/bash", temp_script],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-                    
-                    # Remove o script temporário após um atraso
-                    threading.Timer(5, lambda: os.remove(temp_script) if os.path.exists(temp_script) else None).start()
+            
+            # Executa o script em um processo separado sem privilégios
+            # e sem mostrar a janela do console
+            startup_info = None
+            creation_flags = 0
+            
+            # No Windows, esconde a janela do console
+            if self.system == "Windows":
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0  # SW_HIDE
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            # Executa o script
+            subprocess.Popen(
+                [sys.executable, script_path],
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            logger.info("Script de atualização iniciado")
+            self.is_updating = False
+            return True
                 
-                self.is_updating = False
-                return True
-            except Exception as e:
-                logger.error(f"Erro ao solicitar privilégios para atualização: {str(e)}")
-                self.is_updating = False
-                return False
+        except Exception as e:
+            logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Ocorreu um erro ao instalar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
+            self.is_updating = False
+            return False
+    
+    def _is_user_installation(self):
+        """
+        Verifica se a aplicação está instalada no diretório do usuário
+        
+        Returns:
+            bool: True se for instalação de usuário
+        """
+        if self.system == "Windows":
+            # Verifica se o diretório da aplicação está no AppData do usuário
+            app_data = os.environ.get('LOCALAPPDATA', '')
+            return app_data and self.app_root.lower().startswith(app_data.lower())
+        else:
+            # Em sistemas Unix, verifica se está no diretório home do usuário
+            home_dir = os.path.expanduser("~")
+            return self.app_root.startswith(home_dir)
     
     def check_and_update(self, silent=True, auto_apply=True):
         """
