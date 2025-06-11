@@ -1,6 +1,6 @@
 ; Script para o Inno Setup
 #define MyAppName "Gerenciamento de Impressão - LoQQuei"
-#define MyAppVersion "2.0.3"
+#define MyAppVersion "2.0.1"
 #define MyAppPublisher "LoQQuei"
 #define MyAppURL "https://loqquei.com.br"
 #define MyAppExeName "PrintManagementSystem.exe"
@@ -24,15 +24,12 @@ LZMANumFastBytes=273
 WizardStyle=modern
 SetupLogging=yes
 
-; Instalação sem privilégios administrativos
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
-
-; Diretório de instalação no perfil do usuário (não requer admin)
-DefaultDirName={localappdata}\LoQQuei\{#MyAppName}
+DefaultDirName={autopf}\LoQQuei\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 AlwaysRestart=no
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=dialog
 
 ; Configurações de UI
 SetupIconFile=src\ui\resources\icon.ico
@@ -122,4 +119,29 @@ function InitializeUninstall(): Boolean;
 begin
   Result := True;
   StopApplication();
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    // Registra informações adicionais
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, 
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+      'DisplayVersion', '{#MyAppVersion}');
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, 
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+      'Publisher', '{#MyAppPublisher}');
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, 
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+      'URLInfoAbout', '{#MyAppURL}');
+    RegWriteStringValue(HKEY_LOCAL_MACHINE, 
+      'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1',
+      'HelpLink', '{#MyAppURL}');
+      
+    Exec('icacls.exe', '"' + ExpandConstant('{app}') + '" /grant Users:(OI)(CI)M /T', 
+         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;

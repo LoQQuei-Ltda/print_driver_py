@@ -566,12 +566,13 @@ class MainScreen(wx.Frame):
         version_sizer = wx.BoxSizer(wx.VERTICAL)
         
         # Obtém a versão automaticamente do config ou aplicação
-        app_version = self.config.get("app_version", "2.0.1")  # fallback para 2.0.1
+        from __version__ import __version__
+        app_version = __version__
         if hasattr(wx.GetApp(), 'version'):
             app_version = wx.GetApp().version
         
         # Texto da versão
-        version_text = wx.StaticText(version_panel, label=f"v{app_version}")
+        version_text = wx.StaticText(version_panel, label=f"V{app_version}")
         version_text.SetForegroundColour(wx.Colour(120, 120, 120))
         version_text.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         

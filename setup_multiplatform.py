@@ -4,6 +4,7 @@ import sys
 import platform
 import shutil
 from setuptools import setup, find_packages, Command
+from __version__ import __version__
 
 class PyInstallerCommand(Command):
     description = "Build executable with PyInstaller"
@@ -184,7 +185,7 @@ exe = EXE(
 )
 '''
         elif system == "darwin":  # macOS
-            platform_specific = '''
+            platform_specific = f'''
 # Configurações específicas para macOS
 app = BUNDLE(
     exe,
@@ -192,8 +193,8 @@ app = BUNDLE(
     icon='{icon_path}',
     bundle_identifier='br.com.loqquei.printmanagementsystem',
     info_plist={{
-        'CFBundleShortVersionString': '2.0.1',
-        'CFBundleVersion': '2.0.1',
+        'CFBundleShortVersionString': '{__version__}',
+        'CFBundleVersion': '{__version__}',
         'NSHighResolutionCapable': True,
         'NSPrincipalClass': 'NSApplication',
         'NSAppleScriptEnabled': False,
@@ -382,7 +383,7 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.1"
+APP_VERSION = __version__
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências comuns para todas as plataformas

@@ -4,5 +4,5 @@
 """
 Pacote principal da aplicação
 """
-
-__version__ = "2.0.1"
+from __version__ import __version__
+__version__ = __version__

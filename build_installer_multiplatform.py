@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import platform
 from pathlib import Path
+from __version__ import __version__
 
 def print_header(text):
     """Imprime cabeçalho formatado"""
@@ -127,13 +128,14 @@ def create_macos_app_bundle():
 
 def create_proper_info_plist(plist_path):
     """Cria um Info.plist COMPLETO e CORRETO para o macOS"""
+    
     plist_data = {
         'CFBundleExecutable': 'PrintManagementSystem',
         'CFBundleIdentifier': 'com.loqquei.printmanagement',
         'CFBundleName': 'PrintManagementSystem',
         'CFBundleDisplayName': 'Gerenciamento de Impressão LoQQuei',
-        'CFBundleVersion': '2.0.1',
-        'CFBundleShortVersionString': '2.0.1',
+        'CFBundleVersion': __version__,
+        'CFBundleShortVersionString': __version__,
         'CFBundlePackageType': 'APPL',
         'CFBundleSignature': '????',
         'CFBundleInfoDictionaryVersion': '6.0',
@@ -193,7 +195,7 @@ def create_proper_info_plist(plist_path):
 
 def create_info_plist_manual(plist_path, plist_data):
     """Método alternativo para criar Info.plist se plistlib falhar"""
-    plist_content = '''<?xml version="1.0" encoding="UTF-8"?>
+    plist_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -206,9 +208,9 @@ def create_info_plist_manual(plist_path, plist_data):
     <key>CFBundleDisplayName</key>
     <string>Gerenciamento de Impressão LoQQuei</string>
     <key>CFBundleVersion</key>
-    <string>2.0.1</string>
+    <string>{__version__}</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.1</string>
+    <string>{__version__}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
@@ -596,7 +598,7 @@ def build_windows_installer():
         subprocess.run([iscc_exe, "installer.iss"], check=True)
         
         # Verifica se o instalador foi criado
-        installer_path = "Output/Instalador_Gerenciamento_LoQQuei_V2.0.1.exe"
+        installer_path = f"Output/Instalador_Gerenciamento_LoQQuei_V{__version__}.exe"
         if os.path.exists(installer_path):
             size_mb = os.path.getsize(installer_path) / (1024 * 1024)
             print(f"\n✓ Instalador Windows criado com sucesso!")
@@ -707,7 +709,7 @@ window_rect = ((200, 120), (640, 400))
         output_dir = "Output"
         os.makedirs(output_dir, exist_ok=True)
         
-        dmg_path = os.path.join(output_dir, "LoQQuei_PrintManagement_V2.0.1.dmg")
+        dmg_path = os.path.join(output_dir, f"LoQQuei_PrintManagement_V{__version__}.dmg")
         
         if os.path.exists(dmg_path):
             os.remove(dmg_path)
@@ -742,7 +744,7 @@ window_rect = ((200, 120), (640, 400))
 
 def create_info_plist(plist_path):
     """Cria um Info.plist adequado para a aplicação"""
-    plist_content = '''<?xml version="1.0" encoding="UTF-8"?>
+    plist_content = f'''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -755,9 +757,9 @@ def create_info_plist(plist_path):
     <key>CFBundleDisplayName</key>
     <string>Gerenciamento de Impressão LoQQuei</string>
     <key>CFBundleVersion</key>
-    <string>2.0.1</string>
+    <string>{__version__}</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.1</string>
+    <string>{__version__}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleSignature</key>
@@ -912,8 +914,8 @@ StartupNotify=true
             f.write(desktop_content)
         
         # Cria arquivo de controle
-        control_content = '''Package: loqquei-printmanagement
-Version: 2.0.1
+        control_content = f'''Package: loqquei-printmanagement
+Version: {__version__}
 Section: utils
 Priority: optional
 Architecture: amd64
@@ -931,7 +933,7 @@ Description: Sistema de Gerenciamento de Impressão LoQQuei
         output_dir = "Output"
         os.makedirs(output_dir, exist_ok=True)
         
-        deb_path = os.path.join(output_dir, "loqquei-printmanagement_2.0.1_amd64.deb")
+        deb_path = os.path.join(output_dir, f"loqquei-printmanagement_{__version__}_amd64.deb")
         
         # Comando para criar o pacote DEB
         subprocess.run([
@@ -1025,7 +1027,7 @@ exec "${HERE}/usr/bin/PrintManagementSystem" "$@"
         output_dir = "Output"
         os.makedirs(output_dir, exist_ok=True)
         
-        appimage_path = os.path.join(output_dir, "LoQQuei_PrintManagement-2.0.1-x86_64.AppImage")
+        appimage_path = os.path.join(output_dir, f"LoQQuei_PrintManagement-{__version__}-x86_64.AppImage")
         
         # Executa o appimagetool
         subprocess.run([
