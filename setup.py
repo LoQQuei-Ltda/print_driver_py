@@ -211,7 +211,7 @@ app = BUNDLE(exe,
                  'NSHighResolutionCapable': True,
                  'NSRequiresAquaSystemAppearance': False,
              }})
-""".format(icon_path=icon_path, version="2.0.3")
+""".format(icon_path=icon_path, version="2.0.1")
         
         spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 import os
@@ -402,7 +402,7 @@ exe = EXE(
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.3"
+APP_VERSION = "2.0.1"
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências básicas
