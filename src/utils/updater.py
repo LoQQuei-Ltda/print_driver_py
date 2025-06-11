@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Sistema de atualização automática da aplicação
+Sistema de atualização automática da aplicação - Com notificações e permissões melhoradas
 """
 
 import os
@@ -18,6 +18,9 @@ import threading
 import requests
 from datetime import datetime
 import ctypes
+
+# Importa o sistema de notificações da classe PrinterList
+from src.ui.printer_list import SystemNotification
 
 logger = logging.getLogger("PrintManagementSystem.Utils.Updater")
 
@@ -41,6 +44,9 @@ class AppUpdater:
         self.update_info = None
         self.is_checking = False
         self.is_updating = False
+        
+        # Inicializa o sistema de notificações
+        self.notification_system = SystemNotification()
     
     def _get_current_version(self):
         """
@@ -98,6 +104,12 @@ class AppUpdater:
             if not update_info:
                 if not silent:
                     logger.info("Nenhuma atualização disponível")
+                    self.notification_system.show_notification(
+                        "Sistema Atualizado",
+                        f"Você já está usando a versão mais recente ({self.current_version}).",
+                        duration=5,
+                        notification_type="success"
+                    )
                 self.is_checking = False
                 return False
             
@@ -111,6 +123,12 @@ class AppUpdater:
             if not self._is_newer_version(remote_version):
                 if not silent:
                     logger.info(f"Versão atual ({self.current_version}) é a mais recente")
+                    self.notification_system.show_notification(
+                        "Sistema Atualizado",
+                        f"Você já está usando a versão mais recente ({self.current_version}).",
+                        duration=5,
+                        notification_type="success"
+                    )
                 self.is_checking = False
                 return False
             
@@ -334,6 +352,14 @@ class AppUpdater:
             # Caminho completo do arquivo
             file_path = os.path.join(download_dir, filename)
             
+            # Notifica início do download
+            self.notification_system.show_notification(
+                "Baixando Atualização",
+                f"Baixando versão {self.update_info.get('version', 'mais recente')}...",
+                duration=5,
+                notification_type="info"
+            )
+            
             # Baixa o arquivo
             logger.info(f"Baixando atualização de {download_url}")
             response = requests.get(download_url, stream=True, timeout=60)
@@ -358,13 +384,40 @@ class AppUpdater:
                                     logger.debug(f"Download: {progress:.1f}% ({downloaded_size}/{total_size} bytes)")
                 
                 logger.info(f"Atualização baixada para {file_path} ({downloaded_size} bytes)")
+                
+                # Notifica conclusão do download
+                self.notification_system.show_notification(
+                    "Download Concluído",
+                    "A atualização foi baixada e será instalada automaticamente.",
+                    duration=5,
+                    notification_type="success"
+                )
+                
                 return file_path
             else:
                 logger.error(f"Erro ao baixar atualização: código {response.status_code}")
+                
+                # Notifica erro no download
+                self.notification_system.show_notification(
+                    "Erro no Download",
+                    f"Não foi possível baixar a atualização (Erro {response.status_code}).",
+                    duration=10,
+                    notification_type="error"
+                )
+                
                 return None
                 
         except Exception as e:
             logger.error(f"Erro ao baixar atualização: {str(e)}")
+            
+            # Notifica erro no download
+            self.notification_system.show_notification(
+                "Erro no Download",
+                f"Ocorreu um erro ao baixar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             return None
     
     def apply_update(self, update_file=None):
@@ -393,6 +446,14 @@ class AppUpdater:
                 self.is_updating = False
                 return False
             
+            # Notifica início da instalação
+            self.notification_system.show_notification(
+                "Instalando Atualização",
+                f"Instalando versão {self.update_info.get('version', 'mais recente')}. O aplicativo será reiniciado automaticamente.",
+                duration=10,
+                notification_type="info"
+            )
+            
             # Verifica se o arquivo baixado é um executável do Windows
             if update_file.lower().endswith('.exe') and self.system == "Windows":
                 return self._apply_exe_update(update_file)
@@ -402,6 +463,15 @@ class AppUpdater:
             
         except Exception as e:
             logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Ocorreu um erro ao instalar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             self.is_updating = False
             return False
     
@@ -421,13 +491,13 @@ class AppUpdater:
             # Executa o instalador de forma silenciosa
             if self._is_admin():
                 # Se já tem privilégios, executa diretamente
-                subprocess.Popen([exe_file, '/S'], 
+                subprocess.Popen([exe_file, '/S', '/VERYSILENT', '/NORESTART', '/SP-'], 
                                 creationflags=subprocess.CREATE_NO_WINDOW,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
             else:
                 # Executa com privilégios elevados
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_file, '/S', None, 0)
+                ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_file, '/S /VERYSILENT /NORESTART /SP-', None, 0)
             
             logger.info("Instalador de atualização iniciado")
             self.is_updating = False
@@ -477,11 +547,193 @@ import time
 import subprocess
 import tempfile
 import logging
+import stat
 
 # Configura logging secreto para não interferir com o usuário
 log_file = os.path.join(tempfile.gettempdir(), "loqquei_update.log")
 logging.basicConfig(filename=log_file, level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+def set_permissions_recursive(path):
+    try:
+        if os.name == 'nt':  # Windows
+            try:
+                import win32security
+                import win32con
+                import win32api
+                import win32net
+                
+                # Tenta usar a API win32 se disponível
+                try:
+                    # Obtém o SID para o grupo 'Everyone'
+                    everyone, domain, type = win32security.LookupAccountName("", "Everyone")
+                    users, domain, type = win32security.LookupAccountName("", "Users")
+                    
+                    # Define permissões de acesso para diretórios e arquivos
+                    for root, dirs, files in os.walk(path):
+                        for dir_name in dirs:
+                            dir_path = os.path.join(root, dir_name)
+                            try:
+                                # Obtém o DACL do diretório
+                                sd = win32security.GetFileSecurity(dir_path, win32security.DACL_SECURITY_INFORMATION)
+                                dacl = sd.GetSecurityDescriptorDacl()
+                                
+                                # Adiciona permissão de acesso total para 'Everyone'
+                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
+                                                        win32con.GENERIC_ALL, 
+                                                        everyone)
+                                
+                                # Adiciona permissão de acesso total para 'Users'
+                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
+                                                        win32con.GENERIC_ALL, 
+                                                        users)
+                                
+                                sd.SetSecurityDescriptorDacl(1, dacl, 0)
+                                win32security.SetFileSecurity(dir_path, 
+                                                            win32security.DACL_SECURITY_INFORMATION, 
+                                                            sd)
+                                
+                                logging.info(f"Permissões definidas para diretório: {{dir_path}}")
+                            except Exception as e:
+                                logging.warning(f"Erro ao definir permissões para diretório {{dir_path}}: {{e}}")
+                        
+                        for file_name in files:
+                            file_path = os.path.join(root, file_name)
+                            try:
+                                # Obtém o DACL do arquivo
+                                sd = win32security.GetFileSecurity(file_path, win32security.DACL_SECURITY_INFORMATION)
+                                dacl = sd.GetSecurityDescriptorDacl()
+                                
+                                # Adiciona permissão de acesso total para 'Everyone'
+                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
+                                                        win32con.GENERIC_ALL, 
+                                                        everyone)
+                                
+                                # Adiciona permissão de acesso total para 'Users'
+                                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, 
+                                                        win32con.GENERIC_ALL, 
+                                                        users)
+                                
+                                sd.SetSecurityDescriptorDacl(1, dacl, 0)
+                                win32security.SetFileSecurity(file_path, 
+                                                            win32security.DACL_SECURITY_INFORMATION, 
+                                                            sd)
+                                
+                                # Remove flags de somente leitura, se existirem
+                                attrs = win32api.GetFileAttributes(file_path)
+                                if attrs & win32con.FILE_ATTRIBUTE_READONLY:
+                                    win32api.SetFileAttributes(file_path, attrs & ~win32con.FILE_ATTRIBUTE_READONLY)
+                                
+                                logging.info(f"Permissões definidas para arquivo: {{file_path}}")
+                            except Exception as e:
+                                logging.warning(f"Erro ao definir permissões para arquivo {{file_path}}: {{e}}")
+                                
+                    # Define proprietário para o grupo Administrators
+                    try:
+                        admins, domain, type = win32security.LookupAccountName("", "Administrators")
+                        sd = win32security.GetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION)
+                        sd.SetSecurityDescriptorOwner(admins, 0)
+                        win32security.SetFileSecurity(path, win32security.OWNER_SECURITY_INFORMATION, sd)
+                        logging.info(f"Proprietário definido como Administrators para: {{path}}")
+                    except Exception as e:
+                        logging.warning(f"Erro ao definir proprietário: {{e}}")
+                        
+                except Exception as e:
+                    logging.warning(f"Erro ao usar win32security, tentando método alternativo: {{e}}")
+                    
+                    # Método alternativo: usando icacls (disponível no Windows)
+                    try:
+                        # Garante que 'Everyone' tenha acesso total recursivamente
+                        subprocess.run(['icacls', path, '/grant', 'Everyone:(OI)(CI)F', '/T', '/Q'], 
+                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        # Garante que 'Users' tenha acesso total recursivamente
+                        subprocess.run(['icacls', path, '/grant', 'Users:(OI)(CI)F', '/T', '/Q'], 
+                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        # Remove atributos somente leitura recursivamente
+                        subprocess.run(['attrib', '-R', f"{{path}}\\*.*", '/S', '/D'], 
+                                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        
+                        logging.info(f"Permissões definidas via icacls para: {{path}}")
+                    except Exception as e:
+                        logging.warning(f"Erro ao usar icacls: {{e}}")
+            
+            except ImportError:
+                logging.warning("win32security não disponível, usando icacls")
+                
+                # Usando icacls (disponível no Windows)
+                try:
+                    # Garante que 'Everyone' tenha acesso total recursivamente
+                    subprocess.run(['icacls', path, '/grant', 'Everyone:(OI)(CI)F', '/T', '/Q'], 
+                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    # Garante que 'Users' tenha acesso total recursivamente
+                    subprocess.run(['icacls', path, '/grant', 'Users:(OI)(CI)F', '/T', '/Q'], 
+                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    # Remove atributos somente leitura recursivamente
+                    subprocess.run(['attrib', '-R', f"{{path}}\\*.*", '/S', '/D'], 
+                                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    
+                    logging.info(f"Permissões definidas via icacls para: {{path}}")
+                except Exception as e:
+                    logging.warning(f"Erro ao usar icacls: {{e}}")
+                    
+        else:  # Unix/Linux/Mac
+            # Define permissões 755 para diretórios e 644/755 para arquivos
+            for root, dirs, files in os.walk(path):
+                for dir_name in dirs:
+                    try:
+                        dir_path = os.path.join(root, dir_name)
+                        os.chmod(dir_path, 0o755)  # rwxr-xr-x
+                        logging.info(f"Permissões definidas para diretório: {{dir_path}}")
+                    except Exception as e:
+                        logging.warning(f"Erro ao definir permissões para diretório {{dir_path}}: {{e}}")
+                
+                for file_name in files:
+                    try:
+                        file_path = os.path.join(root, file_name)
+                        if os.access(file_path, os.X_OK):
+                            os.chmod(file_path, 0o755)  # rwxr-xr-x para executáveis
+                        else:
+                            os.chmod(file_path, 0o644)  # rw-r--r-- para arquivos normais
+                        logging.info(f"Permissões definidas para arquivo: {{file_path}}")
+                    except Exception as e:
+                        logging.warning(f"Erro ao definir permissões para arquivo {{file_path}}: {{e}}")
+                        
+            # Tenta definir o proprietário para o usuário/grupo padrão se estiver rodando como root
+            if os.geteuid() == 0:
+                try:
+                    import pwd
+                    import grp
+                    
+                    # Obtém UID/GID do usuário que provavelmente iniciou o app (não root)
+                    username = os.environ.get('SUDO_USER') or os.environ.get('USER') or 'nobody'
+                    uid = pwd.getpwnam(username).pw_uid
+                    gid = pwd.getpwnam(username).pw_gid
+                    
+                    # Aplica recursivamente
+                    for root, dirs, files in os.walk(path):
+                        for dir_name in dirs:
+                            try:
+                                dir_path = os.path.join(root, dir_name)
+                                os.chown(dir_path, uid, gid)
+                            except:
+                                pass
+                                
+                        for file_name in files:
+                            try:
+                                file_path = os.path.join(root, file_name)
+                                os.chown(file_path, uid, gid)
+                            except:
+                                pass
+                                
+                    logging.info(f"Proprietário definido como {{username}} para: {{path}}")
+                except Exception as e:
+                    logging.warning(f"Erro ao definir proprietário: {{e}}")
+    except Exception as e:
+        logging.error(f"Erro ao definir permissões recursivas: {{e}}")
 
 def apply_update():
     try:
@@ -504,6 +756,10 @@ def apply_update():
         with zipfile.ZipFile(update_file, 'r') as zip_ref:
             zip_ref.extractall(temp_dir)
         
+        # Define permissões adequadas para os arquivos extraídos
+        logging.info("Definindo permissões para os arquivos extraídos...")
+        set_permissions_recursive(temp_dir)
+        
         # Copia os arquivos para o diretório da aplicação
         logging.info("Copiando arquivos para o diretório da aplicação")
         for root, dirs, files in os.walk(temp_dir):
@@ -524,6 +780,10 @@ def apply_update():
                     except Exception as e:
                         logging.warning(f"Tentativa {{attempt+1}} falhou para {{rel_path}}: {{str(e)}}")
                         time.sleep(1)
+        
+        # Define permissões adequadas para os arquivos copiados
+        logging.info("Definindo permissões para os arquivos instalados...")
+        set_permissions_recursive(app_dir)
         
         # Reinicia a aplicação se estiver em execução
         logging.info("Tentando reiniciar a aplicação")
@@ -664,12 +924,13 @@ done
                 self.is_updating = False
                 return False
     
-    def check_and_update(self, silent=True):
+    def check_and_update(self, silent=True, auto_apply=True):
         """
         Verifica e aplica atualizações automaticamente
         
         Args:
             silent (bool): Se True, não exibe notificações de "sem atualizações"
+            auto_apply (bool): Se True, aplica automaticamente a atualização
             
         Returns:
             bool: True se a atualização foi iniciada
@@ -679,15 +940,76 @@ done
             try:
                 # Verifica se há atualizações
                 if self.check_for_update(silent):
-                    # Aplica a atualização
-                    self.apply_update()
+                    remote_version = self.update_info.get('version', 'nova versão')
+                    
+                    # Notificação sobre atualização disponível
+                    self.notification_system.show_notification(
+                        "Atualização Disponível",
+                        f"Nova versão ({remote_version}) será instalada automaticamente.",
+                        duration=10,
+                        notification_type="info"
+                    )
+                    
+                    if auto_apply:
+                        # Aplica a atualização automaticamente
+                        return self.apply_update()
                     return True
                 return False
             except Exception as e:
                 logger.error(f"Erro na thread de atualização: {str(e)}")
+                
+                # Notifica erro
+                self.notification_system.show_notification(
+                    "Erro na Atualização",
+                    f"Ocorreu um erro ao processar a atualização: {str(e)}",
+                    duration=10,
+                    notification_type="error"
+                )
+                
                 return False
         
         # Inicia a thread
         t = threading.Thread(target=update_thread, daemon=True)
         t.start()
         return True
+
+# Função para configurar verificação periódica de atualizações
+def setup_auto_updater(config, api_client):
+    """
+    Configura o verificador automático de atualizações
+    
+    Args:
+        config: Configuração da aplicação
+        api_client: Cliente da API
+        
+    Returns:
+        AppUpdater: Instância do gerenciador de atualizações
+    """
+    updater = AppUpdater(config, api_client)
+    
+    # Inicia a verificação de atualizações em uma thread separada
+    # para não bloquear a inicialização da aplicação
+    def delayed_check():
+        import time
+        # Aguarda a inicialização completa da aplicação
+        time.sleep(30)
+        # Verifica se há atualizações
+        updater.check_and_update(silent=True, auto_apply=True)
+    
+    check_thread = threading.Thread(target=delayed_check, daemon=True)
+    check_thread.start()
+    
+    # Configura verificação periódica de atualizações (a cada 4 horas)
+    def periodic_check():
+        import time
+        while True:
+            # Aguarda 4 horas
+            time.sleep(4 * 60 * 60)  # 4 horas em segundos
+            # Verifica se há atualizações
+            updater.check_and_update(silent=True, auto_apply=True)
+    
+    periodic_thread = threading.Thread(target=periodic_check, daemon=True)
+    periodic_thread.daemon = True
+    periodic_thread.start()
+    
+    return updater

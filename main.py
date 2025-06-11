@@ -152,6 +152,22 @@ def main():
         # Inicializa a configuração da aplicação
         config = AppConfig(data_dir)
         
+        api_client = None
+        try:
+            from src.api.client import APIClient
+            api_client = APIClient(config)
+            logger.info("Cliente API inicializado")
+        except Exception as e:
+            logger.warning(f"Não foi possível inicializar o cliente API: {str(e)}")
+        
+        # Configura o atualizador automático
+        try:
+            from src.utils.updater import setup_auto_updater
+            updater = setup_auto_updater(config, api_client)
+            logger.info("Sistema de atualização automática inicializado")
+        except Exception as e:
+            logger.warning(f"Não foi possível inicializar o atualizador automático: {str(e)}")
+
         # Configura diretórios para múltiplos usuários (especialmente em servidores)
         if config.get("multi_user_mode", True):
             # EXECUTAR EM THREAD SEPARADA PARA NÃO ATRASAR INICIALIZAÇÃO
