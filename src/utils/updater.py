@@ -56,8 +56,8 @@ class AppUpdater:
             str: Versão atual
         """
         try:
-            # Tenta ler a versão do arquivo __init__.py
-            init_path = os.path.join(self.app_root, "src", "__init__.py")
+            # Tenta ler a versão do arquivo __version__.py
+            init_path = os.path.join(self.app_root, "__version__.py")
             if os.path.exists(init_path):
                 with open(init_path, 'r', encoding='utf-8') as f:
                     for line in f:
