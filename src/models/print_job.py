@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Modelo para trabalhos de impressão
+Modelo para trabalhos de impressão - VERSÃO CORRIGIDA
 """
 
 import os
@@ -70,7 +70,7 @@ class PrintJob:
         )
     
     def to_dict(self):
-        """Converte para dicionário para armazenamento"""
+        """Converte para dicionário para armazenamento - VERSÃO CORRIGIDA"""
         return {
             "job_id": self.job_id,
             "document_path": self.document_path,
@@ -79,9 +79,13 @@ class PrintJob:
             "printer_id": self.printer_id,
             "printer_ip": self.printer_ip,
             "status": self.status.value,
+            # === CORREÇÃO: Salva em ambos os formatos para compatibilidade ===
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            # Formato antigo para compatibilidade
+            "start_time": self.created_at.isoformat() if self.created_at else None,
+            "end_time": self.completed_at.isoformat() if self.completed_at else None,
             "total_pages": self.total_pages,
             "completed_pages": self.completed_pages,
             "options": self.options,
@@ -91,7 +95,7 @@ class PrintJob:
     @classmethod
     def from_dict(cls, data):
         """
-        Cria um trabalho de impressão a partir de um dicionário
+        Cria um trabalho de impressão a partir de um dicionário - VERSÃO CORRIGIDA
         
         Args:
             data: Dicionário com dados do trabalho
@@ -99,10 +103,37 @@ class PrintJob:
         Returns:
             PrintJob: Trabalho de impressão
         """
-        # Converte strings de data para objetos datetime
-        created_at = datetime.fromisoformat(data.get("created_at")) if data.get("created_at") else datetime.now()
-        started_at = datetime.fromisoformat(data.get("started_at")) if data.get("started_at") else None
-        completed_at = datetime.fromisoformat(data.get("completed_at")) if data.get("completed_at") else None
+        # === CORREÇÃO: Mapeia corretamente os campos de data do config ===
+        
+        # Para created_at: usa 'created_at' primeiro, depois 'start_time'
+        created_at = None
+        date_field = data.get("created_at") or data.get("start_time")
+        if date_field:
+            try:
+                created_at = datetime.fromisoformat(date_field)
+            except (ValueError, TypeError):
+                created_at = datetime(2024, 1, 1, 0, 0, 0)
+        else:
+            created_at = datetime(2024, 1, 1, 0, 0, 0)
+        
+        # Para started_at: usa 'started_at' primeiro, depois 'start_time' se status é processing/completed/failed/canceled
+        started_at = None
+        started_field = data.get("started_at") or data.get("start_time")
+        status_str = data.get("status", "pending")
+        if started_field and status_str in ["processing", "completed", "failed", "canceled"]:
+            try:
+                started_at = datetime.fromisoformat(started_field)
+            except (ValueError, TypeError):
+                started_at = None
+        
+        # Para completed_at: usa 'completed_at' primeiro, depois 'end_time' se status é completed/failed/canceled
+        completed_at = None
+        completed_field = data.get("completed_at") or data.get("end_time")
+        if completed_field and status_str in ["completed", "failed", "canceled"]:
+            try:
+                completed_at = datetime.fromisoformat(completed_field)
+            except (ValueError, TypeError):
+                completed_at = None
         
         # Converte string de status para enum
         status_str = data.get("status", "pending")
