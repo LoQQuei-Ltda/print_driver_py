@@ -35,6 +35,7 @@ import requests
 import re
 import unicodedata
 import concurrent.futures
+from PIL import Image
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
