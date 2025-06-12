@@ -162,6 +162,48 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         # Ajusta o tamanho virtual para acomodar todo o conteúdo
         self.FitInside()
     
+    def _is_epson_l3250(self, printer):
+        """Verifica se a impressora é uma Epson L3250 (sem suporte de impressão)"""
+        if not printer:
+            return False
+        
+        # Verifica no nome da impressora
+        name = printer.get('name', '') or ''
+        if 'l3250' in name.lower() or 'l-3250' in name.lower():
+            return True
+        
+        # Verifica no modelo
+        model = printer.get('model', '') or ''
+        if 'l3250' in model.lower() or 'l-3250' in model.lower():
+            return True
+        
+        # Verifica no atributo printer-make-and-model (IPP)
+        make_model = printer.get('printer-make-and-model', '') or ''
+        if 'l3250' in make_model.lower() or 'l-3250' in make_model.lower():
+            return True
+        
+        return False
+    
+    def _filter_valid_printers(self, printers):
+        """Filtra impressoras válidas (com IP e com suporte)"""
+        if not printers:
+            return []
+        
+        valid_printers = []
+        for printer in printers:
+            # Verifica se tem IP
+            ip = printer.get('ip', '')
+            if not ip or ip.strip() == '':
+                continue
+            
+            # Verifica se não é Epson L3250
+            if self._is_epson_l3250(printer):
+                continue
+            
+            valid_printers.append(printer)
+        
+        return valid_printers
+
     def _customize_scrollbar_colors(self):
         """Personaliza as cores da scrollbar para tema escuro"""
         try:
@@ -495,7 +537,8 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         
         # Obtém lista de impressoras
         printers = self.config.get_printers()
-        printer_names = [p.get('name', '') for p in printers] if printers else []
+        valid_printers = self._filter_valid_printers(printers)
+        printer_names = [p.get('name', '') for p in valid_printers] if valid_printers else []
         
         # Se não tiver impressoras, adiciona uma mensagem
         if not printer_names:
@@ -603,15 +646,23 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         # Carrega status de auto-impressão
         self.auto_print_checkbox.SetValue(self.auto_print_enabled)
         
-        # Carrega impressora padrão
+        # Carrega impressora padrã
         printers = self.config.get_printers()
-        printer_names = [p.get('name', '') for p in printers] if printers else []
+        valid_printers = self._filter_valid_printers(printers)
+        printer_names = [p.get('name', '') for p in valid_printers]
         
         if printer_names and self.default_printer:
             for i, name in enumerate(printer_names):
                 if name == self.default_printer:
                     self.printer_choice.SetSelection(i)
                     break
+            else:
+                # Se a impressora padrão não está na lista válida, limpa a seleção
+                if printer_names and printer_names[0] != "Nenhuma impressora válida encontrada":
+                    self.printer_choice.SetSelection(0)
+                    self.default_printer = printer_names[0]
+                else:
+                    self.default_printer = ""
         
         # Carrega opções de impressão
         if self.auto_print_options:
@@ -691,7 +742,7 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
                     del busy
                     
                     wx.MessageBox("Nenhuma impressora encontrada na rede. Verifique sua conexão.", 
-                               "Aviso", wx.OK | wx.ICON_WARNING)
+                            "Aviso", wx.OK | wx.ICON_WARNING)
                     return
             
             # Salva as configurações atuais antes de recriar a UI
@@ -708,13 +759,25 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
             self.Layout()
             self.FitInside()
             
-            wx.MessageBox("Lista de impressoras atualizada com sucesso!", 
-                       "Informação", wx.OK | wx.ICON_INFORMATION)
+            # Verifica quantas impressoras válidas foram encontradas
+            printers = self.config.get_printers()
+            valid_printers = self._filter_valid_printers(printers)
+            
+            if valid_printers:
+                wx.MessageBox(f"Lista de impressoras atualizada com sucesso!\n\n"
+                            f"{len(valid_printers)} impressoras válidas encontradas "
+                            f"(com IP e suporte de impressão).", 
+                        "Informação", wx.OK | wx.ICON_INFORMATION)
+            else:
+                wx.MessageBox("Nenhuma impressora válida encontrada.\n\n"
+                            "Impressoras sem IP ou modelo Epson L3250 não são "
+                            "suportadas para auto-impressão.", 
+                        "Aviso", wx.OK | wx.ICON_WARNING)
             
         except Exception as e:
             logger.error(f"Erro ao atualizar impressoras: {str(e)}")
             wx.MessageBox(f"Erro ao atualizar impressoras: {str(e)}", 
-                       "Erro", wx.OK | wx.ICON_ERROR)
+                    "Erro", wx.OK | wx.ICON_ERROR)
     
     def _save_current_values(self):
         """Salva os valores atuais nas variáveis de instância"""
@@ -723,10 +786,13 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
         # Salva a impressora selecionada
         printer_index = self.printer_choice.GetSelection()
         printers = self.config.get_printers()
+        valid_printers = self._filter_valid_printers(printers)
         
-        if printer_index != wx.NOT_FOUND and printers and printer_index < len(printers):
-            selected_printer = printers[printer_index]
+        if printer_index != wx.NOT_FOUND and valid_printers and printer_index < len(valid_printers):
+            selected_printer = valid_printers[printer_index]
             self.default_printer = selected_printer.get('name', '')
+        else:
+            self.default_printer = ""  # Limpa se não há seleção válida
         
         # Salva as opções de impressão
         # Modo de cor
@@ -765,6 +831,12 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
     
     def on_save(self, event):
         """Salva as configurações"""
+        # Função helper local
+        def _is_epson_l3250_local(printer_name):
+            if not printer_name:
+                return False
+            return 'l3250' in printer_name.lower() or 'l-3250' in printer_name.lower()
+        
         # Salva os valores nas variáveis de instância
         self._save_current_values()
         
@@ -774,6 +846,16 @@ class AutoPrintConfigPanel(wx.ScrolledWindow):
             wx.MessageBox(
                 "Não há impressoras disponíveis. A auto-impressão não funcionará sem impressoras configuradas.",
                 "Aviso",
+                wx.OK | wx.ICON_WARNING
+            )
+            return
+        
+        # Verifica se a impressora padrão é Epson L3250
+        if self.auto_print_enabled and self.default_printer and _is_epson_l3250_local(self.default_printer):
+            wx.MessageBox(
+                "A impressora padrão selecionada é uma Epson L3250, que não possui suporte de impressão neste sistema. "
+                "Por favor, selecione uma impressora diferente para auto-impressão.",
+                "Impressora sem suporte",
                 wx.OK | wx.ICON_WARNING
             )
             return

@@ -899,20 +899,36 @@ ST: ssdp:all
                 # Garante status online
                 printer_info['is_online'] = True
                 
-                # CRÍTICO: Enriquecimento IPP para impressoras com porta 631
-                if 631 in printer_info.get('ports', []) and HAS_PYIPP:
-                    logger.debug(f"Enriquecendo com IPP: {ip}")
-                    self._enrich_with_ipp_details(printer_info)
+                # ADICIONAR AQUI: Verificação para Epson L3250
+                printer_name = printer_info.get('name', '').lower()
+                printer_model = printer_info.get('printer-make-and-model', '').lower()
+                
+                if ('l3250' in printer_name or 'l-3250' in printer_name or 
+                    'l3250' in printer_model or 'l-3250' in printer_model):
+                    # Marca como sem suporte mas online
+                    printer_info['is_ready'] = False
+                    printer_info['printer-state'] = "Sem suporte de impressão"
+                    logger.info(f"Epson L3250 detectada em {ip} - marcada como sem suporte")
                 else:
-                    # Se não tem IPP, assume que está pronta
-                    printer_info.setdefault('is_ready', True)
+                    # CRÍTICO: Enriquecimento IPP para impressoras com porta 631
+                    if 631 in printer_info.get('ports', []) and HAS_PYIPP:
+                        logger.debug(f"Enriquecendo com IPP: {ip}")
+                        self._enrich_with_ipp_details(printer_info)
+                    else:
+                        # Se não tem IPP, assume que está pronta
+                        printer_info.setdefault('is_ready', True)
                 
                 # Log do status final
-                ready_status = "🟢 VERDE" if printer_info.get('is_ready') else "🟡 AMARELA"
+                if ('l3250' in printer_name or 'l-3250' in printer_name or 
+                    'l3250' in printer_model or 'l-3250' in printer_model):
+                    ready_status = "🔘 SEM SUPORTE"
+                else:
+                    ready_status = "🟢 VERDE" if printer_info.get('is_ready') else "🟡 AMARELA"
+                
                 method = printer_info.get('discovery_method', 'Unknown')
                 model = printer_info.get('printer-make-and-model') or printer_info.get('model', '')
                 logger.info(f"Processada: {ip} via {method} → {ready_status}" + 
-                           (f" ({model})" if model else ""))
+                        (f" ({model})" if model else ""))
                 
                 unique_printers.append(printer_info)
         
@@ -920,23 +936,27 @@ ST: ssdp:all
         unique_printers.sort(key=lambda p: socket.inet_aton(p['ip']))
         
         # Log de resumo
-        green_count = sum(1 for p in unique_printers if p.get('is_ready', False))
-        yellow_count = len(unique_printers) - green_count
+        green_count = sum(1 for p in unique_printers if p.get('is_ready', False) and not self._is_l3250_printer(p))
+        yellow_count = sum(1 for p in unique_printers if not p.get('is_ready', False) and not self._is_l3250_printer(p))
+        no_support_count = sum(1 for p in unique_printers if self._is_l3250_printer(p))
         
         logger.info(f"RESUMO FINAL: {len(unique_printers)} impressoras")
         logger.info(f"  🟢 VERDES (prontas): {green_count}")
         logger.info(f"  🟡 AMARELAS (não prontas): {yellow_count}")
-        
-        # Debug detalhado das amarelas
-        if yellow_count > 0:
-            logger.warning(f"IMPRESSORAS AMARELAS DETECTADAS:")
-            for p in unique_printers:
-                if not p.get('is_ready', False):
-                    logger.warning(f"  • {p['ip']} - {p.get('name', 'Sem nome')}")
-                    logger.warning(f"    Estado: {p.get('printer-state', 'N/A')}")
-                    logger.warning(f"    Método: {p.get('discovery_method', 'N/A')}")
+        logger.info(f"  🔘 SEM SUPORTE (L3250): {no_support_count}")
         
         return unique_printers
+
+    def _is_l3250_printer(self, printer_info):
+        """Verifica se é uma impressora Epson L3250"""
+        if not printer_info:
+            return False
+        
+        printer_name = printer_info.get('name', '').lower()
+        printer_model = printer_info.get('printer-make-and-model', '').lower()
+        
+        return ('l3250' in printer_name or 'l-3250' in printer_name or 
+                'l3250' in printer_model or 'l-3250' in printer_model)
     
     def _enrich_with_ipp_details(self, printer_info):
         """
