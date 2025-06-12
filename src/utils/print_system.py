@@ -1284,74 +1284,58 @@ startxref
         return False
 
     def _verify_ipp_response_epson_compatible(self, response):
-        """Verificação de resposta IPP otimizada para impressoras EPSON"""
+        """Verificação RIGOROSA da resposta IPP - CORRIGIDA"""
         try:
-            # === CORREÇÃO ESPECÍFICA PARA EPSON: Muito mais permissiva ===
+            logger.debug(f"=== VERIFICAÇÃO RIGOROSA IPP ===")
+            logger.debug(f"Status HTTP: {response.status_code}")
+            logger.debug(f"Tamanho da resposta: {len(response.content)} bytes")
             
-            # Se a resposta está vazia, considera sucesso para Epson (algumas retornam vazio quando OK)
-            if len(response.content) == 0:
-                logger.debug("✓ EPSON: Resposta vazia - considerado sucesso para compatibilidade")
-                return True
+            # REQUISITO 1: HTTP deve ser 200
+            if response.status_code != 200:
+                logger.debug(f"✗ FALHA: HTTP {response.status_code} (requerido: 200)")
+                return False
             
-            # Se tem conteúdo, tenta verificar
-            if len(response.content) >= 8:
-                version = struct.unpack('>H', response.content[0:2])[0]
-                status_code = struct.unpack('>H', response.content[2:4])[0]
-                request_id = struct.unpack('>I', response.content[4:8])[0]
-                
-                logger.debug(f"EPSON IPP Response: version=0x{version:04X}, status=0x{status_code:04X}, request_id={request_id}")
-                
-                # === CORREÇÃO: Códigos de sucesso mais amplos para EPSON ===
-                success_codes = [
-                    0x0000,  # successful-ok
-                    0x0001,  # successful-ok-ignored-or-substituted-attributes
-                    0x0002,  # successful-ok-conflicting-attributes
-                ]
-                
-                # === CORREÇÃO: Códigos adicionais que Epson considera "sucesso" ===
-                epson_acceptable_codes = [
-                    0x0400,  # client-error-bad-request (mas Epson pode processar mesmo assim)
-                    0x040A,  # document-format-not-supported (mas Epson converte automaticamente)
-                    0x040B,  # attributes-or-values-not-supported (mas Epson ignora e processa)
-                ]
-                
-                if status_code in success_codes:
-                    logger.debug(f"✓ EPSON sucesso CONFIRMADO: 0x{status_code:04X}")
-                    return True
-                elif status_code in epson_acceptable_codes:
-                    # Para Epson, verifica se parece que foi processado
-                    response_content = response.content.lower()
-                    if (b'job-id' in response_content or 
-                        b'job-uri' in response_content or 
-                        len(response.content) > 50):  # Resposta substancial indica processamento
-                        logger.debug(f"✓ EPSON sucesso INFERIDO: 0x{status_code:04X} (tem indicadores de processamento)")
-                        return True
-                    else:
-                        logger.debug(f"⚠ EPSON status aceitável mas sem indicadores: 0x{status_code:04X}")
-                        return False
-                else:
-                    logger.debug(f"✗ EPSON falha: 0x{status_code:04X}")
-                    return False
-            elif len(response.content) > 0:
-                # === CORREÇÃO: Se tem conteúdo mas não é IPP padrão, verifica se parece sucesso ===
-                content_str = response.content.decode('utf-8', errors='ignore').lower()
-                if ('success' in content_str or 'ok' in content_str or 
-                    'job' in content_str or 'print' in content_str):
-                    logger.debug("✓ EPSON: Resposta não-IPP mas indica sucesso")
-                    return True
-                else:
-                    logger.debug("✗ EPSON: Resposta não-IPP sem indicadores de sucesso")
-                    return False
-            else:
-                # === CORREÇÃO: Resposta vazia para EPSON é considerada sucesso ===
-                logger.debug("✓ EPSON: Resposta vazia - considerado sucesso")
-                return True
-                    
-        except Exception as e:
-            logger.debug(f"Erro ao verificar resposta EPSON IPP: {e}")
-            # === CORREÇÃO: Em caso de erro na verificação, considera sucesso para EPSON ===
-            logger.debug("✓ EPSON: Erro na verificação - considerado sucesso por compatibilidade")
+            # REQUISITO 2: Resposta deve ter conteúdo mínimo IPP
+            if len(response.content) < 8:
+                logger.debug(f"✗ FALHA: Resposta muito pequena ({len(response.content)} bytes)")
+                return False
+            
+            # REQUISITO 3: Deve ter estrutura IPP válida
+            version = struct.unpack('>H', response.content[0:2])[0]
+            status_code = struct.unpack('>H', response.content[2:4])[0]
+            request_id = struct.unpack('>I', response.content[4:8])[0]
+            
+            logger.debug(f"IPP: version=0x{version:04X}, status=0x{status_code:04X}, request_id={request_id}")
+            
+            # REQUISITO 4: Status deve ser de SUCESSO REAL
+            success_codes = [
+                0x0000,  # successful-ok
+                0x0001,  # successful-ok-ignored-or-substituted-attributes
+                0x0002,  # successful-ok-conflicting-attributes
+            ]
+            
+            if status_code not in success_codes:
+                logger.debug(f"✗ FALHA: Status IPP 0x{status_code:04X} não é sucesso")
+                return False
+            
+            # REQUISITO 5: DEVE ter job-id na resposta (prova de que foi aceito)
+            response_content = response.content.lower()
+            if b'job-id' not in response_content:
+                logger.debug(f"✗ FALHA CRÍTICA: Sem job-id na resposta - impressão NÃO foi aceita")
+                logger.debug(f"Conteúdo: {response.content[:200]}...")
+                return False
+            
+            # REQUISITO 6: Verificação adicional de conteúdo válido
+            if len(response.content) < 50:  # Resposta muito pequena para ter job-id real
+                logger.debug(f"✗ FALHA: Resposta muito pequena para conter job-id válido")
+                return False
+            
+            logger.debug(f"✓ SUCESSO CONFIRMADO: Status 0x{status_code:04X} com job-id presente")
             return True
+            
+        except Exception as e:
+            logger.debug(f"✗ ERRO na verificação IPP: {e}")
+            return False
 
     def _is_epson_printer(self, printer_ip: str) -> bool:
         """Detecta se é uma impressora Epson que precisa de tratamento especial"""
@@ -1662,6 +1646,12 @@ startxref
                 
                 # === CORREÇÃO ESPECÍFICA PARA EPSON: Usa método otimizado ===
                 success = self._send_ipp_request_with_extended_timeout(url, attributes, page_job.jpg_data)
+
+                # CORREÇÃO: Log detalhado do resultado
+                if success:
+                    logger.info(f"✓ Página {page_job.page_num} CONFIRMADA com job-id válido")
+                else:
+                    logger.warning(f"✗ Página {page_job.page_num} REJEITADA (sem job-id ou erro)")
                 
                 if success:
                     # Só salva no cache na primeira página da primeira cópia
@@ -1694,7 +1684,7 @@ startxref
         return False
 
     def _send_ipp_request_with_extended_timeout(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
-        """Envio IPP com timeout estendido e otimizações específicas para EPSON"""
+        """Envio IPP com verificação RIGOROSA de sucesso"""
         # Corrige URL para protocolo correto
         if self.use_https and url.startswith("http:"):
             url = url.replace("http:", "https:", 1)
@@ -1708,11 +1698,11 @@ startxref
                 'Content-Type': 'application/ipp',
                 'Accept': 'application/ipp',
                 'Connection': 'close',
-                'User-Agent': 'PDF-IPP-Epson-Compatible/1.0',
+                'User-Agent': 'PDF-IPP-Rigorous/1.0',
                 'Content-Length': str(len(ipp_request))
             }
             
-            # === CORREÇÃO ESPECÍFICA PARA EPSON: Timeout ainda maior ===
+            # Timeout específico
             timeout = 60 if self._is_epson_printer(getattr(self, 'printer_ip', '')) else 45
             
             logger.debug(f"Enviando {len(document_data)} bytes para {url} (timeout: {timeout}s)")
@@ -1721,7 +1711,7 @@ startxref
                 url, 
                 data=ipp_request, 
                 headers=headers, 
-                timeout=timeout,  # Timeout específico para Epson
+                timeout=timeout,
                 verify=False,
                 allow_redirects=False,
                 stream=False
@@ -1730,11 +1720,24 @@ startxref
             logger.debug(f"HTTP Status recebido: {response.status_code}")
             
             if response.status_code == 200:
-                # === CORREÇÃO ESPECÍFICA PARA EPSON: Verificação mais permissiva ===
-                return self._verify_ipp_response_epson_compatible(response)
-            elif response.status_code in [202, 204]:  # Aceita também códigos de "aceito"
-                logger.debug(f"HTTP {response.status_code} - trabalho aceito")
-                return True
+                # USA VERIFICAÇÃO RIGOROSA
+                success = self._verify_ipp_response_epson_compatible(response)
+                
+                if success:
+                    logger.info(f"✓ IMPRESSÃO CONFIRMADA: job-id encontrado na resposta")
+                else:
+                    logger.warning(f"✗ FALSO SUCESSO: HTTP 200 mas sem job-id válido")
+                
+                return success
+            elif response.status_code in [202, 204]:
+                logger.debug(f"HTTP {response.status_code} - verificando se há job-id")
+                # Mesmo para 202/204, deve ter job-id para confirmar
+                if b'job-id' in response.content.lower():
+                    logger.info(f"✓ HTTP {response.status_code} com job-id confirmado")
+                    return True
+                else:
+                    logger.warning(f"✗ HTTP {response.status_code} sem job-id - rejeitado")
+                    return False
             else:
                 logger.debug(f"HTTP Status rejeitado: {response.status_code}")
                 return False
@@ -1749,6 +1752,62 @@ startxref
             logger.debug(f"Erro geral IPP: {e}")
             return False
 
+    def _validate_print_job_acceptance(self, response):
+        """
+        Validação final para confirmar que a impressora REALMENTE aceitou o trabalho
+        
+        Returns:
+            bool: True apenas se há evidência concreta de aceitação
+        """
+        try:
+            # Log detalhado da resposta
+            logger.debug("=== VALIDAÇÃO FINAL DE ACEITAÇÃO ===")
+            logger.debug(f"Resposta completa ({len(response.content)} bytes):")
+            
+            # Mostra primeiros 200 bytes em hex para debug
+            hex_preview = response.content[:200].hex()
+            logger.debug(f"HEX: {hex_preview}")
+            
+            # Mostra como string (ignorando erros)
+            try:
+                str_preview = response.content[:200].decode('utf-8', errors='ignore')
+                logger.debug(f"STRING: {repr(str_preview)}")
+            except:
+                pass
+            
+            # Procura por job-id de forma mais rigorosa
+            job_id_patterns = [
+                b'job-id',
+                b'job-uri',
+                b'job-state',
+                b'job-uuid'
+            ]
+            
+            found_job_indicators = []
+            for pattern in job_id_patterns:
+                if pattern in response.content:
+                    found_job_indicators.append(pattern.decode())
+            
+            if found_job_indicators:
+                logger.info(f"✓ INDICADORES DE JOB ENCONTRADOS: {found_job_indicators}")
+                
+                # Validação adicional: deve ter pelo menos 30 bytes após encontrar job-id
+                job_id_pos = response.content.find(b'job-id')
+                if job_id_pos >= 0 and len(response.content) > job_id_pos + 30:
+                    logger.info("✓ VALIDAÇÃO FINAL: Job-id com dados suficientes")
+                    return True
+                else:
+                    logger.warning("✗ Job-id encontrado mas dados insuficientes")
+                    return False
+            else:
+                logger.warning("✗ VALIDAÇÃO FINAL: Nenhum indicador de job encontrado")
+                logger.warning("✗ CONCLUSÃO: Impressora rejeitou o trabalho silenciosamente")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Erro na validação final: {e}")
+            return False
+        
     def _verify_ipp_response_ultra_permissive(self, response):
         """Verificação inteligente da resposta IPP (não mais ultra permissiva)"""
         try:
