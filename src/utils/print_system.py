@@ -3083,7 +3083,7 @@ class PrintOptionsDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para cancelar
-        cancel_button = wx.Button(self.panel, wx.ID_CANCEL, label="Cancelar", size=(-1, 36))
+        cancel_button = wx.Button(self.panel, wx.ID_CANCEL, label="Cancelar", size=(-1, 36), style=wx.BORDER_NONE)
         cancel_button.SetBackgroundColour(wx.Colour(60, 60, 60))
         cancel_button.SetForegroundColour(self.colors["text_color"])
         
@@ -3100,7 +3100,7 @@ class PrintOptionsDialog(wx.Dialog):
         cancel_button.Bind(wx.EVT_LEAVE_WINDOW, on_cancel_leave)
         
         # Botão para imprimir
-        print_button = wx.Button(self.panel, wx.ID_OK, label="Imprimir", size=(-1, 36))
+        print_button = wx.Button(self.panel, wx.ID_OK, label="Imprimir", size=(-1, 36), style=wx.BORDER_NONE)
         print_button.SetBackgroundColour(self.colors["accent_color"])
         print_button.SetForegroundColour(self.colors["text_color"])
         
