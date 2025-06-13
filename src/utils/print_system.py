@@ -177,11 +177,69 @@ logger = logging.getLogger(__name__)
 
 class PopplerManager:
     @staticmethod
+    def show_macos_installation_instructions():
+        """Mostra instruções específicas de instalação para macOS"""
+        logger.info("=== INSTRUÇÕES DE INSTALAÇÃO PARA MACOS ===")
+        logger.info("O Poppler é necessário para conversão de PDF para JPG.")
+        logger.info("")
+        logger.info("OPÇÃO 1 - Homebrew (Recomendado):")
+        logger.info("1. Instale o Homebrew se não tiver: https://brew.sh")
+        logger.info("2. Execute: brew install poppler")
+        logger.info("")
+        logger.info("OPÇÃO 2 - MacPorts:")
+        logger.info("1. Instale o MacPorts: https://www.macports.org")
+        logger.info("2. Execute: sudo port install poppler")
+        logger.info("")
+        logger.info("OPÇÃO 3 - Conda:")
+        logger.info("1. Execute: conda install -c conda-forge poppler")
+        logger.info("")
+        logger.info("Após a instalação, reinicie o aplicativo.")
+        logger.info("=== FIM DAS INSTRUÇÕES ===")
+
+    @staticmethod
     def get_poppler_path():
-        """Retorna o caminho do Poppler se estiver instalado - VERSÃO CORRIGIDA"""
+        """Retorna o caminho do Poppler se estiver instalado - VERSÃO CORRIGIDA PARA MACOS"""
         system = platform.system().lower()
         
-        if system == "windows":
+        if system == "darwin":  # macOS
+            # === CORREÇÃO: Caminhos específicos do macOS ===
+            possible_paths = [
+                "/usr/local/bin",           # Homebrew Intel
+                "/opt/homebrew/bin",        # Homebrew Apple Silicon
+                "/usr/bin",                 # Sistema
+                "/opt/local/bin",           # MacPorts
+                "/usr/local/opt/poppler/bin",  # Homebrew específico
+            ]
+            
+            # Primeiro testa se está no PATH
+            try:
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                     capture_output=True, text=True, timeout=3)
+                if result.returncode == 0 and result.stdout.strip():
+                    poppler_path = os.path.dirname(result.stdout.strip())
+                    logger.info(f"Poppler encontrado no PATH: {poppler_path}")
+                    return poppler_path
+            except Exception as e:
+                logger.debug(f"Erro ao verificar PATH: {e}")
+            
+            # Procura em caminhos conhecidos
+            for path in possible_paths:
+                pdftoppm_path = os.path.join(path, "pdftoppm")
+                if os.path.exists(pdftoppm_path) and os.access(pdftoppm_path, os.X_OK):
+                    try:
+                        result = subprocess.run([pdftoppm_path, '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                        if result.returncode == 0:
+                            logger.info(f"Poppler encontrado e testado em: {path}")
+                            return path
+                    except Exception as e:
+                        logger.debug(f"Poppler encontrado mas não funciona em {path}: {e}")
+                        continue
+            
+            logger.info("Poppler não encontrado em nenhum caminho conhecido no macOS")
+            return None
+            
+        elif system == "windows":
             # === CORREÇÃO: Verifica PATH primeiro sem exceção ===
             try:
                 # Tenta executar pdftoppm sem capturar stderr
@@ -226,7 +284,7 @@ class PopplerManager:
             logger.info("Poppler não encontrado em nenhum caminho conhecido")
             return None
         
-        # Para Linux/Mac, geralmente está no PATH
+        # Para Linux, geralmente está no PATH
         try:
             result = subprocess.run(['pdftoppm', '-h'], 
                                  capture_output=True, text=True, timeout=3)
@@ -234,6 +292,102 @@ class PopplerManager:
         except:
             return None
 
+    @staticmethod
+    def update_path_for_homebrew():
+        """Atualiza PATH com caminhos do Homebrew - FUNÇÃO SIMPLES"""
+        import os
+        
+        # Caminhos do Homebrew
+        homebrew_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
+        current_path = os.environ.get('PATH', '')
+        
+        for path in homebrew_paths:
+            if os.path.exists(path) and path not in current_path:
+                os.environ['PATH'] = f"{path}:{current_path}"
+                current_path = os.environ['PATH']
+                logger.info(f"Adicionado {path} ao PATH")
+        
+        return True
+
+    @staticmethod
+    def install_poppler_macos():
+        """Instala Poppler no macOS e reinicia se necessário"""
+        logger.info("Tentando instalar Poppler no macOS usando Homebrew...")
+        
+        try:
+            # Verifica se Homebrew está instalado
+            result = subprocess.run(['which', 'brew'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode != 0:
+                logger.error("Homebrew não encontrado. Por favor, instale o Homebrew primeiro:")
+                logger.error("Visite: https://brew.sh")
+                return None
+            
+            # Verifica se o Poppler já está instalado
+            check_result = subprocess.run(['brew', 'list', 'poppler'], 
+                                        capture_output=True, text=True, timeout=10)
+            
+            if check_result.returncode == 0:
+                logger.info("Poppler já está instalado via Homebrew")
+                
+                # Verifica se funciona
+                try:
+                    test_result = subprocess.run(['pdftoppm', '-h'], 
+                                               capture_output=True, text=True, timeout=3)
+                    if test_result.returncode == 0:
+                        logger.info("Poppler está funcionando")
+                        return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
+                    else:
+                        # Instalado mas não funciona - precisa reiniciar
+                        logger.warning("Poppler instalado mas não funciona - oferecendo reinício")
+                        PopplerManager.show_restart_dialog_and_restart()
+                        return None
+                except:
+                    # Erro ao testar - precisa reiniciar
+                    logger.warning("Erro ao testar Poppler - oferecendo reinício")
+                    PopplerManager.show_restart_dialog_and_restart()
+                    return None
+            
+            # Tenta instalar poppler
+            logger.info("Instalando poppler via Homebrew...")
+            result = subprocess.run(['brew', 'install', 'poppler'], 
+                                  capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                logger.info("✓ Poppler instalado com sucesso via Homebrew!")
+                
+                # Aguarda um pouco
+                time.sleep(2)
+                
+                # Verifica se funciona imediatamente
+                try:
+                    test_result = subprocess.run(['pdftoppm', '-h'], 
+                                               capture_output=True, text=True, timeout=3)
+                    if test_result.returncode == 0:
+                        logger.info("✓ Poppler funcionando imediatamente!")
+                        return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
+                    else:
+                        # Instalado mas não funciona - precisa reiniciar
+                        logger.info("Poppler instalado mas precisa reiniciar aplicação")
+                        PopplerManager.show_restart_dialog_and_restart()
+                        return None
+                except:
+                    # Erro ao testar - precisa reiniciar
+                    logger.info("Poppler instalado mas precisa reiniciar aplicação")
+                    PopplerManager.show_restart_dialog_and_restart()
+                    return None
+            else:
+                logger.error(f"Erro ao instalar Poppler: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout ao instalar Poppler")
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao instalar Poppler no macOS: {e}")
+            return None
+        
     @staticmethod
     def verify_permissions(directory):
         """Verifica se temos permissões adequadas no diretório"""
@@ -430,10 +584,39 @@ class PopplerManager:
 
     @staticmethod
     def setup_poppler():
-        """Configura o Poppler para uso com pdf2image"""
+        """Configura o Poppler para uso com pdf2image - COM REINÍCIO AUTOMÁTICO"""
         system = platform.system().lower()
         
-        if system == "windows":
+        if system == "darwin":  # macOS
+            poppler_path = PopplerManager.get_poppler_path()
+            
+            if poppler_path is None:
+                # Tenta encontrar pelo comando 'which'
+                try:
+                    result = subprocess.run(['which', 'pdftoppm'], 
+                                          capture_output=True, text=True, timeout=3)
+                    if result.returncode == 0:
+                        logger.info("Poppler encontrado no PATH do sistema")
+                        return None  # Já está no PATH
+                except:
+                    pass
+                
+                logger.info("Poppler não encontrado. Tentando instalação automática...")
+                poppler_path = PopplerManager.install_poppler_macos()
+                
+                if poppler_path is None:
+                    # Se chegou aqui, pode ter sido oferecido reinício
+                    # Verifica se precisa de reinício
+                    if PopplerManager.check_poppler_needs_restart():
+                        logger.info("Poppler instalado mas aplicação precisa ser reiniciada")
+                        PopplerManager.show_restart_dialog_and_restart()
+                    
+                    logger.error("Não foi possível configurar o Poppler automaticamente.")
+                    raise Exception("Unable to get page count. Is poppler installed and in PATH?")
+            
+            return poppler_path
+            
+        elif system == "windows":
             poppler_path = PopplerManager.get_poppler_path()
             
             if poppler_path is None:
@@ -442,16 +625,11 @@ class PopplerManager:
                 
                 if poppler_path is None:
                     logger.error("Não foi possível instalar o Poppler automaticamente.")
-                    logger.error("Soluções alternativas:")
-                    logger.error("1. Instale o Poppler manualmente: https://github.com/oschwartz10612/poppler-windows/releases")
-                    logger.error("2. Adicione o Poppler ao PATH do sistema")
-                    logger.error("3. Execute o script como administrador")
-                    return None
+                    raise Exception("Unable to get page count. Is poppler installed and in PATH?")
             
             return poppler_path
         
-        else:
-            # Para Linux/Mac
+        else:  # Linux
             try:
                 result = run_hidden(['pdftoppm', '-h'],
                     capture_output=True, text=True, timeout=5)
@@ -462,18 +640,155 @@ class PopplerManager:
             
             logger.error("Poppler não encontrado.")
             logger.error("Instale com: sudo apt-get install poppler-utils (Ubuntu/Debian)")
-            logger.error("ou: brew install poppler (macOS)")
-            return None
+            raise Exception("Unable to get page count. Is poppler installed and in PATH?")
+
+    @staticmethod
+    def check_poppler_needs_restart():
+        """Verifica se o Poppler foi instalado mas precisa reiniciar"""
+        try:
+            # Verifica se o Poppler está instalado via Homebrew
+            brew_check = subprocess.run(['brew', 'list', 'poppler'], 
+                                      capture_output=True, text=True, timeout=5)
+            
+            if brew_check.returncode == 0:
+                # Poppler está instalado, mas verifica se funciona
+                poppler_check = subprocess.run(['pdftoppm', '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                
+                if poppler_check.returncode != 0:
+                    # Instalado mas não funciona - precisa reiniciar
+                    return True
+            
+            return False
+        except:
+            return False
+
+    @staticmethod
+    def show_restart_dialog_and_restart():
+        """Mostra diálogo de reinício e reinicia a aplicação"""
+        try:
+            import wx
+            
+            # Cria o diálogo de aviso
+            dlg = wx.MessageDialog(
+                None,
+                "O Poppler foi instalado com sucesso via Homebrew!\n\n"
+                "Para que a conversão de PDF para JPG funcione corretamente,\n"
+                "é necessário reiniciar a aplicação.\n\n"
+                "Depois de reiniciado, envie novamente sua impressão!\n\n"
+                "Deseja reiniciar agora?",
+                "Reinício Necessário - Poppler Instalado",
+                wx.YES_NO | wx.ICON_INFORMATION | wx.YES_DEFAULT
+            )
+            
+            result = dlg.ShowModal()
+            dlg.Destroy()
+            
+            if result == wx.ID_YES:
+                PopplerManager.restart_application()
+                return True
+            else:
+                # Usuário escolheu não reiniciar agora
+                wx.MessageBox(
+                    "A conversão JPG pode não funcionar até que a aplicação seja reiniciada.\n"
+                    "Você pode reiniciar manualmente quando desejar.",
+                    "Aviso",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erro ao mostrar diálogo de reinício: {e}")
+            return False
+        
+    @staticmethod
+    def restart_application():
+        """Reinicia a aplicação atual"""
+        try:
+            import sys
+            import os
+            import subprocess
+            
+            logger.info("Reiniciando aplicação...")
+            
+            # Obtém o script principal que está sendo executado
+            script_path = sys.argv[0]
+            
+            # Se for um executável Python compilado (.app no macOS)
+            if getattr(sys, 'frozen', False):
+                # Aplicação empacotada (py2app, PyInstaller, etc.)
+                executable = sys.executable
+                subprocess.Popen([executable])
+            else:
+                # Script Python normal
+                python_exe = sys.executable
+                subprocess.Popen([python_exe, script_path] + sys.argv[1:])
+            
+            # Agenda o fechamento da aplicação atual
+            import wx
+            wx.CallAfter(wx.GetApp().ExitMainLoop)
+            
+            logger.info("Aplicação será reiniciada...")
+            
+        except Exception as e:
+            logger.error(f"Erro ao reiniciar aplicação: {e}")
+            # Fallback: apenas fecha a aplicação
+            try:
+                import wx
+                wx.MessageBox(
+                    "Não foi possível reiniciar automaticamente.\n"
+                    "Por favor, feche e abra a aplicação manualmente.",
+                    "Aviso",
+                    wx.OK | wx.ICON_WARNING
+                )
+                wx.CallAfter(wx.GetApp().ExitMainLoop)
+            except:
+                import sys
+                sys.exit(0)
 
     @staticmethod
     def diagnose_poppler():
-        """Diagnóstica problemas com o Poppler"""
+        """Diagnóstica problemas com o Poppler - ATUALIZADO PARA MACOS"""
         logger.info("=== DIAGNÓSTICO POPPLER ===")
         
         system = platform.system().lower()
         logger.info(f"Sistema operacional: {system}")
         
-        if system == "windows":
+        if system == "darwin":  # macOS
+            # Verifica PATH
+            try:
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                     capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logger.info(f"Poppler no PATH: SIM ({result.stdout.strip()})")
+                else:
+                    logger.info("Poppler no PATH: NÃO")
+            except:
+                logger.info("Poppler no PATH: NÃO")
+            
+            # Verifica Homebrew
+            try:
+                result = subprocess.run(['which', 'brew'], 
+                                     capture_output=True, text=True, timeout=5)
+                logger.info(f"Homebrew disponível: {'SIM' if result.returncode == 0 else 'NÃO'}")
+            except:
+                logger.info("Homebrew disponível: NÃO")
+            
+            # Verifica caminhos conhecidos
+            logger.info("Verificando caminhos conhecidos...")
+            possible_paths = [
+                "/usr/local/bin/pdftoppm",           # Homebrew Intel
+                "/opt/homebrew/bin/pdftoppm",        # Homebrew Apple Silicon
+                "/usr/bin/pdftoppm",                 # Sistema
+                "/opt/local/bin/pdftoppm",           # MacPorts
+            ]
+            
+            for path in possible_paths:
+                exists = os.path.exists(path)
+                executable = os.access(path, os.X_OK) if exists else False
+                logger.info(f"  {path}: {'ENCONTRADO' if exists else 'NÃO ENCONTRADO'} {'(EXECUTÁVEL)' if executable else '(NÃO EXECUTÁVEL)' if exists else ''}")
+            
+        elif system == "windows":
             # Verifica PATH
             try:
                 result = subprocess.run(['pdftoppm', '-h'], 
@@ -701,8 +1016,12 @@ def check_dependencies():
         logger.info(f"Instalando pacotes faltantes: {missing_packages}")
         for package in missing_packages:
             try:
-                result = run_hidden([sys.executable, "-m", "pip", "install", package],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                if platform.system().lower() == "windows":
+                    result = run_hidden([sys.executable, "-m", "pip", "install", package],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                else:
+                    result = run_hidden([sys.executable, "-m", "pip3", "install", package],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
                 logger.info(f"Pacote {package} instalado com sucesso")
             except:
                 logger.error(f"Falha ao instalar {package}")
@@ -1113,7 +1432,7 @@ startxref
     def print_file(self, file_path: str, options: PrintOptions, 
                 job_name: Optional[str] = None, progress_callback=None, 
                 job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Imprime um arquivo PDF com otimizações de performance"""
+        """Imprime um arquivo PDF com otimizações de performance - CORRIGIDO PARA MACOS"""
         
         # Verificações de segurança (mantidas)
         if not os.access(file_path, os.R_OK):
@@ -1174,6 +1493,33 @@ startxref
         logger.info("Tentativa 2: Convertendo para JPG (modo mais compatível)")
         if progress_callback:
             progress_callback("Tentativa 2: Convertendo para JPG (modo mais compatível)...")
+        
+        # === CORREÇÃO PARA MACOS: Verifica dependências antes de tentar JPG ===
+        system = platform.system().lower()
+        if system == "darwin":
+            try:
+                # Verifica se pode importar pdf2image
+                import pdf2image
+                # Verifica se Poppler está disponível
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                      capture_output=True, text=True, timeout=3)
+                if result.returncode != 0:
+                    logger.warning("Poppler não encontrado no PATH. Tentando configuração automática...")
+                    try:
+                        PopplerManager.setup_poppler()
+                    except Exception as setup_error:
+                        error_msg = ("Poppler é necessário para conversão JPG no macOS. "
+                                   "Instale com: brew install poppler")
+                        logger.error(error_msg)
+                        if progress_callback:
+                            progress_callback(f"✗ Erro: {error_msg}")
+                        return False, {"error": error_msg}
+            except ImportError:
+                error_msg = "pdf2image não encontrado. Instale com: pip install pdf2image"
+                logger.error(error_msg)
+                if progress_callback:
+                    progress_callback(f"✗ Erro: {error_msg}")
+                return False, {"error": error_msg}
         
         success, result = self._convert_and_print_as_jpg_optimized(
             file_path, job_name, options, progress_callback, job_info
@@ -1365,7 +1711,7 @@ startxref
 
     def _convert_and_print_as_jpg_optimized(self, pdf_path: str, job_name: str, options: PrintOptions, 
                                         progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Conversão e impressão JPG com processamento otimizado para EPSON"""
+        """Conversão e impressão JPG com processamento otimizado para EPSON - CORRIGIDO PARA MACOS"""
         
         temp_folder = None
         
@@ -1378,17 +1724,40 @@ startxref
             if progress_callback:
                 progress_callback(f"Convertendo PDF para JPG (modo {conversion_mode.lower()})...")
             
-            import pdf2image
-            from PIL import Image
+            # === CORREÇÃO PARA MACOS: Melhor tratamento de dependências ===
+            try:
+                import pdf2image
+                from PIL import Image
+            except ImportError as e:
+                logger.error(f"Erro ao importar dependências: {e}")
+                return False, {"error": f"Dependências não encontradas: {e}"}
             
             job_name = normalize_filename(job_name)
             base_name = os.path.splitext(os.path.basename(pdf_path))[0]
             safe_base_name = normalize_filename(base_name)
             temp_folder = self._create_temp_folder(safe_base_name)
             
-            # === CORREÇÃO ESPECÍFICA PARA EPSON: Configuração para conversão otimizada ===
-            poppler_path = PopplerManager.setup_poppler()
+            # === CORREÇÃO PARA MACOS: Setup do Poppler com melhor tratamento de erro ===
+            try:
+                poppler_path = PopplerManager.setup_poppler()
+                logger.info(f"Poppler configurado: {poppler_path if poppler_path else 'PATH do sistema'}")
+            except Exception as poppler_error:
+                logger.error(f"Erro ao configurar Poppler: {poppler_error}")
+                
+                # === CORREÇÃO: Diagnóstico e instruções específicas para macOS ===
+                system = platform.system().lower()
+                if system == "darwin":
+                    logger.info("Executando diagnóstico do Poppler para macOS...")
+                    PopplerManager.diagnose_poppler()
+                    
+                    error_msg = ("Poppler não encontrado no macOS. "
+                               "Para usar conversão JPG, instale com: brew install poppler")
+                else:
+                    error_msg = str(poppler_error)
+                
+                return False, {"error": error_msg}
             
+            # === CORREÇÃO ESPECÍFICA PARA EPSON: Configuração para conversão otimizada ===
             convert_kwargs = {
                 'pdf_path': pdf_path,
                 'dpi': min(options.dpi, 150) if is_epson else min(options.dpi, 200),  # DPI menor para Epson
@@ -1400,14 +1769,29 @@ startxref
             
             if poppler_path:
                 convert_kwargs['poppler_path'] = poppler_path
+                logger.info(f"Usando Poppler path: {poppler_path}")
             
-            # Conversão otimizada
+            # === CORREÇÃO PARA MACOS: Conversão com tratamento robusto de erro ===
             start_time = time.time()
-            images = pdf2image.convert_from_path(**convert_kwargs)
+            try:
+                images = pdf2image.convert_from_path(**convert_kwargs)
+            except Exception as conversion_error:
+                logger.error(f"Erro na conversão PDF->JPG: {conversion_error}")
+                
+                # === CORREÇÃO: Diagnóstico específico para macOS ===
+                system = platform.system().lower()
+                if system == "darwin" and "poppler" in str(conversion_error).lower():
+                    PopplerManager.diagnose_poppler()
+                    return False, {
+                        "error": "Erro de conversão no macOS. Verifique se o Poppler está instalado: brew install poppler"
+                    }
+                else:
+                    return False, {"error": f"Erro na conversão PDF para JPG: {conversion_error}"}
+            
             conversion_time = time.time() - start_time
             
             if not images:
-                logger.error("Falha na conversão PDF para JPG")
+                logger.error("Falha na conversão PDF para JPG - nenhuma imagem gerada")
                 return False, {"error": "Falha na conversão PDF para JPG"}
             
             logger.info(f"Convertido {len(images)} página(s) em {conversion_time:.2f}s (modo {conversion_mode})")
@@ -1426,7 +1810,16 @@ startxref
             logger.error(f"Erro na conversão/preparação JPG: {e}")
             if temp_folder and os.path.exists(temp_folder):
                 logger.info(f"Imagens parciais mantidas em: {temp_folder}")
-            return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
+            
+            # === CORREÇÃO: Erro específico para macOS ===
+            system = platform.system().lower()
+            if system == "darwin" and "poppler" in str(e).lower():
+                return False, {
+                    "error": "Erro de Poppler no macOS. Instale com: brew install poppler"
+                }
+            else:
+                return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
+
 
     def _prepare_pages_batch(self, images: List, safe_base_name: str, job_name: str, 
                         temp_folder: str, options: PrintOptions) -> List[PageJob]:
