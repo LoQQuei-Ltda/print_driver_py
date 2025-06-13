@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Sistema de atualização automática da aplicação
+Sistema de atualização automática da aplicação - Sem requisito de privilégios administrativos
 """
-
+from __version__ import __version__
 import os
 import sys
 import platform
@@ -18,6 +18,9 @@ import threading
 import requests
 from datetime import datetime
 import ctypes
+
+# Importa o sistema de notificações da classe PrinterList
+from src.ui.printer_list import SystemNotification
 
 logger = logging.getLogger("PrintManagementSystem.Utils.Updater")
 
@@ -41,6 +44,9 @@ class AppUpdater:
         self.update_info = None
         self.is_checking = False
         self.is_updating = False
+        
+        # Inicializa o sistema de notificações
+        self.notification_system = SystemNotification()
     
     def _get_current_version(self):
         """
@@ -50,8 +56,8 @@ class AppUpdater:
             str: Versão atual
         """
         try:
-            # Tenta ler a versão do arquivo __init__.py
-            init_path = os.path.join(self.app_root, "src", "__init__.py")
+            # Tenta ler a versão do arquivo __version__.py
+            init_path = os.path.join(self.app_root, "__version__.py")
             if os.path.exists(init_path):
                 with open(init_path, 'r', encoding='utf-8') as f:
                     for line in f:
@@ -66,10 +72,10 @@ class AppUpdater:
                         if "APP_VERSION" in line:
                             return line.split("=")[1].strip().strip('"\'')
             
-            return "2.0.2"  # Versão padrão
+            return __version__
         except Exception as e:
             logger.error(f"Erro ao obter versão atual: {str(e)}")
-            return "2.0.2"
+            return __version__
     
     def check_for_update(self, silent=True):
         """
@@ -98,6 +104,12 @@ class AppUpdater:
             if not update_info:
                 if not silent:
                     logger.info("Nenhuma atualização disponível")
+                    self.notification_system.show_notification(
+                        "Sistema Atualizado",
+                        f"Você já está usando a versão mais recente ({self.current_version}).",
+                        duration=5,
+                        notification_type="success"
+                    )
                 self.is_checking = False
                 return False
             
@@ -111,6 +123,12 @@ class AppUpdater:
             if not self._is_newer_version(remote_version):
                 if not silent:
                     logger.info(f"Versão atual ({self.current_version}) é a mais recente")
+                    self.notification_system.show_notification(
+                        "Sistema Atualizado",
+                        f"Você já está usando a versão mais recente ({self.current_version}).",
+                        duration=5,
+                        notification_type="success"
+                    )
                 self.is_checking = False
                 return False
             
@@ -151,7 +169,6 @@ class AppUpdater:
                 
                 # Verifica se há informações de versão no formato esperado
                 if response and isinstance(response, dict):
-                    # A API retorna: {'version': 'v2.0.2', 'updateUrl': 'https://...'}
                     version = response.get('version')
                     update_url = response.get('updateUrl')
                     
@@ -334,6 +351,14 @@ class AppUpdater:
             # Caminho completo do arquivo
             file_path = os.path.join(download_dir, filename)
             
+            # Notifica início do download
+            self.notification_system.show_notification(
+                "Baixando Atualização",
+                f"Baixando versão {self.update_info.get('version', 'mais recente')}...",
+                duration=5,
+                notification_type="info"
+            )
+            
             # Baixa o arquivo
             logger.info(f"Baixando atualização de {download_url}")
             response = requests.get(download_url, stream=True, timeout=60)
@@ -358,13 +383,40 @@ class AppUpdater:
                                     logger.debug(f"Download: {progress:.1f}% ({downloaded_size}/{total_size} bytes)")
                 
                 logger.info(f"Atualização baixada para {file_path} ({downloaded_size} bytes)")
+                
+                # Notifica conclusão do download
+                self.notification_system.show_notification(
+                    "Download Concluído",
+                    "A atualização foi baixada e será instalada automaticamente.",
+                    duration=5,
+                    notification_type="success"
+                )
+                
                 return file_path
             else:
                 logger.error(f"Erro ao baixar atualização: código {response.status_code}")
+                
+                # Notifica erro no download
+                self.notification_system.show_notification(
+                    "Erro no Download",
+                    f"Não foi possível baixar a atualização (Erro {response.status_code}).",
+                    duration=10,
+                    notification_type="error"
+                )
+                
                 return None
                 
         except Exception as e:
             logger.error(f"Erro ao baixar atualização: {str(e)}")
+            
+            # Notifica erro no download
+            self.notification_system.show_notification(
+                "Erro no Download",
+                f"Ocorreu um erro ao baixar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             return None
     
     def apply_update(self, update_file=None):
@@ -393,21 +445,38 @@ class AppUpdater:
                 self.is_updating = False
                 return False
             
+            # Notifica início da instalação
+            self.notification_system.show_notification(
+                "Instalando Atualização",
+                f"Instalando versão {self.update_info.get('version', 'mais recente')}. O aplicativo será reiniciado automaticamente.",
+                duration=10,
+                notification_type="info"
+            )
+            
             # Verifica se o arquivo baixado é um executável do Windows
             if update_file.lower().endswith('.exe') and self.system == "Windows":
                 return self._apply_exe_update(update_file)
             else:
-                # Aplica a atualização com privilégios elevados (formato ZIP)
-                return self._apply_update_with_privileges(update_file)
+                # Aplica a atualização (formato ZIP) sem privilégios elevados
+                return self._apply_update_without_privileges(update_file)
             
         except Exception as e:
             logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Ocorreu um erro ao instalar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             self.is_updating = False
             return False
     
     def _apply_exe_update(self, exe_file):
         """
-        Aplica atualização usando um executável (.exe)
+        Aplica atualização usando um executável (.exe) - SEM requisito de admin
         
         Args:
             exe_file (str): Caminho para o arquivo executável de atualização
@@ -418,44 +487,115 @@ class AppUpdater:
         try:
             logger.info(f"Executando atualização via executável: {exe_file}")
             
-            # Executa o instalador de forma silenciosa
-            if self._is_admin():
-                # Se já tem privilégios, executa diretamente
-                subprocess.Popen([exe_file, '/S'], 
-                                creationflags=subprocess.CREATE_NO_WINDOW,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL)
-            else:
-                # Executa com privilégios elevados
-                ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_file, '/S', None, 0)
+            # Executa o instalador de forma silenciosa SEM solicitar elevação
+            # Adiciona parâmetros para instalação silenciosa
+            startup_info = None
+            creation_flags = 0
+            
+            # No Windows, esconde a janela do console
+            if self.system == "Windows":
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0  # SW_HIDE
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            # Executa o instalador com parâmetros para instalação silenciosa e reinicialização automática
+            subprocess.Popen(
+                [exe_file, '/VERYSILENT', '/NORESTART', '/NOICONS', '/SP-', '/CLOSEAPPLICATIONS', 
+                 '/RESTARTAPPLICATIONS', '/NOCANCEL', '/SUPPRESSMSGBOXES'], 
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
             
             logger.info("Instalador de atualização iniciado")
+            
+            # Cria script para reiniciar a aplicação após a instalação
+            self._create_restart_script()
+            
+            # Notifica que a instalação está em andamento
+            self.notification_system.show_notification(
+                "Instalação em Andamento",
+                "O instalador está sendo executado em segundo plano. O aplicativo será reiniciado automaticamente.",
+                duration=10,
+                notification_type="info"
+            )
+            
             self.is_updating = False
             return True
             
         except Exception as e:
             logger.error(f"Erro ao executar instalador: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Não foi possível executar o instalador: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
             self.is_updating = False
             return False
-    
-    def _is_admin(self):
+
+    def _create_restart_script(self):
         """
-        Verifica se o aplicativo está sendo executado como administrador/root
-        
-        Returns:
-            bool: True se o aplicativo está sendo executado com privilégios elevados
+        Cria script para reiniciar a aplicação após a atualização
         """
         try:
+            # Determina o caminho do executável da aplicação
             if self.system == "Windows":
-                return ctypes.windll.shell32.IsUserAnAdmin() != 0
-            else:
-                return os.geteuid() == 0
-        except Exception:
-            return False
-    
-    def _apply_update_with_privileges(self, update_file):
+                app_exe = os.path.join(self.app_root, "PrintManagementSystem.exe")
+                if not os.path.exists(app_exe):
+                    # Tenta encontrar em caminhos alternativos
+                    localappdata = os.environ.get('LOCALAPPDATA', '')
+                    if localappdata:
+                        app_exe = os.path.join(localappdata, "LoQQuei", "Gerenciamento de Impressão - LoQQuei", "PrintManagementSystem.exe")
+                
+                # Cria um script batch para reiniciar a aplicação
+                restart_script = os.path.join(tempfile.gettempdir(), "loqquei_restart_after_update.bat")
+                with open(restart_script, 'w') as f:
+                    f.write(f'''@echo off
+REM Script de reinicialização pós-atualização
+echo Aguardando conclusão da instalação...
+timeout /t 15 /nobreak >nul
+
+REM Tenta encerrar processos existentes
+taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq PrintManagementSystem*" >nul 2>&1
+taskkill /F /IM "PrintManagementSystem.exe" >nul 2>&1
+
+REM Aguarda um pouco mais
+timeout /t 3 /nobreak >nul
+
+REM Verifica se o arquivo executável existe e inicia a aplicação
+if exist "{app_exe}" (
+    echo Iniciando aplicação atualizada...
+    start "" "{app_exe}"
+    echo Aplicação iniciada com sucesso.
+) else (
+    echo ERRO: Executável não encontrado em {app_exe}
+    pause
+)
+
+REM Remove este script
+del "%~f0"
+''')
+                
+                # Executa o script de reinicialização
+                subprocess.Popen(["cmd", "/c", restart_script], 
+                                creationflags=subprocess.CREATE_NO_WINDOW,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+                
+                logger.info(f"Script de reinicialização criado: {restart_script}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao criar script de reinicialização: {str(e)}")
+
+    def _apply_update_without_privileges(self, update_file):
         """
-        Aplica a atualização com privilégios elevados
+        Aplica a atualização sem privilégios elevados
         
         Args:
             update_file (str): Caminho para o arquivo de atualização
@@ -463,12 +603,24 @@ class AppUpdater:
         Returns:
             bool: True se a atualização foi iniciada com sucesso
         """
-        # Cria um script para aplicar a atualização
-        temp_dir = tempfile.mkdtemp()
-        script_path = os.path.join(temp_dir, "apply_update.py")
-        
-        with open(script_path, 'w', encoding='utf-8') as f:
-            f.write(f"""
+        try:
+            logger.info(f"Aplicando atualização sem privilégios elevados: {update_file}")
+            
+            # Cria um script para aplicar a atualização
+            temp_dir = tempfile.mkdtemp()
+            script_path = os.path.join(temp_dir, "apply_update.py")
+            
+            # Determina se a aplicação está instalada no diretório do usuário
+            is_user_install = self._is_user_installation()
+            
+            # Determina o caminho do executável da aplicação
+            app_exe_name = "PrintManagementSystem.exe" if self.system == "Windows" else "PrintManagementSystem"
+            app_exe_path = os.path.join(self.app_root, app_exe_name)
+            
+            # Se for instalação de usuário, cria um script simplificado
+            # que não requer privilégios administrativos
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(f"""
 import os
 import sys
 import zipfile
@@ -477,15 +629,16 @@ import time
 import subprocess
 import tempfile
 import logging
+import traceback
 
-# Configura logging secreto para não interferir com o usuário
+# Configura logging para não interferir com o usuário
 log_file = os.path.join(tempfile.gettempdir(), "loqquei_update.log")
 logging.basicConfig(filename=log_file, level=logging.INFO, 
                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 def apply_update():
     try:
-        logging.info("Iniciando aplicação da atualização")
+        logging.info("Iniciando aplicação da atualização (sem privilégios)")
         
         # Caminho do arquivo de atualização
         update_file = {repr(update_file)}
@@ -495,10 +648,19 @@ def apply_update():
         app_dir = {repr(self.app_root)}
         logging.info(f"Diretório da aplicação: {{app_dir}}")
         
+        # Caminho do executável
+        app_exe = {repr(app_exe_path)}
+        logging.info(f"Executável da aplicação: {{app_exe}}")
+        
         # Cria diretório temporário para extração
         temp_dir = tempfile.mkdtemp()
         logging.info(f"Diretório temporário: {{temp_dir}}")
         
+        # Verifica se o arquivo existe
+        if not os.path.exists(update_file):
+            logging.error(f"Arquivo de atualização não encontrado: {{update_file}}")
+            return False
+            
         # Extrai os arquivos
         logging.info("Extraindo arquivos...")
         with zipfile.ZipFile(update_file, 'r') as zip_ref:
@@ -513,30 +675,78 @@ def apply_update():
                 dst_path = os.path.join(app_dir, rel_path)
                 
                 # Cria diretório de destino se não existir
-                os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                try:
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                except Exception as e:
+                    logging.warning(f"Erro ao criar diretório {{os.path.dirname(dst_path)}}: {{e}}")
+                    continue
                 
                 # Tenta até 3 vezes para lidar com arquivos em uso
                 for attempt in range(3):
                     try:
+                        # Remove arquivos existentes primeiro (mais confiável do que substituir)
+                        if os.path.exists(dst_path):
+                            try:
+                                os.remove(dst_path)
+                            except Exception as remove_error:
+                                logging.warning(f"Não foi possível remover arquivo existente {{dst_path}}: {{remove_error}}")
+                                
+                                # Se não conseguir remover, tenta renomear
+                                try:
+                                    temp_name = dst_path + ".old"
+                                    if os.path.exists(temp_name):
+                                        os.remove(temp_name)
+                                    os.rename(dst_path, temp_name)
+                                except Exception as rename_error:
+                                    logging.warning(f"Não foi possível renomear arquivo existente {{dst_path}}: {{rename_error}}")
+                        
+                        # Copia o arquivo
                         shutil.copy2(src_path, dst_path)
                         logging.info(f"Copiado: {{rel_path}}")
                         break
                     except Exception as e:
                         logging.warning(f"Tentativa {{attempt+1}} falhou para {{rel_path}}: {{str(e)}}")
-                        time.sleep(1)
+                        if attempt < 2:  # Só espera se não for a última tentativa
+                            time.sleep(1)
         
         # Reinicia a aplicação se estiver em execução
-        logging.info("Tentando reiniciar a aplicação")
+        logging.info("Preparando reinicialização da aplicação")
         try:
-            # Tenta encontrar o processo da aplicação
+            # Cria um script de reinicialização adequado para o sistema
             if sys.platform.startswith('win'):
                 # Cria um arquivo de script para iniciar a aplicação após a atualização
-                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.bat")
+                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart_post_update.bat")
                 with open(startup_script, 'w') as f:
                     f.write(f'''@echo off
-taskkill /IM "python.exe" /F >nul 2>&1
-timeout /t 1 >nul
-start "" /B "{{sys.executable}}" "{{os.path.join(app_dir, "main.py")}}"
+REM Script de reinicialização pós-atualização ZIP
+echo Aguardando finalização da atualização...
+timeout /t 3 /nobreak >nul
+
+REM Tenta encerrar o processo Python atual
+taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq PrintManagementSystem*" >nul 2>&1
+taskkill /F /IM "PrintManagementSystem.exe" >nul 2>&1
+
+REM Espera mais um pouco
+timeout /t 2 /nobreak >nul
+
+REM Verifica se o executável existe e inicia a aplicação
+if exist "{{app_exe}}" (
+    echo Iniciando aplicação atualizada...
+    start "" "{{app_exe}}"
+    echo Aplicação reiniciada com sucesso.
+) else (
+    echo ERRO: Executável não encontrado em {{app_exe}}
+    echo Tentando caminho alternativo...
+    if exist "{{os.path.join(app_dir, "PrintManagementSystem.exe")}}" (
+        start "" "{{os.path.join(app_dir, "PrintManagementSystem.exe")}}"
+        echo Aplicação iniciada pelo caminho alternativo.
+    ) else (
+        echo ERRO: Não foi possível encontrar o executável da aplicação.
+        pause
+    )
+)
+
+REM Remove este script
 del "%~f0"
 ''')
                 
@@ -545,14 +755,41 @@ del "%~f0"
                                 creationflags=subprocess.CREATE_NO_WINDOW,
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
+                                
+                logging.info(f"Script de reinicialização Windows criado: {{startup_script}}")
             else:
                 # Cria um script shell para reinicializar a aplicação
-                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.sh")
+                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart_post_update.sh")
                 with open(startup_script, 'w') as f:
                     f.write(f'''#!/bin/bash
-pkill -f "python.*main.py" || true
-sleep 1
-nohup "{{sys.executable}}" "{{os.path.join(app_dir, "main.py")}}" > /dev/null 2>&1 &
+# Script de reinicialização pós-atualização
+echo "Aguardando finalização da atualização..."
+sleep 3
+
+# Tenta encerrar o processo Python atual
+pkill -f "python.*PrintManagementSystem" || true
+pkill -f "PrintManagementSystem" || true
+
+# Espera mais um pouco
+sleep 2
+
+# Verifica se o executável existe e inicia a aplicação
+if [ -f "{{app_exe}}" ]; then
+    echo "Iniciando aplicação atualizada..."
+    nohup "{{app_exe}}" > /dev/null 2>&1 &
+    echo "Aplicação reiniciada com sucesso."
+else
+    echo "ERRO: Executável não encontrado em {{app_exe}}"
+    # Tenta caminho alternativo
+    if [ -f "{{os.path.join(app_dir, "PrintManagementSystem")}}" ]; then
+        nohup "{{os.path.join(app_dir, "PrintManagementSystem")}}" > /dev/null 2>&1 &
+        echo "Aplicação iniciada pelo caminho alternativo."
+    else
+        echo "ERRO: Não foi possível encontrar o executável da aplicação."
+    fi
+fi
+
+# Remove este script
 rm "$0"
 ''')
                 os.chmod(startup_script, 0o755)
@@ -561,13 +798,16 @@ rm "$0"
                 subprocess.Popen(["/bin/bash", startup_script], 
                                 stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL)
+                                
+                logging.info(f"Script de reinicialização Unix criado: {{startup_script}}")
                 
-            logging.info("Script de reinicialização criado e executado")
         except Exception as e:
             logging.error(f"Erro ao tentar reiniciar: {{str(e)}}")
+            logging.error(traceback.format_exc())
             
     except Exception as e:
         logging.error(f"Erro ao aplicar atualização: {{str(e)}}")
+        logging.error(traceback.format_exc())
         return False
     finally:
         # Limpa os arquivos temporários
@@ -589,87 +829,298 @@ rm "$0"
 # Aplica a atualização
 apply_update()
 """)
-        
-        if self._is_admin():
-            # Se já tem privilégios, executa diretamente
-            try:
-                subprocess.Popen([sys.executable, script_path], 
-                                 creationflags=subprocess.CREATE_NO_WINDOW if self.system == "Windows" else 0,
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-                self.is_updating = False
-                return True
-            except Exception as e:
-                logger.error(f"Erro ao executar script de atualização: {str(e)}")
-                self.is_updating = False
-                return False
-        else:
-            # Executa com privilégios elevados de forma invisível
-            try:
-                if self.system == "Windows":
-                    # No Windows, usa ShellExecute com o verbo "runas" e SW_HIDE
-                    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, 
-                                                       f'"{script_path}"', None, 0)
-                elif self.system == "Darwin":  # macOS
-                    # Cria um script AppleScript temporário para execução invisível
-                    temp_script = os.path.join(tempfile.gettempdir(), "invisible_sudo.scpt")
-                    with open(temp_script, 'w') as f:
-                        f.write(f'''
-do shell script "\\"{{sys.executable}}\\" \\"{{script_path}}\\"" with administrator privileges without altering line endings
-''')
-                    
-                    # Executa o AppleScript
-                    subprocess.Popen(["osascript", temp_script],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-                    
-                    # Remove o script temporário após um atraso
-                    threading.Timer(5, lambda: os.remove(temp_script) if os.path.exists(temp_script) else None).start()
-                else:  # Linux ou outros
-                    # Cria um script para executar com sudo sem prompt visível
-                    temp_script = os.path.join(tempfile.gettempdir(), "invisible_sudo.sh")
-                    with open(temp_script, 'w') as f:
-                        f.write(f'''#!/bin/bash
-export SUDO_ASKPASS=/bin/true
-for cmd in pkexec gksudo kdesudo sudo; do
-    if command -v $cmd >/dev/null 2>&1; then
-        if [ "$cmd" = "sudo" ]; then
-            $cmd -A "{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-        else
-            $cmd "{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-        fi
-        exit 0
-    fi
-done
-
-# Fallback - tenta executar diretamente
-"{sys.executable}" "{script_path}" >/dev/null 2>&1 &
-''')
-                    
-                    # Torna o script executável
-                    os.chmod(temp_script, 0o755)
-                    
-                    # Executa o script
-                    subprocess.Popen(["/bin/bash", temp_script],
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL)
-                    
-                    # Remove o script temporário após um atraso
-                    threading.Timer(5, lambda: os.remove(temp_script) if os.path.exists(temp_script) else None).start()
+            
+            # Executa o script em um processo separado sem privilégios
+            # e sem mostrar a janela do console
+            startup_info = None
+            creation_flags = 0
+            
+            # No Windows, esconde a janela do console
+            if self.system == "Windows":
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0  # SW_HIDE
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            # Executa o script
+            subprocess.Popen(
+                [sys.executable, script_path],
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            logger.info("Script de atualização iniciado")
+            self.is_updating = False
+            return True
                 
-                self.is_updating = False
-                return True
-            except Exception as e:
-                logger.error(f"Erro ao solicitar privilégios para atualização: {str(e)}")
-                self.is_updating = False
-                return False
+        except Exception as e:
+            logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Ocorreu um erro ao instalar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
+            self.is_updating = False
+            return False
     
-    def check_and_update(self, silent=True):
+    def _apply_update_without_privileges(self, update_file):
+        """
+        Aplica a atualização sem privilégios elevados
+        
+        Args:
+            update_file (str): Caminho para o arquivo de atualização
+            
+        Returns:
+            bool: True se a atualização foi iniciada com sucesso
+        """
+        try:
+            logger.info(f"Aplicando atualização sem privilégios elevados: {update_file}")
+            
+            # Cria um script para aplicar a atualização
+            temp_dir = tempfile.mkdtemp()
+            script_path = os.path.join(temp_dir, "apply_update.py")
+            
+            # Determina se a aplicação está instalada no diretório do usuário
+            is_user_install = self._is_user_installation()
+            
+            # Se for instalação de usuário, cria um script simplificado
+            # que não requer privilégios administrativos
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(f"""
+import os
+import sys
+import zipfile
+import shutil
+import time
+import subprocess
+import tempfile
+import logging
+import traceback
+
+# Configura logging para não interferir com o usuário
+log_file = os.path.join(tempfile.gettempdir(), "loqquei_update.log")
+logging.basicConfig(filename=log_file, level=logging.INFO, 
+                   format='%(asctime)s - %(levelname)s - %(message)s')
+
+def apply_update():
+    try:
+        logging.info("Iniciando aplicação da atualização (sem privilégios)")
+        
+        # Caminho do arquivo de atualização
+        update_file = {repr(update_file)}
+        logging.info(f"Arquivo de atualização: {{update_file}}")
+        
+        # Diretório da aplicação
+        app_dir = {repr(self.app_root)}
+        logging.info(f"Diretório da aplicação: {{app_dir}}")
+        
+        # Cria diretório temporário para extração
+        temp_dir = tempfile.mkdtemp()
+        logging.info(f"Diretório temporário: {{temp_dir}}")
+        
+        # Verifica se o arquivo existe
+        if not os.path.exists(update_file):
+            logging.error(f"Arquivo de atualização não encontrado: {{update_file}}")
+            return False
+            
+        # Extrai os arquivos
+        logging.info("Extraindo arquivos...")
+        with zipfile.ZipFile(update_file, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+        
+        # Copia os arquivos para o diretório da aplicação
+        logging.info("Copiando arquivos para o diretório da aplicação")
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                src_path = os.path.join(root, file)
+                rel_path = os.path.relpath(src_path, temp_dir)
+                dst_path = os.path.join(app_dir, rel_path)
+                
+                # Cria diretório de destino se não existir
+                try:
+                    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+                except Exception as e:
+                    logging.warning(f"Erro ao criar diretório {{os.path.dirname(dst_path)}}: {{e}}")
+                    continue
+                
+                # Tenta até 3 vezes para lidar com arquivos em uso
+                for attempt in range(3):
+                    try:
+                        # Remove arquivos existentes primeiro (mais confiável do que substituir)
+                        if os.path.exists(dst_path):
+                            try:
+                                os.remove(dst_path)
+                            except Exception as remove_error:
+                                logging.warning(f"Não foi possível remover arquivo existente {{dst_path}}: {{remove_error}}")
+                                
+                                # Se não conseguir remover, tenta renomear
+                                try:
+                                    temp_name = dst_path + ".old"
+                                    if os.path.exists(temp_name):
+                                        os.remove(temp_name)
+                                    os.rename(dst_path, temp_name)
+                                except Exception as rename_error:
+                                    logging.warning(f"Não foi possível renomear arquivo existente {{dst_path}}: {{rename_error}}")
+                        
+                        # Copia o arquivo
+                        shutil.copy2(src_path, dst_path)
+                        logging.info(f"Copiado: {{rel_path}}")
+                        break
+                    except Exception as e:
+                        logging.warning(f"Tentativa {{attempt+1}} falhou para {{rel_path}}: {{str(e)}}")
+                        if attempt < 2:  # Só espera se não for a última tentativa
+                            time.sleep(1)
+        
+        # Reinicia a aplicação se estiver em execução
+        logging.info("Tentando reiniciar a aplicação")
+        try:
+            # Cria um script de reinicialização adequado para o sistema
+            if sys.platform.startswith('win'):
+                # Cria um arquivo de script para iniciar a aplicação após a atualização
+                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.bat")
+                with open(startup_script, 'w') as f:
+                    f.write(f'''@echo off
+REM Espera 1 segundo
+timeout /t 1 /nobreak >nul
+REM Tenta encerrar o processo Python atual
+taskkill /F /IM "python.exe" /FI "WINDOWTITLE eq PrintManagementSystem*" >nul 2>&1
+taskkill /F /IM "PrintManagementSystem.exe" >nul 2>&1
+REM Espera mais 1 segundo
+timeout /t 1 /nobreak >nul
+REM Inicia o aplicativo atualizado
+start "" "{{os.path.join(app_dir, "PrintManagementSystem.exe")}}"
+REM Remove este script
+del "%~f0"
+''')
+                
+                # Executa o script de reinicialização de forma invisível
+                subprocess.Popen(["cmd", "/c", startup_script], 
+                                creationflags=subprocess.CREATE_NO_WINDOW,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+            else:
+                # Cria um script shell para reinicializar a aplicação
+                startup_script = os.path.join(tempfile.gettempdir(), "loqquei_restart.sh")
+                with open(startup_script, 'w') as f:
+                    f.write(f'''#!/bin/bash
+# Espera 1 segundo
+sleep 1
+# Tenta encerrar o processo Python atual
+pkill -f "python.*PrintManagementSystem" || true
+pkill -f "PrintManagementSystem" || true
+# Espera mais 1 segundo
+sleep 1
+# Inicia o aplicativo atualizado
+nohup "{{os.path.join(app_dir, "PrintManagementSystem")}}" > /dev/null 2>&1 &
+# Remove este script
+rm "$0"
+''')
+                os.chmod(startup_script, 0o755)
+                
+                # Executa o script de reinicialização
+                subprocess.Popen(["/bin/bash", startup_script], 
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+                
+            logging.info("Script de reinicialização criado e executado")
+            
+        except Exception as e:
+            logging.error(f"Erro ao tentar reiniciar: {{str(e)}}")
+            logging.error(traceback.format_exc())
+            
+    except Exception as e:
+        logging.error(f"Erro ao aplicar atualização: {{str(e)}}")
+        logging.error(traceback.format_exc())
+        return False
+    finally:
+        # Limpa os arquivos temporários
+        try:
+            logging.info("Limpando arquivos temporários")
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            logging.error(f"Erro ao limpar diretório temporário: {{str(e)}}")
+        
+        try:
+            os.remove(update_file)
+            logging.info("Arquivo de atualização removido")
+        except Exception as e:
+            logging.error(f"Erro ao remover arquivo de atualização: {{str(e)}}")
+    
+    logging.info("Atualização concluída com sucesso!")
+    return True
+
+# Aplica a atualização
+apply_update()
+""")
+            
+            # Executa o script em um processo separado sem privilégios
+            # e sem mostrar a janela do console
+            startup_info = None
+            creation_flags = 0
+            
+            # No Windows, esconde a janela do console
+            if self.system == "Windows":
+                startup_info = subprocess.STARTUPINFO()
+                startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startup_info.wShowWindow = 0  # SW_HIDE
+                creation_flags = subprocess.CREATE_NO_WINDOW
+            
+            # Executa o script
+            subprocess.Popen(
+                [sys.executable, script_path],
+                startupinfo=startup_info,
+                creationflags=creation_flags,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            
+            logger.info("Script de atualização iniciado")
+            self.is_updating = False
+            return True
+                
+        except Exception as e:
+            logger.error(f"Erro ao aplicar atualização: {str(e)}")
+            
+            # Notifica erro na instalação
+            self.notification_system.show_notification(
+                "Erro na Instalação",
+                f"Ocorreu um erro ao instalar a atualização: {str(e)}",
+                duration=10,
+                notification_type="error"
+            )
+            
+            self.is_updating = False
+            return False
+    
+    def _is_user_installation(self):
+        """
+        Verifica se a aplicação está instalada no diretório do usuário
+        
+        Returns:
+            bool: True se for instalação de usuário
+        """
+        if self.system == "Windows":
+            # Verifica se o diretório da aplicação está no AppData do usuário
+            app_data = os.environ.get('LOCALAPPDATA', '')
+            return app_data and self.app_root.lower().startswith(app_data.lower())
+        else:
+            # Em sistemas Unix, verifica se está no diretório home do usuário
+            home_dir = os.path.expanduser("~")
+            return self.app_root.startswith(home_dir)
+    
+    def check_and_update(self, silent=True, auto_apply=True):
         """
         Verifica e aplica atualizações automaticamente
         
         Args:
             silent (bool): Se True, não exibe notificações de "sem atualizações"
+            auto_apply (bool): Se True, aplica automaticamente a atualização
             
         Returns:
             bool: True se a atualização foi iniciada
@@ -679,15 +1130,108 @@ done
             try:
                 # Verifica se há atualizações
                 if self.check_for_update(silent):
-                    # Aplica a atualização
-                    self.apply_update()
+                    remote_version = self.update_info.get('version', 'nova versão')
+                    
+                    # Notificação sobre atualização disponível
+                    self.notification_system.show_notification(
+                        "Atualização Disponível",
+                        f"Nova versão ({remote_version}) será instalada automaticamente.",
+                        duration=10,
+                        notification_type="info"
+                    )
+                    
+                    if auto_apply:
+                        # Aplica a atualização automaticamente
+                        return self.apply_update()
                     return True
                 return False
             except Exception as e:
                 logger.error(f"Erro na thread de atualização: {str(e)}")
+                
+                # Notifica erro
+                self.notification_system.show_notification(
+                    "Erro na Atualização",
+                    f"Ocorreu um erro ao processar a atualização: {str(e)}",
+                    duration=10,
+                    notification_type="error"
+                )
+                
                 return False
         
         # Inicia a thread
         t = threading.Thread(target=update_thread, daemon=True)
         t.start()
         return True
+
+# Função para configurar verificação periódica de atualizações
+def setup_auto_updater(config, api_client):
+    """
+    Configura o verificador automático de atualizações
+    
+    Args:
+        config: Configuração da aplicação
+        api_client: Cliente da API
+        
+    Returns:
+        AppUpdater: Instância do gerenciador de atualizações
+    """
+    updater = AppUpdater(config, api_client)
+    
+    # Inicia a verificação de atualizações em uma thread separada
+    # para não bloquear a inicialização da aplicação
+    def delayed_check():
+        import time
+        # Aguarda a inicialização completa da aplicação
+        time.sleep(30)
+        # Verifica se há atualizações
+        updater.check_and_update(silent=True, auto_apply=True)
+    
+    check_thread = threading.Thread(target=delayed_check, daemon=True)
+    check_thread.start()
+    
+    # Configura verificação periódica de atualizações (a cada 4 horas)
+    def periodic_check():
+        import time
+        from datetime import datetime, timedelta
+        
+        # Define os minutos alvo para verificação
+        target_minutes = [0, 10, 20, 30, 40, 50]
+        
+        while True:
+            try:
+                # Obtém o tempo atual
+                now = datetime.now()
+                current_minute = now.minute
+                
+                # Encontra o próximo minuto alvo
+                next_minute = None
+                for minute in target_minutes:
+                    if minute > current_minute:
+                        next_minute = minute
+                        break
+                
+                if next_minute is None:
+                    next_minute = target_minutes[0]
+                    next_time = now.replace(minute=next_minute, second=0, microsecond=0) + timedelta(hours=1)
+                else:
+                    next_time = now.replace(minute=next_minute, second=0, microsecond=0)
+                
+                sleep_seconds = (next_time - now).total_seconds()
+                
+                if sleep_seconds > 0:
+                    logger.debug(f"Próxima verificação de atualização em {sleep_seconds:.1f} segundos ({next_time.strftime('%H:%M:%S')})")
+                    time.sleep(sleep_seconds)
+                
+                # Verifica se há atualizações no horário programado
+                logger.info(f"Executando verificação periódica de atualizações às {datetime.now().strftime('%H:%M:%S')}")
+                updater.check_and_update(silent=True, auto_apply=True)
+                
+            except Exception as e:
+                logger.error(f"Erro na verificação periódica de atualizações: {str(e)}")
+                time.sleep(60)
+    
+    periodic_thread = threading.Thread(target=periodic_check, daemon=True)
+    periodic_thread.daemon = True
+    periodic_thread.start()
+    
+    return updater

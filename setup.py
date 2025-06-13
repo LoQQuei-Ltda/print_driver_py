@@ -4,6 +4,7 @@ import sys
 import platform
 import shutil
 from setuptools import setup, find_packages, Command
+from __version__ import __version__
 
 class PyInstallerCommand(Command):
     description = "Build executable with PyInstaller"
@@ -211,7 +212,7 @@ app = BUNDLE(exe,
                  'NSHighResolutionCapable': True,
                  'NSRequiresAquaSystemAppearance': False,
              }})
-""".format(icon_path=icon_path, version="2.0.2")
+""".format(icon_path=icon_path, version=__version__)
         
         spec_content = f'''# -*- mode: python ; coding: utf-8 -*-
 import os
@@ -402,7 +403,8 @@ exe = EXE(
 # Configuração do projeto
 APP_NAME = "PrintManagementSystem"
 APP_AUTHOR = "LoQQuei"
-APP_VERSION = "2.0.2"
+print(__version__)
+APP_VERSION = __version__
 APP_DESCRIPTION = "Sistema de Gerenciamento de Impressão"
 
 # Dependências básicas

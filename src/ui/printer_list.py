@@ -822,6 +822,28 @@ class PrinterCardPanel(wx.Panel):
         
         self._init_ui()
     
+    def _is_epson_l3250(self, printer):
+        """Verifica se a impressora é uma Epson L3250 (sem suporte de impressão)"""
+        if not printer:
+            return False
+        
+        # Verifica no nome da impressora
+        name = getattr(printer, 'name', '') or ''
+        if 'l3250' in name.lower() or 'l-3250' in name.lower():
+            return True
+        
+        # Verifica no modelo
+        model = getattr(printer, 'model', '') or ''
+        if 'l3250' in model.lower() or 'l-3250' in model.lower():
+            return True
+        
+        # Verifica no atributo printer-make-and-model (IPP)
+        make_model = getattr(printer, 'printer-make-and-model', '') or ''
+        if 'l3250' in make_model.lower() or 'l-3250' in make_model.lower():
+            return True
+        
+        return False
+
     def _init_ui(self):
         """Inicializa a interface do usuário do card"""
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -900,19 +922,23 @@ class PrinterCardPanel(wx.Panel):
         def on_status_paint(event):
             dc = wx.PaintDC(status_panel)
             
-            # Determina a cor baseada no status, verificando os atributos de forma segura
-            is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
-            is_ready = hasattr(self.printer, 'is_ready') and self.printer.is_ready
-            
-            if is_online and is_ready:
-                # Verde se estiver completamente pronta (online e idle)
-                color = wx.Colour(40, 167, 69)  # Verde
-            elif is_online:
-                # Amarelo se estiver online mas não idle
-                color = wx.Colour(255, 193, 7)  # Amarelo
+            # Verifica se é Epson L3250 (sem suporte de impressão)
+            if self._is_epson_l3250(self.printer):
+                color = wx.Colour(128, 128, 128)  # Cinza para sem suporte
             else:
-                # Vermelho se não estiver online
-                color = wx.Colour(220, 53, 69)  # Vermelho
+                # Determina a cor baseada no status, verificando os atributos de forma segura
+                is_online = hasattr(self.printer, 'is_online') and self.printer.is_online
+                is_ready = hasattr(self.printer, 'is_ready') and self.printer.is_ready
+                
+                if is_online and is_ready:
+                    # Verde se estiver completamente pronta (online e idle)
+                    color = wx.Colour(40, 167, 69)  # Verde
+                elif is_online:
+                    # Amarelo se estiver online mas não idle
+                    color = wx.Colour(255, 193, 7)  # Amarelo
+                else:
+                    # Vermelho se não estiver online
+                    color = wx.Colour(220, 53, 69)  # Vermelho
             
             # Desenha o indicador de status (círculo)
             dc.SetBrush(wx.Brush(color))
@@ -2960,15 +2986,6 @@ class PrinterListPanel(wx.ScrolledWindow):
             def discovery_thread():
                 try:
                     logger.info("Iniciando atualização de impressoras...")
-                    
-                    # Notificação de progresso
-                    wx.CallAfter(
-                        self.notification_system.show_notification,
-                        "Descoberta de Impressoras",
-                        "Verificando conectividade e escaneando rede...",
-                        duration=4,
-                        notification_type="info"
-                    )
                     
                     # Verifica se o método existe
                     if not hasattr(self.api_client, 'get_printers_with_discovery'):

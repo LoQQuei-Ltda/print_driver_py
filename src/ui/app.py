@@ -140,7 +140,7 @@ class PrintManagementApp(wx.App):
             
             # Configura o agendador de tarefas
             from src.utils import TaskScheduler
-            from src.tasks import update_printers_task, update_application_task, collect_printer_pages_task
+            from src.tasks import update_printers_task, collect_printer_pages_task
             
             self.scheduler = TaskScheduler()
             # self.scheduler.add_task(
@@ -149,13 +149,6 @@ class PrintManagementApp(wx.App):
             #     3600,  # Atualiza a cada hora
             #     args=(self.api_client, self.config)
             # )
-
-            self.scheduler.add_task(
-                "check_updates",
-                update_application_task,
-                60, # Atualiza a cada minuto
-                args=(self.api_client, self.config)
-            )
 
             self.scheduler.add_task(
                 "validate_user",

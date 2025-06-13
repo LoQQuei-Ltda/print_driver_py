@@ -1496,7 +1496,7 @@ class PrinterServer:
         return filename
     
     def _save_pdf(self, pdf_data, title=None, author=None, filename=None):
-        """Salva os dados PDF em um arquivo no diretório apropriado"""
+        """Salva os dados PDF com verificação inteligente de duplicatas - VERSÃO MODIFICADA"""
         if not pdf_data:
             logger.error("Nenhum dado PDF para salvar.")
             return None
@@ -1507,6 +1507,18 @@ class PrinterServer:
             
             # Obtém o diretório de saída (diretório base ou específico do usuário)
             output_dir = self._get_user_output_dir(username)
+            
+            # Verifica se tem permissão de escrita no diretório
+            if not os.access(output_dir, os.W_OK):
+                logger.warning(f"Sem permissão de escrita em {output_dir}")
+                # Tenta usar um diretório alternativo
+                import tempfile
+                output_dir = tempfile.gettempdir()
+                logger.info(f"Usando diretório alternativo: {output_dir}")
+            
+            # Calcula hash para verificação inteligente de duplicatas
+            import hashlib
+            pdf_hash = hashlib.md5(pdf_data).hexdigest()
             
             # Determinar nome do arquivo
             if filename:
@@ -1525,26 +1537,81 @@ class PrinterServer:
             if not base_name.lower().endswith('.pdf'):
                 base_name += '.pdf'
             
-            # Caminho completo
+            # Caminho completo inicial
             output_path = os.path.join(output_dir, base_name)
             
-            # Evitar sobrescrever arquivos existentes
+            # Só considera duplicata se for o mesmo arquivo E mesmo nome E criado recentemente (< 5 minutos)
+            try:
+                if os.path.exists(output_path):
+                    with open(output_path, 'rb') as f:
+                        existing_hash = hashlib.md5(f.read()).hexdigest()
+                    
+                    # Se é o mesmo conteúdo e foi criado recentemente, é duplicata
+                    file_stat = os.stat(output_path)
+                    time_diff = time.time() - file_stat.st_mtime
+                    
+                    if existing_hash == pdf_hash and time_diff < 300:  # 5 minutos
+                        logger.info(f"Arquivo duplicado recente detectado: {output_path}")
+                        return output_path
+            except Exception as e:
+                logger.debug(f"Erro ao verificar duplicata: {e}")
+            
+            # Sistema de nomenclatura para evitar sobrescrever
             counter = 1
+            original_output_path = output_path
             while os.path.exists(output_path):
                 name_parts = base_name.rsplit('.', 1)
-                if counter == 1:
-                    new_name = f"{name_parts[0]}_copia.{name_parts[1]}"
+                if len(name_parts) == 2:
+                    name_without_ext = name_parts[0]
+                    extension = name_parts[1]
                 else:
-                    new_name = f"{name_parts[0]}_copia{counter}.{name_parts[1]}"
+                    name_without_ext = base_name
+                    extension = ""
+                
+                # Sistema de nomenclatura mais claro
+                if counter == 1:
+                    new_name = f"{name_without_ext}_v2"
+                else:
+                    new_name = f"{name_without_ext}_v{counter + 1}"
+                
+                if extension:
+                    new_name += f".{extension}"
+                    
                 output_path = os.path.join(output_dir, new_name)
                 counter += 1
+                
+                # Evita loop infinito
+                if counter > 100:
+                    # Usa timestamp único como último recurso
+                    timestamp = int(time.time() * 1000)
+                    unique_name = f"{name_without_ext}_{timestamp}"
+                    if extension:
+                        unique_name += f".{extension}"
+                    output_path = os.path.join(output_dir, unique_name)
+                    break
             
             # Garante que o diretório existe
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
-            # Salvar o arquivo
-            with open(output_path, 'wb') as f:
-                f.write(pdf_data)
+            # Operação atômica para salvar
+            temp_path = output_path + '.tmp'
+            try:
+                # Salvar temporariamente
+                with open(temp_path, 'wb') as f:
+                    f.write(pdf_data)
+                
+                # Move atomicamente
+                os.rename(temp_path, output_path)
+                
+            except Exception as e:
+                # Remove arquivo temporário em caso de erro
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except:
+                        pass
+                raise e
+            
             logger.info(f"PDF salvo em: {output_path}")
             
             # Chamar callback se fornecido
@@ -1557,12 +1624,13 @@ class PrinterServer:
                     logger.error(f"Erro ao processar callback: {e}")
             
             return output_path
+            
         except Exception as e:
             logger.error(f"Erro ao salvar PDF: {e}")
             
             # Tentativa de fallback para o diretório base
             try:
-                fallback_filename = f"documento_{time.strftime('%d-%m-%Y_%H-%M-%S')}.pdf"
+                fallback_filename = f"documento_{time.strftime('%d-%m-%Y_%H-%M-%S')}_{int(time.time() * 1000)}.pdf"
                 fallback_path = os.path.join(self.base_output_dir, fallback_filename)
                 
                 # Garante que o diretório existe

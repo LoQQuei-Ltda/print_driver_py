@@ -504,6 +504,7 @@ class MainScreen(wx.Frame):
             self.menu_buttons.append(item_panel)
         
         # Espaçador para empurrar o botão de logout para o fim
+        # Espaçador para empurrar o botão de logout para o fim
         sidebar_sizer.Add((0, 0), 1, wx.EXPAND)
         
         # Botão de logout
@@ -557,7 +558,28 @@ class MainScreen(wx.Frame):
         logout_text.Bind(wx.EVT_MOTION, lambda evt: on_logout_enter(evt))
         logout_text.Bind(wx.EVT_LEFT_DOWN, self.on_logout)
         
-        sidebar_sizer.Add(logout_panel, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, 20)
+        sidebar_sizer.Add(logout_panel, 0, wx.EXPAND | wx.TOP, 20)
+        
+        # Painel de versão (abaixo do logout)
+        version_panel = wx.Panel(self.sidebar_panel)
+        version_panel.SetBackgroundColour(wx.Colour(25, 25, 25))
+        version_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Obtém a versão automaticamente do config ou aplicação
+        from __version__ import __version__
+        app_version = __version__
+        if hasattr(wx.GetApp(), 'version'):
+            app_version = wx.GetApp().version
+        
+        # Texto da versão
+        version_text = wx.StaticText(version_panel, label=f"V{app_version}")
+        version_text.SetForegroundColour(wx.Colour(120, 120, 120))
+        version_text.SetFont(wx.Font(9, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        
+        version_sizer.Add(version_text, 0, wx.ALIGN_CENTER | wx.ALL, 5)
+        version_panel.SetSizer(version_sizer)
+        
+        sidebar_sizer.Add(version_panel, 0, wx.EXPAND | wx.BOTTOM, 10)
         
         self.sidebar_panel.SetSizer(sidebar_sizer)
         

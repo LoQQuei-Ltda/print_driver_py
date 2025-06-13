@@ -114,34 +114,6 @@ def update_printers_task(api_client, config):
     except Exception as e:
         logger.error(f"Erro ao atualizar impressoras: {str(e)}")
 
-def update_application_task(api_client, config):
-    """
-    Tarefa para verificar e aplicar atualizações da aplicação
-    
-    Args:
-        api_client: Cliente da API
-        config: Configuração da aplicação
-    """
-    try:
-        logger.info("Executando tarefa de verificação de atualizações")
-        
-        # Verifica se é o momento certo (minuto 0 da hora)
-        from datetime import datetime
-        now = datetime.now()
-        if now.minute != 0:
-            logger.info("Não é o momento para verificar atualizações (minuto != 0)")
-            return
-        
-        # Importa o módulo de atualização
-        from src.utils.updater import AppUpdater
-        
-        # Cria o atualizador e verifica atualizações
-        updater = AppUpdater(config, api_client)
-        updater.check_and_update(silent=True)
-        
-    except Exception as e:
-        logger.error(f"Erro ao verificar atualizações: {str(e)}")
-
 def collect_printer_pages_task(api_client, config):
     """
     Tarefa para coletar páginas impressas de todas as impressoras via SNMP

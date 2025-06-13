@@ -33,13 +33,36 @@ class PrintManagerTaskBarIcon:
             logger.warning("TaskBarIcon não é suportado nesta versão do wxPython")
             return
         
+        # CORREÇÃO: Verifica se o sistema tem taskbar disponível
+        if not self._check_taskbar_availability():
+            logger.warning("Taskbar não está disponível para este usuário")
+            return
+        
         try:
             # Cria o ícone da bandeja
             self.icon_impl = _PrintManagerTaskBarIconImpl(parent, config)
             logger.info("Ícone na bandeja criado com sucesso")
         except Exception as e:
             logger.error(f"Erro ao criar ícone na bandeja: {str(e)}")
-    
+
+    def _check_taskbar_availability(self):
+        """Verifica se a taskbar está disponível"""
+        try:
+            import platform
+            if platform.system() == 'Windows':
+                # Verifica se o explorer.exe está rodando
+                import psutil
+                for proc in psutil.process_iter(['name']):
+                    try:
+                        if proc.info['name'] and 'explorer.exe' in proc.info['name'].lower():
+                            return True
+                    except:
+                        continue
+                return False
+            return True
+        except:
+            return True  
+        
     def RemoveIcon(self):
         """Remove o ícone da bandeja"""
         if self.icon_impl:
@@ -89,21 +112,42 @@ class _PrintManagerTaskBarIconImpl(TaskBarIcon):
         try:
             if os.path.exists(icon_path):
                 self.icon = wx.Icon(icon_path)
-                self.SetIcon(self.icon, "Sistema de Gerenciamento de Impressão")
+                # CORREÇÃO: Verifica se SetIcon foi bem-sucedido
+                if not self.SetIcon(self.icon, "Sistema de Gerenciamento de Impressão"):
+                    raise Exception("SetIcon falhou")
             else:
-                # Cria um ícone vazio como fallback
-                icon_bmp = wx.Bitmap(16, 16)
-                dc = wx.MemoryDC(icon_bmp)
-                dc.SetBackground(wx.Brush(wx.Colour(0, 0, 255)))
-                dc.Clear()
-                dc.SelectObject(wx.NullBitmap)
+                # CORREÇÃO: Cria um ícone mais robusto como fallback
+                self._create_fallback_icon()
                 
-                self.icon = wx.Icon()
-                self.icon.CopyFromBitmap(icon_bmp)
-                self.SetIcon(self.icon, "Sistema de Gerenciamento de Impressão")
-                logger.warning(f"Ícone não encontrado em {icon_path}, usando ícone padrão")
         except Exception as e:
-            logger.error(f"Erro ao definir ícone na bandeja: {str(e)}")
+            logger.warning(f"Erro ao definir ícone na bandeja: {str(e)}")
+            # Tenta criar um ícone de fallback
+            self._create_fallback_icon()
+
+    def _create_fallback_icon(self):
+        """Cria um ícone de fallback simples"""
+        try:
+            # Cria um bitmap 16x16
+            icon_bmp = wx.Bitmap(16, 16)
+            dc = wx.MemoryDC(icon_bmp)
+            dc.SetBackground(wx.Brush(wx.Colour(0, 120, 200)))
+            dc.Clear()
+            
+            # Adiciona um "P" branco
+            dc.SetTextForeground(wx.WHITE)
+            font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+            dc.SetFont(font)
+            dc.DrawText("P", 2, 1)
+            
+            dc.SelectObject(wx.NullBitmap)
+            
+            self.icon = wx.Icon()
+            self.icon.CopyFromBitmap(icon_bmp)
+            self.SetIcon(self.icon, "Sistema de Gerenciamento de Impressão")
+            logger.info("Ícone de fallback criado")
+            
+        except Exception as e:
+            logger.error(f"Erro ao criar ícone de fallback: {e}")
     
     def CreatePopupMenu(self):
         """

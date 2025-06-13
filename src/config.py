@@ -19,19 +19,14 @@ class AppConfig:
     """Classe para gerenciar configurações da aplicação"""
 
     def __init__(self, data_dir):
-        """
-        Inicializa a configuração da aplicação
-        
-        Args:
-            data_dir (str): Diretório de dados do usuário
-        """
+        # Configuração existente mantida...
         self.data_dir = data_dir
         self.config_file = os.path.join(data_dir, "config", "config.json")
         self.pdf_dir = os.path.join(data_dir, "pdfs")
         self.temp_dir = os.path.join(data_dir, "temp")
         self.system = platform.system()
 
-        # Valores padrão
+        # Valores padrão estendidos
         self.default_config = {
             "theme": self._get_system_theme(),
             "api_url": "https://api.loqquei.com.br/api/v1",
@@ -46,15 +41,41 @@ class AppConfig:
             "printers": [],
             "print_jobs": [],
             "print_history": [],
-            "multi_user_mode": True,  # Indica se o sistema deve salvar por usuário
-            "user_directories": {}    # Mapeamento de usuários para diretórios
+            "multi_user_mode": True,
+            "user_directories": {},
+            # === NOVA SEÇÃO: Cache de endpoints de impressora ===
+            "printer_endpoint_cache": {},
+            # === NOVA SEÇÃO: Configurações de performance ===
+            "print_performance": {
+                "max_parallel_workers": 4,
+                "page_timeout": 15,
+                "jpg_quality": 85,
+                "max_dpi": 200,
+                "retry_attempts": 2,
+                "batch_processing": True
+            }
         }
 
-        # Carrega configurações ou cria se não existir
         self.config = self._load_config()
-        
-        # Garante que os diretórios existam
         self._ensure_directories()
+
+    def get_printer_endpoint_cache(self):
+        """Obtém cache de endpoints de impressoras"""
+        return self.config.get("printer_endpoint_cache", {})
+    
+    def set_printer_endpoint_cache(self, cache):
+        """Define cache de endpoints de impressoras"""
+        self.config["printer_endpoint_cache"] = cache
+        self._save_config(self.config)
+    
+    def get_print_performance_config(self):
+        """Obtém configurações de performance"""
+        return self.config.get("print_performance", self.default_config["print_performance"])
+    
+    def set_print_performance_config(self, perf_config):
+        """Define configurações de performance"""
+        self.config["print_performance"] = perf_config
+        self._save_config(self.config)
 
     def _ensure_directories(self):
         """Garante que os diretórios necessários existam"""

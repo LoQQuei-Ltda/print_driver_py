@@ -171,17 +171,22 @@ class DocumentCardPanel(wx.Panel):
         event.Skip()
 
     def _adjust_document_name(self):
-        """Ajusta o nome do documento baseado no tamanho disponível"""
+        """Ajusta o nome do documento baseado no tamanho disponível - VERSÃO CORRIGIDA PARA MACOS"""
         if self._is_destroyed or not self.doc_name_widget:
             return
             
         try:
+            # CORREÇÃO MACOS: Verifica se o widget ainda existe
+            if not self.doc_name_widget or not self.doc_name_widget.GetParent():
+                return
+                
             # Calcula a largura disponível
             total_width = self.GetSize().width
             if total_width <= 0:
                 # Tenta obter tamanho do parent se o próprio widget ainda não tem tamanho definido
                 if self.GetParent():
-                    total_width = self.GetParent().GetSize().width - 40  # 40px para margens
+                    parent_size = self.GetParent().GetSize()
+                    total_width = parent_size.width - 40  # 40px para margens
                 if total_width <= 0:
                     total_width = 400  # Valor padrão se ainda não conseguir determinar
                 
@@ -193,33 +198,43 @@ class DocumentCardPanel(wx.Panel):
                 if max_width <= 0:
                     return text
                     
-                bmp = wx.Bitmap(1, 1)
+                # CORREÇÃO MACOS: Cria bitmap temporário menor
+                bmp = wx.Bitmap(10, 10)
                 dc = wx.MemoryDC(bmp)
                 dc.SetFont(font)
                 
-                text_width = dc.GetTextExtent(text)[0]
-                if text_width <= max_width:
-                    return text
-                
-                ellipsis_width = dc.GetTextExtent("...")[0]
-                for i in range(len(text), 0, -1):
-                    sub_text = text[:i]
-                    width = dc.GetTextExtent(sub_text)[0]
-                    if width + ellipsis_width <= max_width:
-                        return sub_text + "..."
-                return "..."
+                try:
+                    text_width = dc.GetTextExtent(text)[0]
+                    if text_width <= max_width:
+                        return text
+                    
+                    ellipsis_width = dc.GetTextExtent("...")[0]
+                    for i in range(len(text), 0, -1):
+                        sub_text = text[:i]
+                        width = dc.GetTextExtent(sub_text)[0]
+                        if width + ellipsis_width <= max_width:
+                            return sub_text + "..."
+                    return "..."
+                finally:
+                    # CORREÇÃO MACOS: Garante limpeza do DC
+                    dc.SelectObject(wx.NullBitmap)
             
             # Aplica o truncamento
             truncated_name = truncate_text(self.document.name, available_width, self.name_font)
             
             # Atualiza apenas se necessário
-            if self.doc_name_widget.GetLabel() != truncated_name:
+            current_label = self.doc_name_widget.GetLabel()
+            if current_label != truncated_name:
                 self.doc_name_widget.SetLabel(truncated_name)
-                self.info_panel.Layout()
-                
+                # CORREÇÃO MACOS: Força layout do painel info
+                if self.info_panel and not getattr(self.info_panel, '_is_destroyed', False):
+                    self.info_panel.Layout()
+                    
         except RuntimeError:
             # Widget foi destruído durante a execução
             self._is_destroyed = True
+        except Exception as e:
+            logger.debug(f"Erro ao ajustar nome do documento: {str(e)}")
     
     def _create_action_button(self, parent, label, color, handler):
         """
@@ -410,87 +425,194 @@ class DocumentListPanel(wx.ScrolledWindow):
         self.load_documents()
 
     def _clear_existing_cards(self):
-        """Limpa os cards existentes de forma segura"""
-        # Primeiro marca todos os cards como destruídos
-        for card in self.document_cards:
-            if card and not card._is_destroyed:
-                card._is_destroyed = True
-        
-        # Limpa a lista
-        self.document_cards.clear()
-        
-        # Remove os widgets do painel
-        for child in self.content_panel.GetChildren():
-            if isinstance(child, DocumentCardPanel):
-                child.Destroy()
+        """Limpa cards existentes de forma mais robusta"""
+        try:
+            # Marca todos como destruídos primeiro
+            for card in self.document_cards:
+                if card:
+                    card._is_destroyed = True
+            
+            # Limpa lista
+            self.document_cards.clear()
+            
+            # Remove widgets do painel
+            children_to_remove = []
+            for child in self.content_panel.GetChildren():
+                if isinstance(child, DocumentCardPanel):
+                    children_to_remove.append(child)
+            
+            for child in children_to_remove:
+                try:
+                    child.Destroy()
+                except:
+                    pass
+            
+            # Força layout após remoção
+            self.content_panel.Layout()
+            
+            logger.debug("Cards existentes limpos com sucesso")
+            
+        except Exception as e:
+            logger.error(f"Erro ao limpar cards: {str(e)}")
+
+    def _adjust_all_cards_safe(self):
+        """Ajusta todos os cards com verificações de segurança"""
+        try:
+            for i, card in enumerate(self.document_cards):
+                try:
+                    if (card and 
+                        hasattr(card, '_adjust_document_name') and 
+                        not getattr(card, '_is_destroyed', False)):
+                        card._adjust_document_name()
+                except RuntimeError:
+                    logger.debug(f"Card {i} foi destruído durante ajuste")
+                except Exception as e:
+                    logger.debug(f"Erro ao ajustar card {i}: {str(e)}")
+            
+            # Agenda ajustes adicionais
+            wx.CallLater(100, self._final_adjustment)
+            wx.CallLater(250, self._final_adjustment)
+            
+        except Exception as e:
+            logger.debug(f"Erro em _adjust_all_cards_safe: {str(e)}")
+
+    def _final_adjustment(self):
+        """Ajuste final dos cards"""
+        try:
+            if not getattr(self, '_is_destroyed', False):
+                for card in self.document_cards:
+                    if (card and 
+                        hasattr(card, '_adjust_document_name') and 
+                        not getattr(card, '_is_destroyed', False)):
+                        try:
+                            card._adjust_document_name()
+                        except:
+                            pass
+                self.Refresh()
+        except:
+            pass
+    
+    def _adjust_all_cards_final(self):
+        """Ajuste final de todos os cards"""
+        try:
+            count = 0
+            for card in self.document_cards:
+                try:
+                    if (card and hasattr(card, '_adjust_document_name') and 
+                        not getattr(card, '_is_destroyed', False)):
+                        card._adjust_document_name()
+                        count += 1
+                except Exception as e:
+                    logger.debug(f"Erro ao ajustar card: {str(e)}")
+            
+            logger.info(f"Ajustados {count} cards de {len(self.document_cards)}")
+            
+            # Refresh final
+            self.Refresh()
+            
+        except Exception as e:
+            logger.debug(f"Erro no ajuste final: {str(e)}")
 
     def load_documents(self, event=None):
-        """Carrega os documentos disponíveis para impressão diretamente do sistema de arquivos"""
+        """Carrega documentos - VERSÃO SIMPLIFICADA E ROBUSTA"""
         try:
-            # Limpa os cards existentes de forma segura
+            logger.info("=== INICIANDO CARREGAMENTO DE DOCUMENTOS ===")
+            
+            # Limpa interface atual
             self._clear_existing_cards()
             
-            # Adiciona um indicador de carregamento
+            # Mostra indicador de carregamento
             loading_text = wx.StaticText(self.content_panel, label="Carregando documentos...")
             loading_text.SetForegroundColour(self.colors["text_color"])
             self.content_sizer.Insert(0, loading_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
             self.content_panel.Layout()
-            wx.GetApp().Yield()
+            self.Update()
 
-            # Tenta obter documentos do monitor de arquivos da tela principal se estiver disponível
+            # FORÇA refresh do file monitor
             app = wx.GetApp()
             self.documents = []
             
             if hasattr(app, 'main_screen') and hasattr(app.main_screen, 'file_monitor'):
-                self.documents = app.main_screen.file_monitor.get_documents()
+                file_monitor = app.main_screen.file_monitor
+                
+                # FORÇA refresh completo
+                file_monitor.force_refresh_documents()
+                self.documents = file_monitor.get_documents()
+                
+                logger.info(f"Documentos carregados do monitor principal: {len(self.documents)}")
             else:
-                # Caso não tenha acesso ao monitor principal, cria um monitor temporário
+                # Fallback: cria monitor temporário
                 from src.utils.file_monitor import FileMonitor
                 file_monitor = FileMonitor(app.config)
                 file_monitor._load_initial_documents()
                 self.documents = file_monitor.get_documents()
+                logger.info(f"Documentos carregados de monitor temporário: {len(self.documents)}")
 
-            # Remove o indicador de carregamento
+            # Remove loading
             loading_text.Destroy()
 
-            # Atualiza a visualização
-            if self.documents and len(self.documents) > 0:
+            # Constrói interface
+            if self.documents:
+                logger.info(f"Construindo interface para {len(self.documents)} documentos")
                 self.empty_panel.Hide()
                 
-                # Cria um card para cada documento
-                for doc in self.documents:
-                    card = DocumentCardPanel(self.content_panel, doc, self.on_print, self.on_delete)
-                    self.document_cards.append(card)  # Mantém referência
-                    self.content_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+                for i, doc in enumerate(self.documents):
+                    try:
+                        card = DocumentCardPanel(self.content_panel, doc, self.on_print, self.on_delete)
+                        self.document_cards.append(card)
+                        self.content_sizer.Add(card, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+                        logger.debug(f"Card {i+1}/{len(self.documents)} criado: {doc.name}")
+                    except Exception as e:
+                        logger.error(f"Erro ao criar card {i+1}: {str(e)}")
             else:
+                logger.info("Nenhum documento encontrado - exibindo painel vazio")
                 self.empty_panel.Show()
             
-            # Ajusta o layout
+            # Finaliza layout
             self.content_panel.Layout()
             self.Layout()
-            
-            for card in self.document_cards:
-                if hasattr(card, '_adjust_document_name'):
-                    card._adjust_document_name()
-            
-            wx.CallLater(100, self._force_adjust_all_cards)
-            
             self.FitInside()
             self.Refresh()
+            
+            # Ajusta cards após um delay
+            wx.CallLater(100, self._adjust_all_cards_final)
+            
+            logger.info(f"=== CARREGAMENTO CONCLUÍDO: {len(self.documents)} documentos ===")
 
         except Exception as e:
-            logger.error("Erro ao carregar documentos: %s", e)
+            logger.error(f"ERRO CRÍTICO no carregamento: {str(e)}")
+            import traceback
+            logger.error(f"Traceback completo:\n{traceback.format_exc()}")
             
-            # Exibe mensagem de erro
-            error_text = wx.StaticText(self.content_panel, label=f"Erro ao carregar documentos: {str(e)}")
-            error_text.SetForegroundColour(wx.Colour(220, 53, 69))  # Vermelho
+            # Cleanup
+            try:
+                loading_text.Destroy()
+            except:
+                pass
+            
+            # Mostra erro
+            error_text = wx.StaticText(self.content_panel, label=f"Erro ao carregar: {str(e)}")
+            error_text.SetForegroundColour(wx.Colour(220, 53, 69))
             self.content_sizer.Add(error_text, 0, wx.ALIGN_CENTER | wx.ALL, 20)
-            
             self.content_panel.Layout()
-            self.Layout()
             
     def _force_adjust_all_cards(self):
-        """Força o ajuste de nomes em todos os cards após o layout estar completo"""
-        for card in self.document_cards:
-            if hasattr(card, '_adjust_document_name') and not getattr(card, '_is_destroyed', False):
-                card._adjust_document_name()
+        """Força o ajuste de nomes em todos os cards após o layout estar completo - VERSÃO CORRIGIDA PARA MACOS"""
+        try:
+            for card in self.document_cards:
+                if (hasattr(card, '_adjust_document_name') and 
+                    not getattr(card, '_is_destroyed', False) and 
+                    card):
+                    try:
+                        card._adjust_document_name()
+                    except RuntimeError:
+                        # Card foi destruído durante a execução
+                        pass
+            
+            # CORREÇÃO MACOS: Força refresh final
+            if not getattr(self, '_is_destroyed', False):
+                self.Refresh()
+                
+        except Exception as e:
+            logger.debug(f"Erro ao ajustar cards: {str(e)}")
+

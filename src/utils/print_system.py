@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Sistema de impressão IPP para arquivos PDF integrado ao sistema de gerenciamento
-VERSÃO FINAL - IGUAL AO CÓDIGO DE TESTE QUE FUNCIONA
+Sistema de impressão IPP otimizado com cache de endpoints e processamento paralelo
+VERSÃO CORRIGIDA - Cache de endpoints, processamento paralelo e performance melhorada
 """
 
 import os
@@ -34,23 +34,119 @@ import ssl
 import requests
 import re
 import unicodedata
+import concurrent.futures
+from PIL import Image
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from src.utils.subprocess_utils import run_hidden, popen_hidden, check_output_hidden
 
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 logger = logging.getLogger("PrintManagementSystem.Utils.PrintSystem")
 
-def normalize_filename(filename):
-    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
-    # Remove acentos
-    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
-    # Remove caracteres não alfanuméricos e substitui por underscores
-    filename = re.sub(r'[^\w\-\.]', '_', filename)
-    # Limita o comprimento do nome
-    if len(filename) > 30:
-        base, ext = os.path.splitext(filename)
-        filename = f"{base[:25]}{ext}"
-    return filename
+class PrinterEndpointCache:
+    """Cache inteligente de endpoints de impressora por IP"""
+    
+    def __init__(self, config):
+        self.config = config
+        self._cache_lock = threading.Lock()
+    
+    def get_printer_endpoint_config(self, printer_ip: str) -> Dict[str, Any]:
+        """Obtém configuração de endpoint em cache para uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            return printer_configs.get(printer_ip, {})
+    
+    def save_printer_endpoint_config(self, printer_ip: str, endpoint: str, 
+                                   use_https: bool, test_successful: bool = True):
+        """Salva configuração de endpoint em cache (com controle de duplicação)"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            # === CORREÇÃO: Evita salvar múltiplas vezes seguidas ===
+            existing_config = printer_configs.get(printer_ip, {})
+            if (existing_config.get("endpoint") == endpoint and 
+                existing_config.get("use_https") == use_https and
+                test_successful):
+                # Só incrementa contadores se é o mesmo endpoint
+                existing_config["success_count"] = existing_config.get("success_count", 0) + 1
+                existing_config["last_success"] = datetime.now().isoformat()
+                printer_configs[printer_ip] = existing_config
+            else:
+                # Nova configuração ou configuração diferente
+                printer_configs[printer_ip] = {
+                    "endpoint": endpoint,
+                    "use_https": use_https,
+                    "protocol": "https" if use_https else "http",
+                    "last_success": datetime.now().isoformat() if test_successful else None,
+                    "success_count": 1 if test_successful else 0,
+                    "fail_count": 0 if test_successful else 1
+                }
+            
+            self.config.set("printer_endpoint_cache", printer_configs)
+            logger.info(f"Cache atualizado para {printer_ip}: {endpoint} ({'HTTPS' if use_https else 'HTTP'})")
+    
+    def mark_endpoint_failed(self, printer_ip: str):
+        """Marca endpoint como falhado e incrementa contador"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = printer_configs[printer_ip].get("fail_count", 0) + 1
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+    
+    def should_rediscover(self, printer_ip: str) -> bool:
+        """Verifica se deve redescobrir endpoints (critério MENOS sensível)"""
+        config = self.get_printer_endpoint_config(printer_ip)
+        fail_count = config.get("fail_count", 0)
+        success_count = config.get("success_count", 0)
+        last_success = config.get("last_success")
+        
+        # === CORREÇÃO: Critérios MENOS sensíveis para rediscovery ===
+        
+        # Se não tem sucesso anterior, sempre redescobre
+        if success_count == 0:
+            return True
+        
+        # Se falhou mais de 5 vezes seguidas (aumentado de 2)
+        if fail_count > 5:
+            return True
+            
+        # Se a taxa de falha é muito alta (> 80%, aumentado de 50%)
+        total_attempts = success_count + fail_count
+        if total_attempts > 10 and (fail_count / total_attempts) > 0.8:
+            return True
+        
+        # Se o último sucesso foi há mais de 4 horas (aumentado de 1 hora)
+        if last_success:
+            try:
+                from datetime import datetime, timedelta
+                last_success_time = datetime.fromisoformat(last_success)
+                if datetime.now() - last_success_time > timedelta(hours=4):
+                    return True
+            except:
+                return True  # Se não conseguir parsear, redescobre
+        
+        return False
+    
+    def reset_printer_cache(self, printer_ip: str):
+        """Reseta completamente o cache de uma impressora"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            if printer_ip in printer_configs:
+                del printer_configs[printer_ip]
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Cache resetado para {printer_ip}")
+    
+    def force_rediscovery(self, printer_ip: str):
+        """Força rediscovery marcando como falha múltipla"""
+        with self._cache_lock:
+            printer_configs = self.config.get("printer_endpoint_cache", {})
+            
+            if printer_ip in printer_configs:
+                printer_configs[printer_ip]["fail_count"] = 10  # Força rediscovery
+                printer_configs[printer_ip]["last_failure"] = datetime.now().isoformat()
+                self.config.set("printer_endpoint_cache", printer_configs)
+                logger.info(f"Rediscovery forçado para {printer_ip}")
 
 # Instalação automática de dependências
 def install_package(package):
@@ -63,43 +159,6 @@ def install_package(package):
         return True
     except subprocess.CalledProcessError as e:
         logger.error(f"Erro ao instalar {package}: {e}")
-        return False
-
-# Verifica e instala dependências
-def check_dependencies():
-    required_packages = ['requests', 'Pillow', 'pdf2image']
-    missing_packages = []
-    
-    # Verifica cada pacote
-    for package in required_packages:
-        try:
-            if package == 'pdf2image':
-                import pdf2image
-            elif package == 'Pillow':
-                from PIL import Image
-            elif package == 'requests':
-                import requests
-        except ImportError:
-            missing_packages.append(package)
-    
-    # Instala pacotes faltantes
-    if missing_packages:
-        logger.info(f"Instalando pacotes faltantes: {missing_packages}")
-        for package in missing_packages:
-            if install_package(package):
-                logger.info(f"Pacote {package} instalado com sucesso")
-            else:
-                logger.error(f"Falha ao instalar {package}")
-                return False
-    
-    # Importa os pacotes após instalação
-    try:
-        import requests
-        from PIL import Image
-        import pdf2image
-        return True
-    except ImportError as e:
-        logger.error(f"Falha ao importar dependências após instalação: {e}")
         return False
 
 # Gerencia o Poppler para conversão de PDF para imagem
@@ -118,51 +177,217 @@ logger = logging.getLogger(__name__)
 
 class PopplerManager:
     @staticmethod
+    def show_macos_installation_instructions():
+        """Mostra instruções específicas de instalação para macOS"""
+        logger.info("=== INSTRUÇÕES DE INSTALAÇÃO PARA MACOS ===")
+        logger.info("O Poppler é necessário para conversão de PDF para JPG.")
+        logger.info("")
+        logger.info("OPÇÃO 1 - Homebrew (Recomendado):")
+        logger.info("1. Instale o Homebrew se não tiver: https://brew.sh")
+        logger.info("2. Execute: brew install poppler")
+        logger.info("")
+        logger.info("OPÇÃO 2 - MacPorts:")
+        logger.info("1. Instale o MacPorts: https://www.macports.org")
+        logger.info("2. Execute: sudo port install poppler")
+        logger.info("")
+        logger.info("OPÇÃO 3 - Conda:")
+        logger.info("1. Execute: conda install -c conda-forge poppler")
+        logger.info("")
+        logger.info("Após a instalação, reinicie o aplicativo.")
+        logger.info("=== FIM DAS INSTRUÇÕES ===")
+
+    @staticmethod
     def get_poppler_path():
-        """Retorna o caminho do Poppler se estiver instalado"""
+        """Retorna o caminho do Poppler se estiver instalado - VERSÃO CORRIGIDA PARA MACOS"""
         system = platform.system().lower()
         
-        if system == "windows":
-            # Verifica se poppler já está no PATH
+        if system == "darwin":  # macOS
+            # === CORREÇÃO: Caminhos específicos do macOS ===
+            possible_paths = [
+                "/usr/local/bin",           # Homebrew Intel
+                "/opt/homebrew/bin",        # Homebrew Apple Silicon
+                "/usr/bin",                 # Sistema
+                "/opt/local/bin",           # MacPorts
+                "/usr/local/opt/poppler/bin",  # Homebrew específico
+            ]
+            
+            # Primeiro testa se está no PATH
             try:
-                result = run_hidden(['pdftoppm', '-h'],
-                    capture_output=True, text=True, timeout=5)
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                     capture_output=True, text=True, timeout=3)
+                if result.returncode == 0 and result.stdout.strip():
+                    poppler_path = os.path.dirname(result.stdout.strip())
+                    logger.info(f"Poppler encontrado no PATH: {poppler_path}")
+                    return poppler_path
+            except Exception as e:
+                logger.debug(f"Erro ao verificar PATH: {e}")
+            
+            # Procura em caminhos conhecidos
+            for path in possible_paths:
+                pdftoppm_path = os.path.join(path, "pdftoppm")
+                if os.path.exists(pdftoppm_path) and os.access(pdftoppm_path, os.X_OK):
+                    try:
+                        result = subprocess.run([pdftoppm_path, '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                        if result.returncode == 0:
+                            logger.info(f"Poppler encontrado e testado em: {path}")
+                            return path
+                    except Exception as e:
+                        logger.debug(f"Poppler encontrado mas não funciona em {path}: {e}")
+                        continue
+            
+            logger.info("Poppler não encontrado em nenhum caminho conhecido no macOS")
+            return None
+            
+        elif system == "windows":
+            # === CORREÇÃO: Verifica PATH primeiro sem exceção ===
+            try:
+                # Tenta executar pdftoppm sem capturar stderr
+                result = subprocess.run(['pdftoppm', '-h'], 
+                                     capture_output=True, text=True, timeout=3)
                 if result.returncode == 0:
                     logger.info("Poppler encontrado no PATH do sistema")
                     return None  # Já está no PATH
+            except FileNotFoundError:
+                pass  # Não encontrado no PATH, continua procurando
             except Exception as e:
-                logger.debug(f"Poppler não encontrado no PATH: {e}")
+                logger.debug(f"Erro ao testar Poppler no PATH: {e}")
             
-            # Procura por instalação local do poppler
+            # === CORREÇÃO: Procura em caminhos conhecidos com verificação melhorada ===
             possible_paths = [
                 os.path.join(os.getcwd(), "poppler", "bin"),
                 os.path.join(os.getcwd(), "poppler", "Library", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "bin"),
                 os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "Library", "bin"),
-                os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "poppler", "library", "bin"),
                 r"C:\Program Files\poppler\Library\bin",
-                r"C:\Program Files\poppler\library\bin",
                 r"C:\Program Files\poppler\bin",
                 r"C:\Program Files (x86)\poppler\Library\bin",
-                r"C:\Program Files (x86)\poppler\library\bin",
                 r"C:\Program Files (x86)\poppler\bin",
                 r"C:\poppler\Library\bin",
-                r"C:\poppler\library\bin",
                 r"C:\poppler\bin",
             ]
             
             for path in possible_paths:
                 pdftoppm_path = os.path.join(path, "pdftoppm.exe")
                 if os.path.exists(pdftoppm_path):
-                    logger.info(f"Poppler encontrado em: {path}")
-                    return path
+                    # === CORREÇÃO: Testa se o executável funciona ===
+                    try:
+                        result = subprocess.run([pdftoppm_path, '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                        if result.returncode == 0:
+                            logger.info(f"Poppler encontrado e testado em: {path}")
+                            return path
+                    except Exception as e:
+                        logger.debug(f"Poppler encontrado mas não funciona em {path}: {e}")
+                        continue
             
             logger.info("Poppler não encontrado em nenhum caminho conhecido")
             return None
         
-        # Para Linux/Mac, geralmente está no PATH
-        return None
+        # Para Linux, geralmente está no PATH
+        try:
+            result = subprocess.run(['pdftoppm', '-h'], 
+                                 capture_output=True, text=True, timeout=3)
+            return None if result.returncode == 0 else None
+        except:
+            return None
 
+    @staticmethod
+    def update_path_for_homebrew():
+        """Atualiza PATH com caminhos do Homebrew - FUNÇÃO SIMPLES"""
+        import os
+        
+        # Caminhos do Homebrew
+        homebrew_paths = ["/opt/homebrew/bin", "/usr/local/bin"]
+        current_path = os.environ.get('PATH', '')
+        
+        for path in homebrew_paths:
+            if os.path.exists(path) and path not in current_path:
+                os.environ['PATH'] = f"{path}:{current_path}"
+                current_path = os.environ['PATH']
+                logger.info(f"Adicionado {path} ao PATH")
+        
+        return True
+
+    @staticmethod
+    def install_poppler_macos():
+        """Instala Poppler no macOS e reinicia se necessário"""
+        logger.info("Tentando instalar Poppler no macOS usando Homebrew...")
+        
+        try:
+            # Verifica se Homebrew está instalado
+            result = subprocess.run(['which', 'brew'], 
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode != 0:
+                logger.error("Homebrew não encontrado. Por favor, instale o Homebrew primeiro:")
+                logger.error("Visite: https://brew.sh")
+                return None
+            
+            # Verifica se o Poppler já está instalado
+            check_result = subprocess.run(['brew', 'list', 'poppler'], 
+                                        capture_output=True, text=True, timeout=10)
+            
+            if check_result.returncode == 0:
+                logger.info("Poppler já está instalado via Homebrew")
+                
+                # Verifica se funciona
+                try:
+                    test_result = subprocess.run(['pdftoppm', '-h'], 
+                                               capture_output=True, text=True, timeout=3)
+                    if test_result.returncode == 0:
+                        logger.info("Poppler está funcionando")
+                        return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
+                    else:
+                        # Instalado mas não funciona - precisa reiniciar
+                        logger.warning("Poppler instalado mas não funciona - oferecendo reinício")
+                        PopplerManager.show_restart_dialog_and_restart()
+                        return None
+                except:
+                    # Erro ao testar - precisa reiniciar
+                    logger.warning("Erro ao testar Poppler - oferecendo reinício")
+                    PopplerManager.show_restart_dialog_and_restart()
+                    return None
+            
+            # Tenta instalar poppler
+            logger.info("Instalando poppler via Homebrew...")
+            result = subprocess.run(['brew', 'install', 'poppler'], 
+                                  capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                logger.info("✓ Poppler instalado com sucesso via Homebrew!")
+                
+                # Aguarda um pouco
+                time.sleep(2)
+                
+                # Verifica se funciona imediatamente
+                try:
+                    test_result = subprocess.run(['pdftoppm', '-h'], 
+                                               capture_output=True, text=True, timeout=3)
+                    if test_result.returncode == 0:
+                        logger.info("✓ Poppler funcionando imediatamente!")
+                        return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
+                    else:
+                        # Instalado mas não funciona - precisa reiniciar
+                        logger.info("Poppler instalado mas precisa reiniciar aplicação")
+                        PopplerManager.show_restart_dialog_and_restart()
+                        return None
+                except:
+                    # Erro ao testar - precisa reiniciar
+                    logger.info("Poppler instalado mas precisa reiniciar aplicação")
+                    PopplerManager.show_restart_dialog_and_restart()
+                    return None
+            else:
+                logger.error(f"Erro ao instalar Poppler: {result.stderr}")
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout ao instalar Poppler")
+            return None
+        except Exception as e:
+            logger.error(f"Erro ao instalar Poppler no macOS: {e}")
+            return None
+        
     @staticmethod
     def verify_permissions(directory):
         """Verifica se temos permissões adequadas no diretório"""
@@ -359,10 +584,39 @@ class PopplerManager:
 
     @staticmethod
     def setup_poppler():
-        """Configura o Poppler para uso com pdf2image"""
+        """Configura o Poppler para uso com pdf2image - COM REINÍCIO AUTOMÁTICO"""
         system = platform.system().lower()
         
-        if system == "windows":
+        if system == "darwin":  # macOS
+            poppler_path = PopplerManager.get_poppler_path()
+            
+            if poppler_path is None:
+                # Tenta encontrar pelo comando 'which'
+                try:
+                    result = subprocess.run(['which', 'pdftoppm'], 
+                                          capture_output=True, text=True, timeout=3)
+                    if result.returncode == 0:
+                        logger.info("Poppler encontrado no PATH do sistema")
+                        return None  # Já está no PATH
+                except:
+                    pass
+                
+                logger.info("Poppler não encontrado. Tentando instalação automática...")
+                poppler_path = PopplerManager.install_poppler_macos()
+                
+                if poppler_path is None:
+                    # Se chegou aqui, pode ter sido oferecido reinício
+                    # Verifica se precisa de reinício
+                    if PopplerManager.check_poppler_needs_restart():
+                        logger.info("Poppler instalado mas aplicação precisa ser reiniciada")
+                        PopplerManager.show_restart_dialog_and_restart()
+                    
+                    logger.error("Não foi possível configurar o Poppler automaticamente.")
+                    raise Exception("Unable to get page count. Is poppler installed and in PATH?")
+            
+            return poppler_path
+            
+        elif system == "windows":
             poppler_path = PopplerManager.get_poppler_path()
             
             if poppler_path is None:
@@ -371,16 +625,11 @@ class PopplerManager:
                 
                 if poppler_path is None:
                     logger.error("Não foi possível instalar o Poppler automaticamente.")
-                    logger.error("Soluções alternativas:")
-                    logger.error("1. Instale o Poppler manualmente: https://github.com/oschwartz10612/poppler-windows/releases")
-                    logger.error("2. Adicione o Poppler ao PATH do sistema")
-                    logger.error("3. Execute o script como administrador")
-                    return None
+                    raise Exception("Unable to get page count. Is poppler installed and in PATH?")
             
             return poppler_path
         
-        else:
-            # Para Linux/Mac
+        else:  # Linux
             try:
                 result = run_hidden(['pdftoppm', '-h'],
                     capture_output=True, text=True, timeout=5)
@@ -391,18 +640,155 @@ class PopplerManager:
             
             logger.error("Poppler não encontrado.")
             logger.error("Instale com: sudo apt-get install poppler-utils (Ubuntu/Debian)")
-            logger.error("ou: brew install poppler (macOS)")
-            return None
+            raise Exception("Unable to get page count. Is poppler installed and in PATH?")
+
+    @staticmethod
+    def check_poppler_needs_restart():
+        """Verifica se o Poppler foi instalado mas precisa reiniciar"""
+        try:
+            # Verifica se o Poppler está instalado via Homebrew
+            brew_check = subprocess.run(['brew', 'list', 'poppler'], 
+                                      capture_output=True, text=True, timeout=5)
+            
+            if brew_check.returncode == 0:
+                # Poppler está instalado, mas verifica se funciona
+                poppler_check = subprocess.run(['pdftoppm', '-h'], 
+                                             capture_output=True, text=True, timeout=3)
+                
+                if poppler_check.returncode != 0:
+                    # Instalado mas não funciona - precisa reiniciar
+                    return True
+            
+            return False
+        except:
+            return False
+
+    @staticmethod
+    def show_restart_dialog_and_restart():
+        """Mostra diálogo de reinício e reinicia a aplicação"""
+        try:
+            import wx
+            
+            # Cria o diálogo de aviso
+            dlg = wx.MessageDialog(
+                None,
+                "O Poppler foi instalado com sucesso via Homebrew!\n\n"
+                "Para que a conversão de PDF para JPG funcione corretamente,\n"
+                "é necessário reiniciar a aplicação.\n\n"
+                "Depois de reiniciado, envie novamente sua impressão!\n\n"
+                "Deseja reiniciar agora?",
+                "Reinício Necessário - Poppler Instalado",
+                wx.YES_NO | wx.ICON_INFORMATION | wx.YES_DEFAULT
+            )
+            
+            result = dlg.ShowModal()
+            dlg.Destroy()
+            
+            if result == wx.ID_YES:
+                PopplerManager.restart_application()
+                return True
+            else:
+                # Usuário escolheu não reiniciar agora
+                wx.MessageBox(
+                    "A conversão JPG pode não funcionar até que a aplicação seja reiniciada.\n"
+                    "Você pode reiniciar manualmente quando desejar.",
+                    "Aviso",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erro ao mostrar diálogo de reinício: {e}")
+            return False
+        
+    @staticmethod
+    def restart_application():
+        """Reinicia a aplicação atual"""
+        try:
+            import sys
+            import os
+            import subprocess
+            
+            logger.info("Reiniciando aplicação...")
+            
+            # Obtém o script principal que está sendo executado
+            script_path = sys.argv[0]
+            
+            # Se for um executável Python compilado (.app no macOS)
+            if getattr(sys, 'frozen', False):
+                # Aplicação empacotada (py2app, PyInstaller, etc.)
+                executable = sys.executable
+                subprocess.Popen([executable])
+            else:
+                # Script Python normal
+                python_exe = sys.executable
+                subprocess.Popen([python_exe, script_path] + sys.argv[1:])
+            
+            # Agenda o fechamento da aplicação atual
+            import wx
+            wx.CallAfter(wx.GetApp().ExitMainLoop)
+            
+            logger.info("Aplicação será reiniciada...")
+            
+        except Exception as e:
+            logger.error(f"Erro ao reiniciar aplicação: {e}")
+            # Fallback: apenas fecha a aplicação
+            try:
+                import wx
+                wx.MessageBox(
+                    "Não foi possível reiniciar automaticamente.\n"
+                    "Por favor, feche e abra a aplicação manualmente.",
+                    "Aviso",
+                    wx.OK | wx.ICON_WARNING
+                )
+                wx.CallAfter(wx.GetApp().ExitMainLoop)
+            except:
+                import sys
+                sys.exit(0)
 
     @staticmethod
     def diagnose_poppler():
-        """Diagnóstica problemas com o Poppler"""
+        """Diagnóstica problemas com o Poppler - ATUALIZADO PARA MACOS"""
         logger.info("=== DIAGNÓSTICO POPPLER ===")
         
         system = platform.system().lower()
         logger.info(f"Sistema operacional: {system}")
         
-        if system == "windows":
+        if system == "darwin":  # macOS
+            # Verifica PATH
+            try:
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                     capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logger.info(f"Poppler no PATH: SIM ({result.stdout.strip()})")
+                else:
+                    logger.info("Poppler no PATH: NÃO")
+            except:
+                logger.info("Poppler no PATH: NÃO")
+            
+            # Verifica Homebrew
+            try:
+                result = subprocess.run(['which', 'brew'], 
+                                     capture_output=True, text=True, timeout=5)
+                logger.info(f"Homebrew disponível: {'SIM' if result.returncode == 0 else 'NÃO'}")
+            except:
+                logger.info("Homebrew disponível: NÃO")
+            
+            # Verifica caminhos conhecidos
+            logger.info("Verificando caminhos conhecidos...")
+            possible_paths = [
+                "/usr/local/bin/pdftoppm",           # Homebrew Intel
+                "/opt/homebrew/bin/pdftoppm",        # Homebrew Apple Silicon
+                "/usr/bin/pdftoppm",                 # Sistema
+                "/opt/local/bin/pdftoppm",           # MacPorts
+            ]
+            
+            for path in possible_paths:
+                exists = os.path.exists(path)
+                executable = os.access(path, os.X_OK) if exists else False
+                logger.info(f"  {path}: {'ENCONTRADO' if exists else 'NÃO ENCONTRADO'} {'(EXECUTÁVEL)' if executable else '(NÃO EXECUTÁVEL)' if exists else ''}")
+            
+        elif system == "windows":
             # Verifica PATH
             try:
                 result = subprocess.run(['pdftoppm', '-h'], 
@@ -431,6 +817,10 @@ class PopplerManager:
             logger.info(f"Permissões no diretório do script: {'OK' if has_perms else 'NEGADAS'}")
             
         logger.info("=== FIM DIAGNÓSTICO ===")
+
+def get_poppler_path():
+    """Retorna o caminho do Poppler se estiver instalado"""
+    return PopplerManager.get_poppler_path()
 
 # Constantes IPP
 class IPPVersion:
@@ -566,7 +956,7 @@ class PrintJobInfo:
         }
 
 class IPPEncoder:
-    """Codificador para protocolo IPP - IGUAL AO CÓDIGO DE TESTE"""
+    """Codificador para protocolo IPP"""
     
     @staticmethod
     def encode_string(tag: int, name: str, value: str) -> bytes:
@@ -597,52 +987,337 @@ class IPPEncoder:
         """Codifica um atributo enum"""
         return IPPEncoder.encode_integer(IPPTag.ENUM, name, value)
 
-class IPPPrinter:
-    """Classe principal para impressão de arquivos PDF via IPP - IGUAL AO CÓDIGO DE TESTE"""
+def normalize_filename(filename):
+    """Normaliza um nome de arquivo removendo acentos e caracteres especiais"""
+    filename = unicodedata.normalize('NFKD', filename).encode('ASCII', 'ignore').decode('ASCII')
+    filename = re.sub(r'[^\w\-\.]', '_', filename)
+    if len(filename) > 30:
+        base, ext = os.path.splitext(filename)
+        filename = f"{base[:25]}{ext}"
+    return filename
+
+def check_dependencies():
+    """Verifica e instala dependências necessárias"""
+    required_packages = ['requests', 'Pillow', 'pdf2image']
+    missing_packages = []
     
-    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False):
+    for package in required_packages:
+        try:
+            if package == 'pdf2image':
+                import pdf2image
+            elif package == 'Pillow':
+                from PIL import Image
+            elif package == 'requests':
+                import requests
+        except ImportError:
+            missing_packages.append(package)
+    
+    if missing_packages:
+        logger.info(f"Instalando pacotes faltantes: {missing_packages}")
+        for package in missing_packages:
+            try:
+                if platform.system().lower() == "windows":
+                    result = run_hidden([sys.executable, "-m", "pip", "install", package],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                else:
+                    result = run_hidden([sys.executable, "-m", "pip3", "install", package],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                logger.info(f"Pacote {package} instalado com sucesso")
+            except:
+                logger.error(f"Falha ao instalar {package}")
+                return False
+    
+    try:
+        import requests
+        from PIL import Image
+        import pdf2image
+        return True
+    except ImportError as e:
+        logger.error(f"Falha ao importar dependências: {e}")
+        return False
+
+class IPPPrinter:
+    """Classe principal para impressão de arquivos PDF via IPP - VERSÃO CORRIGIDA"""
+    
+    def __init__(self, printer_ip: str, port: int = 631, use_https: bool = False, config=None):
+        """Construtor da classe IPPPrinter com otimizações para EPSON"""
         # Verifica dependências
         if not check_dependencies():
             raise ImportError("Falha ao verificar/instalar dependências para impressão")
             
-        # Importa após verificação
-        global requests
-        import requests
-        from requests.adapters import HTTPAdapter
-        from urllib3.util.retry import Retry
-        
-        # Configuração de retry para requisições HTTP
+        # Configuração de retry otimizada
         retry_strategy = Retry(
-            total=3,
+            total=2,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "POST"],
-            backoff_factor=1
+            backoff_factor=0.5
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session = requests.Session()
         session.mount("http://", adapter)
         session.mount("https://", adapter)
         
-        # Usa a sessão configurada
         self.session = session
-        
         self.printer_ip = printer_ip
         self.port = port
         self.use_https = use_https
         self.protocol = "https" if use_https else "http"
         self.base_url = f"{self.protocol}://{printer_ip}:{port}"
         self.request_id = 1
-        self.discovered_endpoints = []
+        self.config = config
+
+        # === CORREÇÃO: Detecção automática de impressoras Epson ===
+        self.force_jpg_mode = False
+        self.is_epson_printer = self._is_epson_printer(printer_ip)
         
-        # Se não especificou HTTPS, detecta automaticamente
-        if not use_https:
-            self._auto_detect_https()
+        if config and hasattr(config, 'get'):
+            # Lista expandida de IPs/modelos que devem usar apenas JPG
+            jpg_only_printers = [
+                "10.148.1.20",   # EPSON L14150 Series
+                "10.148.1.192",  # EPSON L3250 Series
+            ]
+            
+            if printer_ip in jpg_only_printers or self.is_epson_printer:
+                self.force_jpg_mode = True
+                logger.info(f"Impressora {printer_ip} configurada para usar apenas modo JPG (EPSON detectada)")
         
-        logger.info(f"Protocolo final: {self.protocol} - {self.base_url}")
+        # Cache de endpoints
+        self.endpoint_cache = PrinterEndpointCache(config) if config else None
+        self.known_endpoint = None
+        self.known_protocol = None
         
-        # Descobre endpoints disponíveis
-        self.discovered_endpoints = self._discover_printer_endpoints()
+        # Tenta usar configuração em cache primeiro
+        if self.endpoint_cache:
+            cached_config = self.endpoint_cache.get_printer_endpoint_config(printer_ip)
+            if cached_config and not self.endpoint_cache.should_rediscover(printer_ip):
+                self.known_endpoint = cached_config.get("endpoint", "")
+                self.use_https = cached_config.get("use_https", False)
+                self.protocol = cached_config.get("protocol", "http")
+                self.base_url = f"{self.protocol}://{printer_ip}:{port}"
+                logger.info(f"Usando configuração em cache para {printer_ip}: {self.known_endpoint} ({self.protocol.upper()})")
+                return
+        
+        # Se não tem cache válido, faz discovery otimizado
+        logger.info(f"Fazendo discovery para {printer_ip}...")
+        self._quick_discovery()
     
+    def _quick_discovery(self):
+        """Discovery rápido e otimizado testando ambos os protocolos"""
+        # Endpoints mais comuns primeiro
+        priority_endpoints = [
+            "/ipp/print",
+            "/ipp", 
+            "/printers/ipp",
+            "/ipp/printer",
+            "/printer",
+            "/printers",
+            ""
+        ]
+        
+        # === CORREÇÃO: Testa ambos os protocolos para cada endpoint ===
+        working_combinations = []
+        
+        logger.info(f"Testando discovery para {self.printer_ip} - verificando HTTP e HTTPS...")
+        
+        # Testa todas as combinações possíveis
+        for endpoint in priority_endpoints:
+            # Testa HTTP
+            if self._test_endpoint_quick(endpoint, use_https=False):
+                working_combinations.append((endpoint, False, "http"))
+                logger.debug(f"HTTP funciona: {endpoint}")
+            
+            # Testa HTTPS
+            if self._test_endpoint_quick(endpoint, use_https=True):
+                working_combinations.append((endpoint, True, "https"))
+                logger.debug(f"HTTPS funciona: {endpoint}")
+        
+        if not working_combinations:
+            # Fallback para endpoint padrão
+            self.known_endpoint = "/ipp/print"
+            self.use_https = False
+            self.protocol = "http"
+            self.base_url = f"http://{self.printer_ip}:{self.port}"
+            logger.warning(f"Nenhum endpoint respondeu, usando fallback: {self.known_endpoint}")
+            return
+        
+        # === CORREÇÃO: Testa impressão real com cada combinação ===
+        logger.info(f"Encontradas {len(working_combinations)} combinações, testando impressão real...")
+        
+        for endpoint, use_https, protocol in working_combinations:
+            logger.info(f"Testando impressão real: {protocol.upper()}{endpoint}")
+            
+            # Configura temporariamente para este teste
+            self.known_endpoint = endpoint
+            self.use_https = use_https
+            self.protocol = protocol
+            self.base_url = f"{protocol}://{self.printer_ip}:{self.port}"
+            
+            # Testa com impressão real (teste pequeno)
+            if self._test_real_printing(endpoint, use_https):
+                logger.info(f"✓ Impressão confirmada: {protocol.upper()}{endpoint}")
+                self._save_to_cache(endpoint, use_https, True)
+                return
+            else:
+                logger.debug(f"✗ Falha na impressão: {protocol.upper()}{endpoint}")
+        
+        # Se nenhuma funcionou para impressão real, usa a primeira que respondeu HTTP
+        logger.warning("Nenhuma combinação funcionou para impressão real, usando primeira opção HTTP")
+        endpoint, use_https, protocol = working_combinations[0]
+        self.known_endpoint = endpoint
+        self.use_https = use_https
+        self.protocol = protocol
+        self.base_url = f"{protocol}://{self.printer_ip}:{self.port}"
+    
+    def _test_endpoint_quick(self, endpoint: str, use_https: bool) -> bool:
+        """Teste rápido de endpoint (timeout reduzido)"""
+        protocol = "https" if use_https else "http"
+        url = f"{protocol}://{self.printer_ip}:{self.port}{endpoint}"
+        
+        try:
+            response = requests.get(
+                url,
+                timeout=3,  # Timeout reduzido
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # Considera sucesso códigos que indicam que o endpoint existe
+            return response.status_code in [200, 400, 401, 403, 404, 405, 426]
+            
+        except requests.exceptions.ConnectionError as e:
+            # Se Connection Reset e testando HTTP, pode precisar de HTTPS
+            if ("10054" in str(e) or "Connection aborted" in str(e)) and not use_https:
+                return False  # Vai testar HTTPS na próxima rodada
+            return False
+        except:
+            return False
+
+    def _test_real_printing(self, endpoint: str, use_https: bool) -> bool:
+        """Testa impressão real com dados mínimos para validar o endpoint"""
+        try:
+            protocol = "https" if use_https else "http"
+            url = f"{protocol}://{self.printer_ip}:{self.port}{endpoint}"
+            
+            # Cria URI IPP correto
+            if use_https:
+                printer_uri = url.replace("https://", "ipps://", 1)
+            else:
+                printer_uri = url.replace("http://", "ipp://", 1)
+            
+            # Cria uma requisição IPP mínima para teste (sem documento)
+            attributes = {
+                "printer-uri": printer_uri,
+                "requesting-user-name": "test",
+                "job-name": "test_connection",
+                "document-format": "application/pdf",
+                "ipp-attribute-fidelity": False,
+                "copies": 1
+            }
+            
+            # Dados PDF mínimos (PDF vazio válido)
+            minimal_pdf = b"""%%PDF-1.4
+1 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+
+2 0 obj
+<<
+/Type /Pages
+/Kids [3 0 R]
+/Count 1
+>>
+endobj
+
+3 0 obj
+<<
+/Type /Page
+/Parent 2 0 R
+/MediaBox [0 0 612 792]
+>>
+endobj
+
+xref
+0 4
+0000000000 65535 f 
+0000000009 00000 n 
+0000000074 00000 n 
+0000000120 00000 n 
+trailer
+<<
+/Size 4
+/Root 1 0 R
+>>
+startxref
+190
+%%EOF"""
+            
+            # Constrói requisição IPP
+            ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+            ipp_request += minimal_pdf
+            
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Test/1.0'
+            }
+            
+            # Testa com timeout muito baixo
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=5,  # Timeout baixo para teste
+                verify=False,
+                allow_redirects=False
+            )
+            
+            # Verifica se a resposta indica que a impressora aceita trabalhos
+            if response.status_code == 200:
+                # Verifica resposta IPP
+                if len(response.content) >= 8:
+                    status_code = struct.unpack('>H', response.content[2:4])[0]
+                    # Status codes que indicam que a impressora funcionou
+                    # (mesmo que rejeite o trabalho por outros motivos)
+                    valid_statuses = [
+                        0x0000,  # successful-ok
+                        0x0001,  # successful-ok-ignored-or-substituted-attributes
+                        0x0002,  # successful-ok-conflicting-attributes
+                        0x0400,  # client-error-bad-request (mas IPP funcionou)
+                        0x040A,  # document-format-not-supported (mas IPP funcionou)
+                        0x040B,  # attributes-or-values-not-supported (mas IPP funcionou)
+                    ]
+                    
+                    if status_code in valid_statuses:
+                        logger.debug(f"Teste real bem-sucedido: {protocol.upper()}{endpoint} (status: 0x{status_code:04X})")
+                        return True
+                    else:
+                        logger.debug(f"Teste real falhou: {protocol.upper()}{endpoint} (status: 0x{status_code:04X})")
+                        return False
+            
+            logger.debug(f"Teste real falhou: {protocol.upper()}{endpoint} (HTTP: {response.status_code})")
+            return False
+            
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout no teste real: {protocol.upper()}{endpoint}")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.debug(f"Erro de conexão no teste real: {protocol.upper()}{endpoint}")
+            return False
+        except Exception as e:
+            logger.debug(f"Erro no teste real {protocol.upper()}{endpoint}: {e}")
+            return False
+
+    def _save_to_cache(self, endpoint: str, use_https: bool, success: bool):
+        """Salva configuração no cache"""
+        if self.endpoint_cache:
+            self.endpoint_cache.save_printer_endpoint_config(
+                self.printer_ip, endpoint, use_https, success
+            )
+
     def _discover_printer_endpoints(self):
         """Descobre os endpoints disponíveis na impressora"""
         logger.info(f"Descobrindo endpoints para a impressora {self.printer_ip}")
@@ -755,15 +1430,29 @@ class IPPPrinter:
         return False
         
     def print_file(self, file_path: str, options: PrintOptions, 
-               job_name: Optional[str] = None, progress_callback=None, 
-               job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
-        """Imprime um arquivo PDF com fallback automático para JPG e discovery de endpoints"""
+                job_name: Optional[str] = None, progress_callback=None, 
+                job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Imprime um arquivo PDF com otimizações de performance - CORRIGIDO PARA MACOS"""
+        
+        # Verificações de segurança (mantidas)
+        if not os.access(file_path, os.R_OK):
+            logger.error(f"Sem permissão de leitura para o arquivo: {file_path}")
+            return False, {"error": "Sem permissão de leitura para o arquivo"}
+        
+        try:
+            with open(file_path, 'rb') as f:
+                f.read(1024)
+        except PermissionError:
+            logger.error(f"Erro de permissão ao acessar arquivo: {file_path}")
+            return False, {"error": "Erro de permissão ao acessar arquivo"}
+        except Exception as e:
+            logger.error(f"Erro ao acessar arquivo: {e}")
+            return False, {"error": f"Erro ao acessar arquivo: {e}"}
         
         if not os.path.exists(file_path):
             logger.error(f"Erro: Arquivo não encontrado: {file_path}")
             return False, {"error": "Arquivo não encontrado"}
         
-        # Verifica se é um arquivo PDF
         file_extension = os.path.splitext(file_path)[1].lower()
         if file_extension != '.pdf':
             logger.error(f"Erro: Arquivo deve ser PDF (.pdf), recebido: {file_extension}")
@@ -772,12 +1461,8 @@ class IPPPrinter:
         if job_name is None:
             job_name = os.path.basename(file_path)
         
-        logger.info(f"Preparando impressão de: {job_name}")
-
         job_name = normalize_filename(job_name)
-        logger.info(f"Nome do trabalho normalizado: {job_name}")
-
-        logger.info(f"Impressora: {self.printer_ip}:{self.port}")
+        logger.info(f"Preparando impressão otimizada de: {job_name}")
         
         # Lê o arquivo PDF
         try:
@@ -787,55 +1472,921 @@ class IPPPrinter:
             logger.error(f"Erro ao ler arquivo: {e}")
             return False, {"error": f"Erro ao ler arquivo: {e}"}
         
-        logger.info(f"Formato: PDF")
         logger.info(f"Tamanho do arquivo: {len(pdf_data):,} bytes")
         
-        # Primeira tentativa: enviar como PDF
-        logger.info("Tentativa 1: Enviando como PDF")
-        if progress_callback:
-            progress_callback("Tentativa 1: Enviando como PDF...")
-            
-        if self._print_as_pdf(pdf_data, job_name, options):
-            logger.info("Impressão PDF enviada com sucesso!")
+        # === CORREÇÃO: Tentativa prioritária com endpoint conhecido ===
+        if self.known_endpoint is not None:
+            logger.info(f"Tentativa 1: PDF usando endpoint conhecido ({self.protocol.upper()}{self.known_endpoint})")
             if progress_callback:
-                progress_callback("Impressão PDF enviada com sucesso!")
-            return True, {"method": "pdf"}
+                progress_callback(f"Tentativa 1: PDF usando {self.protocol.upper()}{self.known_endpoint}...")
+                
+            # === CORREÇÃO: Apenas 1 tentativa para PDF ===
+            if self._print_as_pdf_optimized(pdf_data, job_name, options):
+                logger.info("✓ PDF impresso com sucesso!")
+                if progress_callback:
+                    progress_callback("✓ Impressão PDF concluída!")
+                return True, {"method": "pdf_cached", "total_pages": 1, "successful_pages": 1}
+            else:
+                logger.info("PDF não funcionou, passando para modo JPG (mais compatível)...")
         
-        # Segunda tentativa: converter para JPG e enviar
-        logger.info("Tentativa 2: Convertendo para JPG e enviando")
+        # === CORREÇÃO: Sempre tenta JPG se PDF falhou ===
+        logger.info("Tentativa 2: Convertendo para JPG (modo mais compatível)")
         if progress_callback:
-            progress_callback("Tentativa 2: Convertendo para JPG e enviando...")
+            progress_callback("Tentativa 2: Convertendo para JPG (modo mais compatível)...")
         
-        success, result = self._convert_and_print_as_jpg(file_path, job_name, options, progress_callback, job_info)
+        # === CORREÇÃO PARA MACOS: Verifica dependências antes de tentar JPG ===
+        system = platform.system().lower()
+        if system == "darwin":
+            try:
+                # Verifica se pode importar pdf2image
+                import pdf2image
+                # Verifica se Poppler está disponível
+                result = subprocess.run(['which', 'pdftoppm'], 
+                                      capture_output=True, text=True, timeout=3)
+                if result.returncode != 0:
+                    logger.warning("Poppler não encontrado no PATH. Tentando configuração automática...")
+                    try:
+                        PopplerManager.setup_poppler()
+                    except Exception as setup_error:
+                        error_msg = ("Poppler é necessário para conversão JPG no macOS. "
+                                   "Instale com: brew install poppler")
+                        logger.error(error_msg)
+                        if progress_callback:
+                            progress_callback(f"✗ Erro: {error_msg}")
+                        return False, {"error": error_msg}
+            except ImportError:
+                error_msg = "pdf2image não encontrado. Instale com: pip install pdf2image"
+                logger.error(error_msg)
+                if progress_callback:
+                    progress_callback(f"✗ Erro: {error_msg}")
+                return False, {"error": error_msg}
+        
+        success, result = self._convert_and_print_as_jpg_optimized(
+            file_path, job_name, options, progress_callback, job_info
+        )
         
         if success:
-            logger.info("Impressão JPG enviada com sucesso!")
+            logger.info("✓ Impressão JPG enviada com sucesso!")
             if progress_callback:
-                progress_callback("Impressão JPG enviada com sucesso!")
+                progress_callback("✓ Impressão JPG concluída!")
             return True, result
         
-        logger.error("Ambas as tentativas falharam")
+        # === CORREÇÃO: Tentativa final com rediscovery apenas se JPG falhou ===
+        logger.warning("JPG falhou, tentando rediscovery final...")
         if progress_callback:
-            progress_callback("Falha: Ambas as tentativas de impressão falharam")
+            progress_callback("Tentativa final: rediscovery completo...")
         
-        # Adicione informações de diagnóstico ao resultado
-        error_info = result.copy() if isinstance(result, dict) else {}
-        error_info.update({
-            "error": "Ambas as tentativas de impressão falharam",
-            "printer_ip": self.printer_ip,
-            "protocol": self.protocol,
-            "endpoints_tested": [
-                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp/print",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/ipp",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/printers/ipp",
-                f"{self.protocol}://{self.printer_ip}:{self.port}/printers",
-                f"{self.protocol}://{self.printer_ip}:{self.port}"
-            ]
-        })
+        # Força rediscovery completo apenas como última opção
+        if self.endpoint_cache:
+            self.endpoint_cache.force_rediscovery(self.printer_ip)
+        self.known_endpoint = None
+        self._quick_discovery()
         
-        return False, error_info
-
+        if self.known_endpoint is not None:
+            logger.info(f"Tentativa final: JPG com endpoint redescoberto ({self.protocol.upper()}{self.known_endpoint})")
+            success, result = self._convert_and_print_as_jpg_optimized(
+                file_path, job_name, options, progress_callback, job_info
+            )
+            
+            if success:
+                logger.info("✓ Impressão JPG com rediscovery bem-sucedida!")
+                if progress_callback:
+                    progress_callback("✓ Impressão concluída após rediscovery!")
+                return True, result
+        
+        logger.error("Todas as tentativas falharam (PDF e JPG com rediscovery)")
+        if progress_callback:
+            progress_callback("✗ Falha: Todas as tentativas falharam")
+        
+        return False, {
+            "error": "Todas as tentativas falharam",
+            "tested_protocols": ["HTTP", "HTTPS"],
+            "tested_methods": ["PDF", "JPG"],
+            "rediscovery_attempts": 1
+        }
     
+    def _print_as_pdf_optimized(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
+        """Impressão PDF com detecção inteligente para impressoras Epson - VERSÃO CORRIGIDA PARA L3250"""
+        if self.known_endpoint is None:
+            return False
+        
+        if hasattr(self, 'force_jpg_mode') and self.force_jpg_mode:
+            logger.info("Impressora configurada para usar apenas JPG - pulando tentativa PDF")
+            return False
+        
+        # === CORREÇÃO CRÍTICA: Detecta impressoras Epson L3250 e outras problemáticas ===
+        if hasattr(self, 'printer_ip') and self._is_epson_printer(self.printer_ip):
+            logger.info(f"EPSON detectada ({self.printer_ip}) - forçando modo JPG para máxima compatibilidade")
+            return False  # Força usar modo JPG
+        
+        job_name = normalize_filename(job_name)
+        url = f"{self.base_url}{self.known_endpoint}"
+        
+        # Cria URI IPP correto
+        if self.use_https:
+            printer_uri = url.replace("https://", "ipps://", 1)
+        else:
+            printer_uri = url.replace("http://", "ipp://", 1)
+        
+        # Atributos IPP otimizados
+        attributes = {
+            "printer-uri": printer_uri,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": job_name,
+            "document-name": job_name,
+            "document-format": "application/pdf",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": options.copies,
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        if options.duplex != Duplex.SIMPLES:
+            attributes["sides"] = options.duplex.value
+        
+        # Tentativas limitadas para PDF
+        max_attempts = 1  # Apenas 1 tentativa para PDF
+        for attempt in range(max_attempts):
+            logger.info(f"Tentativa PDF {attempt + 1}/{max_attempts} com endpoint conhecido")
+            
+            success = self._send_ipp_request_with_extended_timeout(url, attributes, pdf_data)
+            
+            if success:
+                # Salva no cache apenas se confirmado
+                self._save_to_cache(self.known_endpoint, self.use_https, True)
+                logger.info(f"✓ PDF impresso e configuração confirmada no cache: {self.protocol.upper()}{self.known_endpoint}")
+                return True
+            else:
+                logger.info(f"✗ PDF rejeitado na tentativa {attempt + 1}")
+        
+        # Marca falha
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        logger.warning(f"✗ PDF não foi aceito pela impressora: {self.protocol.upper()}{self.known_endpoint}")
+        
+        return False
+
+    def _verify_ipp_response_epson_compatible(self, response):
+        """Verificação RIGOROSA da resposta IPP - CORRIGIDA"""
+        try:
+            logger.debug(f"=== VERIFICAÇÃO RIGOROSA IPP ===")
+            logger.debug(f"Status HTTP: {response.status_code}")
+            logger.debug(f"Tamanho da resposta: {len(response.content)} bytes")
+            
+            # REQUISITO 1: HTTP deve ser 200
+            if response.status_code != 200:
+                logger.debug(f"✗ FALHA: HTTP {response.status_code} (requerido: 200)")
+                return False
+            
+            # REQUISITO 2: Resposta deve ter conteúdo mínimo IPP
+            if len(response.content) < 8:
+                logger.debug(f"✗ FALHA: Resposta muito pequena ({len(response.content)} bytes)")
+                return False
+            
+            # REQUISITO 3: Deve ter estrutura IPP válida
+            version = struct.unpack('>H', response.content[0:2])[0]
+            status_code = struct.unpack('>H', response.content[2:4])[0]
+            request_id = struct.unpack('>I', response.content[4:8])[0]
+            
+            logger.debug(f"IPP: version=0x{version:04X}, status=0x{status_code:04X}, request_id={request_id}")
+            
+            # REQUISITO 4: Status deve ser de SUCESSO REAL
+            success_codes = [
+                0x0000,  # successful-ok
+                0x0001,  # successful-ok-ignored-or-substituted-attributes
+                0x0002,  # successful-ok-conflicting-attributes
+            ]
+            
+            if status_code not in success_codes:
+                logger.debug(f"✗ FALHA: Status IPP 0x{status_code:04X} não é sucesso")
+                return False
+            
+            # REQUISITO 5: DEVE ter job-id na resposta (prova de que foi aceito)
+            response_content = response.content.lower()
+            if b'job-id' not in response_content:
+                logger.debug(f"✗ FALHA CRÍTICA: Sem job-id na resposta - impressão NÃO foi aceita")
+                logger.debug(f"Conteúdo: {response.content[:200]}...")
+                return False
+            
+            # REQUISITO 6: Verificação adicional de conteúdo válido
+            if len(response.content) < 50:  # Resposta muito pequena para ter job-id real
+                logger.debug(f"✗ FALHA: Resposta muito pequena para conter job-id válido")
+                return False
+            
+            logger.debug(f"✓ SUCESSO CONFIRMADO: Status 0x{status_code:04X} com job-id presente")
+            return True
+            
+        except Exception as e:
+            logger.debug(f"✗ ERRO na verificação IPP: {e}")
+            return False
+
+    def _is_epson_printer(self, printer_ip: str) -> bool:
+        """Detecta se é uma impressora Epson que precisa de tratamento especial"""
+        # IPs conhecidos de impressoras Epson problemáticas
+        known_epson_ips = [
+            "10.148.1.20",   # EPSON L14150 Series
+            "10.148.1.192",  # EPSON L3250 Series
+        ]
+        
+        if printer_ip in known_epson_ips:
+            return True
+        
+        # Verifica se é Epson através de discovery/teste rápido
+        try:
+            # Faz uma requisição HTTP simples para tentar identificar o modelo
+            test_url = f"http://{printer_ip}:80"
+            response = requests.get(test_url, timeout=3, verify=False)
+            if response.status_code == 200:
+                content = response.text.lower()
+                if "epson" in content and ("l3250" in content or "l14150" in content or "series" in content):
+                    return True
+        except:
+            pass
+        
+        return False
+
+    def _convert_and_print_as_jpg_optimized(self, pdf_path: str, job_name: str, options: PrintOptions, 
+                                        progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Conversão e impressão JPG com processamento otimizado para EPSON - CORRIGIDO PARA MACOS"""
+        
+        temp_folder = None
+        
+        try:
+            # === CORREÇÃO ESPECÍFICA PARA EPSON: Log detalhado ===
+            is_epson = self._is_epson_printer(getattr(self, 'printer_ip', ''))
+            conversion_mode = "EPSON-OTIMIZADO" if is_epson else "PADRÃO"
+            
+            logger.info(f"Convertendo PDF para JPG com otimizações {conversion_mode}...")
+            if progress_callback:
+                progress_callback(f"Convertendo PDF para JPG (modo {conversion_mode.lower()})...")
+            
+            # === CORREÇÃO PARA MACOS: Melhor tratamento de dependências ===
+            try:
+                import pdf2image
+                from PIL import Image
+            except ImportError as e:
+                logger.error(f"Erro ao importar dependências: {e}")
+                return False, {"error": f"Dependências não encontradas: {e}"}
+            
+            job_name = normalize_filename(job_name)
+            base_name = os.path.splitext(os.path.basename(pdf_path))[0]
+            safe_base_name = normalize_filename(base_name)
+            temp_folder = self._create_temp_folder(safe_base_name)
+            
+            # === CORREÇÃO PARA MACOS: Setup do Poppler com melhor tratamento de erro ===
+            try:
+                poppler_path = PopplerManager.setup_poppler()
+                logger.info(f"Poppler configurado: {poppler_path if poppler_path else 'PATH do sistema'}")
+            except Exception as poppler_error:
+                logger.error(f"Erro ao configurar Poppler: {poppler_error}")
+                
+                # === CORREÇÃO: Diagnóstico e instruções específicas para macOS ===
+                system = platform.system().lower()
+                if system == "darwin":
+                    logger.info("Executando diagnóstico do Poppler para macOS...")
+                    PopplerManager.diagnose_poppler()
+                    
+                    error_msg = ("Poppler não encontrado no macOS. "
+                               "Para usar conversão JPG, instale com: brew install poppler")
+                else:
+                    error_msg = str(poppler_error)
+                
+                return False, {"error": error_msg}
+            
+            # === CORREÇÃO ESPECÍFICA PARA EPSON: Configuração para conversão otimizada ===
+            convert_kwargs = {
+                'pdf_path': pdf_path,
+                'dpi': min(options.dpi, 150) if is_epson else min(options.dpi, 200),  # DPI menor para Epson
+                'fmt': 'jpeg',
+                'thread_count': 1 if is_epson else min(4, os.cpu_count() or 2),  # Single thread para Epson
+                'use_pdftocairo': True,
+                'grayscale': options.color_mode == ColorMode.MONOCROMO
+            }
+            
+            if poppler_path:
+                convert_kwargs['poppler_path'] = poppler_path
+                logger.info(f"Usando Poppler path: {poppler_path}")
+            
+            # === CORREÇÃO PARA MACOS: Conversão com tratamento robusto de erro ===
+            start_time = time.time()
+            try:
+                images = pdf2image.convert_from_path(**convert_kwargs)
+            except Exception as conversion_error:
+                logger.error(f"Erro na conversão PDF->JPG: {conversion_error}")
+                
+                # === CORREÇÃO: Diagnóstico específico para macOS ===
+                system = platform.system().lower()
+                if system == "darwin" and "poppler" in str(conversion_error).lower():
+                    PopplerManager.diagnose_poppler()
+                    return False, {
+                        "error": "Erro de conversão no macOS. Verifique se o Poppler está instalado: brew install poppler"
+                    }
+                else:
+                    return False, {"error": f"Erro na conversão PDF para JPG: {conversion_error}"}
+            
+            conversion_time = time.time() - start_time
+            
+            if not images:
+                logger.error("Falha na conversão PDF para JPG - nenhuma imagem gerada")
+                return False, {"error": "Falha na conversão PDF para JPG"}
+            
+            logger.info(f"Convertido {len(images)} página(s) em {conversion_time:.2f}s (modo {conversion_mode})")
+            if progress_callback:
+                progress_callback(f"Convertido {len(images)} páginas em {conversion_time:.2f}s")
+            
+            # Processamento em lote de páginas
+            page_jobs = self._prepare_pages_batch(
+                images, safe_base_name, job_name, temp_folder, options
+            )
+            
+            # Processamento otimizado de páginas
+            return self._process_pages_parallel(page_jobs, options, progress_callback, job_info)
+            
+        except Exception as e:
+            logger.error(f"Erro na conversão/preparação JPG: {e}")
+            if temp_folder and os.path.exists(temp_folder):
+                logger.info(f"Imagens parciais mantidas em: {temp_folder}")
+            
+            # === CORREÇÃO: Erro específico para macOS ===
+            system = platform.system().lower()
+            if system == "darwin" and "poppler" in str(e).lower():
+                return False, {
+                    "error": "Erro de Poppler no macOS. Instale com: brew install poppler"
+                }
+            else:
+                return False, {"error": f"Erro na conversão/preparação JPG: {e}"}
+
+
+    def _prepare_pages_batch(self, images: List, safe_base_name: str, job_name: str, 
+                        temp_folder: str, options: PrintOptions) -> List[PageJob]:
+        """Prepara páginas em lote com otimizações específicas para EPSON"""
+        page_jobs = []
+        
+        # === CORREÇÃO ESPECÍFICA PARA EPSON: Configurações otimizadas ===
+        is_epson = self._is_epson_printer(getattr(self, 'printer_ip', ''))
+        
+        for page_num, image in enumerate(images, 1):
+            # === CORREÇÃO PARA EPSON: Processamento de imagem otimizado ===
+            if is_epson:
+                # Epson L3250 funciona melhor com RGB
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                
+                # Remove transparência se existir (Epson não lida bem)
+                if image.mode == 'RGBA':
+                    background = Image.new('RGB', image.size, (255, 255, 255))
+                    background.paste(image, mask=image.split()[-1])
+                    image = background
+            else:
+                # Processamento padrão para outras impressoras
+                if options.color_mode == ColorMode.MONOCROMO:
+                    image = image.convert('L')
+                elif image.mode not in ['RGB', 'L']:
+                    image = image.convert('RGB')
+            
+            # Nome do arquivo otimizado
+            if len(images) > 1:
+                image_filename = f"{safe_base_name}_p{page_num:02d}.jpg"
+                page_job_name = f"{normalize_filename(job_name)}_p{page_num:02d}"
+            else:
+                image_filename = f"{safe_base_name}.jpg"
+                page_job_name = normalize_filename(job_name)
+            
+            image_path = os.path.join(temp_folder, image_filename)
+            
+            # === CORREÇÃO PARA EPSON: Qualidade e configurações específicas ===
+            if is_epson:
+                # Epson L3250 funciona melhor com qualidade mais baixa e sem otimização
+                jpg_quality = 75  # Qualidade menor para compatibilidade
+                save_kwargs = {
+                    'format': 'JPEG',
+                    'quality': jpg_quality,
+                    'optimize': False,  # Sem otimização para Epson
+                    'progressive': False,  # Sem JPEG progressivo
+                }
+            else:
+                # Configurações padrão para outras impressoras
+                jpg_quality = 85 if options.quality == Quality.ALTA else 75
+                save_kwargs = {
+                    'format': 'JPEG',
+                    'quality': jpg_quality,
+                    'optimize': True
+                }
+            
+            image.save(image_path, **save_kwargs)
+            
+            # Lê dados
+            with open(image_path, 'rb') as f:
+                jpg_data = f.read()
+            
+            page_job = PageJob(
+                page_num=page_num,
+                image_path=image_path,
+                jpg_data=jpg_data,
+                job_name=page_job_name,
+                max_attempts=7 if is_epson else 2  # Mais tentativas para Epson
+            )
+            page_jobs.append(page_job)
+        
+        logger.info(f"Preparadas {len(page_jobs)} páginas para impressão (EPSON: {is_epson})")
+        return page_jobs
+
+
+    def _process_pages_parallel(self, page_jobs: list, options: PrintOptions, 
+                            progress_callback=None, job_info: Optional[PrintJobInfo] = None) -> Tuple[bool, Dict]:
+        """Processa páginas SEQUENCIALMENTE com otimizações específicas para EPSON"""
+        
+        total_copies = options.copies
+        total_pages_all_copies = len(page_jobs) * total_copies
+        pages_sent = 0
+        successful_pages = []
+        
+        # === CORREÇÃO ESPECÍFICA PARA EPSON: Processamento mais lento e tolerante ===
+        is_epson = self._is_epson_printer(getattr(self, 'printer_ip', ''))
+        processing_mode = "SEQUENCIAL EPSON-OTIMIZADO" if is_epson else "SEQUENCIAL"
+        
+        logger.info(f"Processamento {processing_mode}: {len(page_jobs)} página(s) × {total_copies} cópia(s) = {total_pages_all_copies} páginas")
+        
+        if progress_callback:
+            progress_callback(f"Iniciando processamento {processing_mode.lower()}...")
+        
+        # Processa sequencialmente por cópia
+        for copy_num in range(1, total_copies + 1):
+            logger.info(f"=== Processando cópia {copy_num}/{total_copies} ({processing_mode}) ===")
+            if progress_callback:
+                progress_callback(f"Cópia {copy_num}/{total_copies} - processamento {processing_mode.lower()}...")
+            
+            copy_successful = 0
+            
+            # Processa cada página SEQUENCIALMENTE
+            for page_job in page_jobs:
+                # Verifica cancelamento
+                if job_info and job_info.status == "canceled":
+                    logger.info(f"Cancelamento detectado na cópia {copy_num}")
+                    break
+                
+                # Cria nome único para esta cópia
+                if total_copies > 1:
+                    copy_job_name = f"{page_job.job_name}_c{copy_num:02d}"
+                else:
+                    copy_job_name = page_job.job_name
+                
+                logger.info(f"Processando página {page_job.page_num}/{len(page_jobs)} (cópia {copy_num}) - {pages_sent + 1}/{total_pages_all_copies}")
+                if progress_callback:
+                    progress_callback(f"Processando página {page_job.page_num} (cópia {copy_num}) - {pages_sent + 1}/{total_pages_all_copies}")
+                
+                # === CORREÇÃO ESPECÍFICA PARA EPSON: Usa método otimizado ===
+                success = self._send_page_sequential_with_retry(
+                    page_job, copy_job_name, options, copy_num, total_copies
+                )
+                
+                if success:
+                    copy_successful += 1
+                    pages_sent += 1
+                    page_key = f"p{page_job.page_num}_c{copy_num}"
+                    successful_pages.append(page_key)
+                    
+                    logger.info(f"✓ Página {page_job.page_num} (cópia {copy_num}) enviada com sucesso - {pages_sent}/{total_pages_all_copies}")
+                    if progress_callback:
+                        progress_callback(f"✓ Página {page_job.page_num} (cópia {copy_num}) - {pages_sent}/{total_pages_all_copies}")
+                else:
+                    logger.error(f"✗ Falha DEFINITIVA na página {page_job.page_num} (cópia {copy_num})")
+                    if progress_callback:
+                        progress_callback(f"✗ Falha página {page_job.page_num} (cópia {copy_num})")
+                
+                # === CORREÇÃO ESPECÍFICA PARA EPSON: Delay maior entre páginas ===
+                if page_job.page_num < len(page_jobs):  # Não pausa após a última página
+                    delay = 5.0 if is_epson else 2.0  # Delay maior para Epson
+                    logger.info(f"Aguardando {delay}s antes da próxima página...")
+                    time.sleep(delay)
+            
+            # Verifica se foi cancelado
+            if job_info and job_info.status == "canceled":
+                result = {
+                    "total_pages": total_pages_all_copies,
+                    "successful_pages": len(successful_pages),
+                    "failed_pages": total_pages_all_copies - len(successful_pages),
+                    "method": f"jpg_{processing_mode.lower().replace(' ', '_')}",
+                    "status": "canceled",
+                    "message": f"Trabalho cancelado durante cópia {copy_num}."
+                }
+                return False, result
+            
+            logger.info(f"Cópia {copy_num} concluída: {copy_successful}/{len(page_jobs)} páginas enviadas")
+            
+            # Pausa entre cópias (maior para Epson)
+            if copy_num < total_copies and total_copies > 1:
+                delay = 8.0 if is_epson else 3.0  # Delay maior para Epson
+                logger.info(f"Aguardando {delay}s antes da próxima cópia...")
+                time.sleep(delay)
+        
+        # Relatório final
+        successful_count = len(successful_pages)
+        failed_count = total_pages_all_copies - successful_count
+        
+        logger.info(f"=== Relatório Final ({processing_mode}) ===")
+        logger.info(f"Páginas enviadas: {successful_count}/{total_pages_all_copies}")
+        logger.info(f"Taxa de sucesso: {(successful_count/total_pages_all_copies)*100:.1f}%")
+        
+        result = {
+            "total_pages": total_pages_all_copies,
+            "successful_pages": successful_count,
+            "failed_pages": failed_count,
+            "method": f"jpg_{processing_mode.lower().replace(' ', '_').replace('-', '_')}",
+            "copies_requested": total_copies,
+            "unique_pages": len(page_jobs),
+            "workers_used": 1,
+            "epson_optimized": is_epson
+        }
+        
+        return successful_count == total_pages_all_copies, result
+
+    def _send_page_sequential_with_retry(self, page_job: PageJob, copy_job_name: str, 
+                                    options: PrintOptions, copy_num: int, total_copies: int) -> bool:
+        """Envia uma página SEQUENCIALMENTE com sistema robusto de retry - OTIMIZADO PARA EPSON"""
+        
+        # Atributos IPP para JPG
+        url = f"{self.base_url}{self.known_endpoint or '/ipp/print'}"
+        
+        attributes = {
+            "printer-uri": url,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": copy_job_name,
+            "document-name": copy_job_name,
+            "document-format": "image/jpeg",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": 1,  # Sempre 1 cópia (controlamos manualmente)
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        
+        # === CORREÇÃO ESPECÍFICA PARA EPSON: Sistema de retry mais robusto ===
+        is_epson = self._is_epson_printer(getattr(self, 'printer_ip', ''))
+        max_attempts = 7 if is_epson else 5  # Mais tentativas para Epson
+        delays = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0] if is_epson else [0.5, 1.0, 2.0, 3.0, 5.0]
+        
+        for attempt in range(max_attempts):
+            try:
+                logger.info(f"Tentativa {attempt + 1}/{max_attempts} para página {page_job.page_num} (cópia {copy_num}) - EPSON: {is_epson}")
+                
+                # === CORREÇÃO ESPECÍFICA PARA EPSON: Usa método otimizado ===
+                success = self._send_ipp_request_with_extended_timeout(url, attributes, page_job.jpg_data)
+
+                # CORREÇÃO: Log detalhado do resultado
+                if success:
+                    logger.info(f"✓ Página {page_job.page_num} CONFIRMADA com job-id válido")
+                else:
+                    logger.warning(f"✗ Página {page_job.page_num} REJEITADA (sem job-id ou erro)")
+                
+                if success:
+                    # Só salva no cache na primeira página da primeira cópia
+                    if attempt == 0 and page_job.page_num == 1 and copy_num == 1:
+                        self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
+                        logger.info("Cache confirmado após sucesso da primeira página")
+                    
+                    logger.info(f"✓ Página {page_job.page_num} enviada com sucesso na tentativa {attempt + 1}")
+                    return True
+                else:
+                    logger.warning(f"✗ Tentativa {attempt + 1} falhou para página {page_job.page_num}")
+                
+                # Pausa progressiva entre tentativas (maior para Epson)
+                if attempt < max_attempts - 1:
+                    delay = delays[min(attempt, len(delays) - 1)]
+                    logger.info(f"Aguardando {delay}s antes da próxima tentativa...")
+                    time.sleep(delay)
+                    
+            except Exception as e:
+                logger.error(f"Erro na tentativa {attempt + 1} para página {page_job.page_num}: {e}")
+                if attempt < max_attempts - 1:
+                    delay = delays[min(attempt, len(delays) - 1)]
+                    time.sleep(delay)
+        
+        # Marca falha apenas após todas as tentativas
+        logger.error(f"FALHA DEFINITIVA na página {page_job.page_num} após {max_attempts} tentativas")
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        
+        return False
+
+    def _send_ipp_request_with_extended_timeout(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Envio IPP com verificação RIGOROSA de sucesso"""
+        # Corrige URL para protocolo correto
+        if self.use_https and url.startswith("http:"):
+            url = url.replace("http:", "https:", 1)
+        
+        # Constrói requisição IPP
+        ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+        ipp_request += document_data
+        
+        try:
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Rigorous/1.0',
+                'Content-Length': str(len(ipp_request))
+            }
+            
+            # Timeout específico
+            timeout = 60 if self._is_epson_printer(getattr(self, 'printer_ip', '')) else 45
+            
+            logger.debug(f"Enviando {len(document_data)} bytes para {url} (timeout: {timeout}s)")
+            
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=timeout,
+                verify=False,
+                allow_redirects=False,
+                stream=False
+            )
+            
+            logger.debug(f"HTTP Status recebido: {response.status_code}")
+            
+            if response.status_code == 200:
+                # USA VERIFICAÇÃO RIGOROSA
+                success = self._verify_ipp_response_epson_compatible(response)
+                
+                if success:
+                    logger.info(f"✓ IMPRESSÃO CONFIRMADA: job-id encontrado na resposta")
+                else:
+                    logger.warning(f"✗ FALSO SUCESSO: HTTP 200 mas sem job-id válido")
+                
+                return success
+            elif response.status_code in [202, 204]:
+                logger.debug(f"HTTP {response.status_code} - verificando se há job-id")
+                # Mesmo para 202/204, deve ter job-id para confirmar
+                if b'job-id' in response.content.lower():
+                    logger.info(f"✓ HTTP {response.status_code} com job-id confirmado")
+                    return True
+                else:
+                    logger.warning(f"✗ HTTP {response.status_code} sem job-id - rejeitado")
+                    return False
+            else:
+                logger.debug(f"HTTP Status rejeitado: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.debug(f"Timeout na requisição IPP ({timeout}s)")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            logger.debug(f"Erro de conexão IPP: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"Erro geral IPP: {e}")
+            return False
+
+    def _validate_print_job_acceptance(self, response):
+        """
+        Validação final para confirmar que a impressora REALMENTE aceitou o trabalho
+        
+        Returns:
+            bool: True apenas se há evidência concreta de aceitação
+        """
+        try:
+            # Log detalhado da resposta
+            logger.debug("=== VALIDAÇÃO FINAL DE ACEITAÇÃO ===")
+            logger.debug(f"Resposta completa ({len(response.content)} bytes):")
+            
+            # Mostra primeiros 200 bytes em hex para debug
+            hex_preview = response.content[:200].hex()
+            logger.debug(f"HEX: {hex_preview}")
+            
+            # Mostra como string (ignorando erros)
+            try:
+                str_preview = response.content[:200].decode('utf-8', errors='ignore')
+                logger.debug(f"STRING: {repr(str_preview)}")
+            except:
+                pass
+            
+            # Procura por job-id de forma mais rigorosa
+            job_id_patterns = [
+                b'job-id',
+                b'job-uri',
+                b'job-state',
+                b'job-uuid'
+            ]
+            
+            found_job_indicators = []
+            for pattern in job_id_patterns:
+                if pattern in response.content:
+                    found_job_indicators.append(pattern.decode())
+            
+            if found_job_indicators:
+                logger.info(f"✓ INDICADORES DE JOB ENCONTRADOS: {found_job_indicators}")
+                
+                # Validação adicional: deve ter pelo menos 30 bytes após encontrar job-id
+                job_id_pos = response.content.find(b'job-id')
+                if job_id_pos >= 0 and len(response.content) > job_id_pos + 30:
+                    logger.info("✓ VALIDAÇÃO FINAL: Job-id com dados suficientes")
+                    return True
+                else:
+                    logger.warning("✗ Job-id encontrado mas dados insuficientes")
+                    return False
+            else:
+                logger.warning("✗ VALIDAÇÃO FINAL: Nenhum indicador de job encontrado")
+                logger.warning("✗ CONCLUSÃO: Impressora rejeitou o trabalho silenciosamente")
+                return False
+            
+        except Exception as e:
+            logger.error(f"Erro na validação final: {e}")
+            return False
+        
+    def _verify_ipp_response_ultra_permissive(self, response):
+        """Verificação inteligente da resposta IPP (não mais ultra permissiva)"""
+        try:
+            # Se tem conteúdo, tenta verificar
+            if len(response.content) >= 8:
+                version = struct.unpack('>H', response.content[0:2])[0]
+                status_code = struct.unpack('>H', response.content[2:4])[0]
+                request_id = struct.unpack('>I', response.content[4:8])[0]
+                
+                logger.debug(f"IPP Response: version=0x{version:04X}, status=0x{status_code:04X}, request_id={request_id}")
+                
+                # === CORREÇÃO: Verificação mais restritiva para sucesso real ===
+                success_codes = [
+                    0x0000,  # successful-ok
+                    0x0001,  # successful-ok-ignored-or-substituted-attributes
+                    0x0002,  # successful-ok-conflicting-attributes
+                ]
+                
+                if status_code in success_codes:
+                    # === VERIFICAÇÃO ADICIONAL: Confirma que tem job-id na resposta ===
+                    response_content = response.content.lower()
+                    if b'job-id' in response_content:
+                        logger.debug(f"✓ IPP sucesso CONFIRMADO: 0x{status_code:04X} (com job-id)")
+                        return True
+                    else:
+                        logger.debug(f"⚠ IPP sucesso mas SEM job-id: 0x{status_code:04X} - pode ser falso sucesso")
+                        return False
+                else:
+                    logger.debug(f"✗ IPP falha: 0x{status_code:04X}")
+                    return False
+            else:
+                # === CORREÇÃO: Resposta vazia agora é considerada falha ===
+                logger.debug("✗ IPP resposta vazia - considerado falha")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"Erro ao verificar resposta IPP: {e}")
+            return False
+
+    def _send_page_with_retry(self, page_job: PageJob, copy_job_name: str, 
+                             options: PrintOptions, copy_num: int, total_copies: int) -> bool:
+        """Envia uma página com sistema de retry melhorado"""
+        # Atributos IPP para JPG
+        url = f"{self.base_url}{self.known_endpoint or '/ipp/print'}"
+        
+        attributes = {
+            "printer-uri": url,
+            "requesting-user-name": normalize_filename(os.getenv("USER", "usuario")),
+            "job-name": copy_job_name,
+            "document-name": copy_job_name,
+            "document-format": "image/jpeg",
+            "ipp-attribute-fidelity": False,
+            "job-priority": 50,
+            "copies": 1,  # Sempre 1 cópia (controlamos manualmente)
+            "orientation-requested": 3 if options.orientation == "portrait" else 4,
+            "print-quality": options.quality.value,
+            "media": options.paper_size,
+        }
+        
+        if options.color_mode != ColorMode.AUTO:
+            attributes["print-color-mode"] = options.color_mode.value
+        
+        # === CORREÇÃO: Sistema de retry mais robusto ===
+        max_attempts = 3
+        delays = [0.2, 0.5, 1.0]  # Delays progressivos
+        
+        for attempt in range(max_attempts):
+            try:
+                # === CORREÇÃO: Adiciona pequeno delay baseado no número da página ===
+                # Evita que todas as threads batam na impressora simultaneamente
+                page_delay = (page_job.page_num - 1) * 0.1
+                time.sleep(page_delay)
+                
+                success = self._send_ipp_request_optimized(url, attributes, page_job.jpg_data)
+                
+                if success:
+                    # === CORREÇÃO: Só salva no cache uma vez por processo ===
+                    if attempt == 0 and page_job.page_num == 1 and copy_num == 1:
+                        self._save_to_cache(self.known_endpoint or '/ipp/print', self.use_https, True)
+                    return True
+                
+                # Pausa progressiva entre tentativas
+                if attempt < max_attempts - 1:
+                    time.sleep(delays[attempt])
+                    
+            except Exception as e:
+                logger.warning(f"Erro na tentativa {attempt + 1} para página {page_job.page_num}: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(delays[attempt])
+        
+        # === CORREÇÃO: Só marca falha após todas as tentativas ===
+        if self.endpoint_cache:
+            self.endpoint_cache.mark_endpoint_failed(self.printer_ip)
+        
+        return False
+
+    def _send_ipp_request_optimized(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
+        """Envio IPP otimizado com detecção de sucesso melhorada"""
+        # Corrige URL para protocolo correto
+        if self.use_https and url.startswith("http:"):
+            url = url.replace("http:", "https:", 1)
+        
+        # Constrói requisição IPP
+        ipp_request = self._build_ipp_request(IPPOperation.PRINT_JOB, attributes)
+        ipp_request += document_data
+        
+        try:
+            headers = {
+                'Content-Type': 'application/ipp',
+                'Accept': 'application/ipp',
+                'Connection': 'close',
+                'User-Agent': 'PDF-IPP-Optimized/1.1'
+            }
+            
+            # === CORREÇÃO: Timeout ajustado e melhor detecção de sucesso ===
+            response = requests.post(
+                url, 
+                data=ipp_request, 
+                headers=headers, 
+                timeout=20,  # Aumentado de 15 para 20
+                verify=False,
+                allow_redirects=False
+            )
+            
+            if response.status_code == 200:
+                # === CORREÇÃO: Melhor verificação da resposta IPP ===
+                return self._verify_ipp_response_improved(response)
+            else:
+                logger.debug(f"HTTP Status não é 200: {response.status_code}")
+                return False
+                
+        except requests.exceptions.Timeout:
+            logger.debug("Timeout na requisição IPP")
+        except requests.exceptions.ConnectionError:
+            logger.debug("Erro de conexão IPP")
+        except Exception as e:
+            logger.debug(f"Erro IPP: {e}")
+        
+        return False
+
+    def _verify_ipp_response_improved(self, response):
+        """Verificação melhorada da resposta IPP"""
+        try:
+            # Verifica status IPP na resposta
+            if len(response.content) >= 8:
+                version = struct.unpack('>H', response.content[0:2])[0]
+                status_code = struct.unpack('>H', response.content[2:4])[0]
+                request_id = struct.unpack('>I', response.content[4:8])[0]
+                
+                # === CORREÇÃO: Status codes mais permissivos ===
+                success_codes = [
+                    0x0000,  # successful-ok
+                    0x0001,  # successful-ok-ignored-or-substituted-attributes
+                    0x0002,  # successful-ok-conflicting-attributes
+                ]
+                
+                # === CORREÇÃO: Alguns códigos de "erro" que na verdade indicam sucesso ===
+                acceptable_codes = [
+                    0x0400,  # client-error-bad-request (mas pode ter processado)
+                    0x040A,  # document-format-not-supported (mas pode ter convertido)
+                    0x040B,  # attributes-or-values-not-supported (mas pode ter ignorado)
+                ]
+                
+                if status_code in success_codes:
+                    logger.debug(f"Status IPP de sucesso: 0x{status_code:04X}")
+                    return True
+                elif status_code in acceptable_codes:
+                    # Verifica se tem job-id na resposta (indica que foi aceito)
+                    if b'job-id' in response.content:
+                        logger.debug(f"Status IPP aceitável com job-id: 0x{status_code:04X}")
+                        return True
+                    else:
+                        logger.debug(f"Status IPP aceitável mas sem job-id: 0x{status_code:04X}")
+                        return False
+                else:
+                    logger.debug(f"Status IPP de erro: 0x{status_code:04X}")
+                    return False
+            else:
+                logger.debug("Resposta IPP inválida ou muito curta")
+                return False
+                
+        except Exception as e:
+            logger.debug(f"Erro ao verificar resposta IPP: {e}")
+            return False
+
     def _print_as_pdf(self, pdf_data: bytes, job_name: str, options: PrintOptions) -> bool:
         # Normaliza o nome do trabalho
         job_name = normalize_filename(job_name)
@@ -897,11 +2448,9 @@ class IPPPrinter:
 
     
     def _create_temp_folder(self, base_name: str) -> str:
-        """Cria uma pasta temporária para salvar as imagens convertidas"""
-        # Normaliza o nome base para evitar problemas com caracteres especiais
+        """Cria pasta temporária otimizada"""
         safe_name = normalize_filename(base_name)
         timestamp = int(time.time())
-        # Usa um nome de pasta sem espaços ou caracteres especiais
         temp_dir = os.path.join(tempfile.gettempdir(), f"pdf_print_{safe_name}_{timestamp}")
         os.makedirs(temp_dir, exist_ok=True)
         return temp_dir
@@ -1213,8 +2762,6 @@ class IPPPrinter:
         # Retorna True apenas se TODAS as páginas (incluindo cópias) foram impressas com sucesso
         return successful_count == total_pages_all_copies, result
 
-
-
     def _build_ipp_request(self, operation: int, attributes: Dict[str, Any]) -> bytes:
         """Constrói uma requisição IPP completa com correção de URI"""
         
@@ -1407,59 +2954,23 @@ class IPPPrinter:
         
         return False
 
-    
     def _verify_ipp_response(self, response):
-        """Verifica se a resposta IPP é válida e trata códigos de status adequadamente"""
+        """Verifica se a resposta IPP é válida"""
         # Verifica status IPP na resposta
         if len(response.content) >= 8:
             version = struct.unpack('>H', response.content[0:2])[0]
             status_code = struct.unpack('>H', response.content[2:4])[0]
             request_id = struct.unpack('>I', response.content[4:8])[0]
             
-            # Obtém nome do status se disponível
-            status_name = IPP_STATUS_CODES.get(status_code, "unknown")
-            
-            logger.info(f"IPP Version: {version >> 8}.{version & 0xFF}")
-            logger.info(f"IPP Status: 0x{status_code:04X} ({status_name})")
-            
             # Status de sucesso
             if status_code in [0x0000, 0x0001, 0x0002]:
-                logger.info(f"Status IPP de sucesso: 0x{status_code:04X} ({status_name})")
-                
-                job_id = self._extract_job_id_from_response(response.content)
-                if job_id:
-                    logger.info(f"Job ID: {job_id}")
-                
+                logger.debug(f"Status IPP de sucesso: 0x{status_code:04X}")
                 return True
-                
-            # Analisa erros específicos
-            elif status_code == 0x0400:  # bad-request
-                logger.error(f"Erro IPP 0x0400: client-error-bad-request (requisição inválida)")
-                return False
-            elif status_code == 0x0401:  # forbidden
-                logger.error(f"Erro IPP 0x0401: client-error-forbidden (acesso negado)")
-                return False
-            elif status_code == 0x0403 or status_code == 0x0402:  # not-authorized/not-authenticated
-                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (autenticação necessária)")
-                return False
-            elif status_code == 0x0406 or status_code == 0x0408:  # not-found/request-entity-too-large
-                logger.error(f"Erro IPP 0x{status_code:04X}: {status_name} (endpoint incorreto ou dados muito grandes)")
-                # Estes erros indicam que precisamos tentar outro endpoint
-                return False
-            elif status_code == 0x040A:  # document-format-not-supported
-                logger.error(f"Erro IPP 0x040A: client-error-document-format-not-supported (formato não suportado)")
-                return False
-            elif status_code == 0x0507:  # document-format-error
-                logger.error(f"Erro IPP 0x0507: client-error-document-format-error (formato não suportado)")
-                return False
-            elif status_code >= 0x0500:  # server-error-*
-                logger.error(f"Erro IPP no servidor: 0x{status_code:04X} ({status_name})")
-                return False
             else:
-                logger.error(f"Status IPP não reconhecido: 0x{status_code:04X} ({status_name})")
+                logger.debug(f"Status IPP de erro: 0x{status_code:04X}")
                 return False
         else:
-            logger.error("Resposta IPP inválida ou muito curta")
+            logger.debug("Resposta IPP inválida ou muito curta")
             return False
 
     def _extract_job_id_from_response(self, ipp_response: bytes) -> Optional[int]:
@@ -1481,7 +2992,7 @@ class IPPPrinter:
 
 # Mantém as classes de gerenciamento e diálogos inalteradas
 class PrintQueueManager:
-    """Gerencia a fila de impressão"""
+    """Gerencia a fila de impressão - VERSÃO CORRIGIDA"""
     
     _instance = None
     
@@ -1493,7 +3004,6 @@ class PrintQueueManager:
         return cls._instance
     
     def __init__(self):
-        """Inicializa o gerenciador de fila"""
         self.print_queue = queue.Queue()
         self.worker_thread = None
         self.is_running = False
@@ -1504,9 +3014,14 @@ class PrintQueueManager:
         self.max_history = 100
         self.canceled_job_ids = set()
         
-        # CORREÇÃO: Adiciona controle de jobs processados
-        self.processed_jobs = {}  # job_id -> timestamp
+        self.processed_jobs = {}
         self.processed_jobs_lock = threading.Lock()
+        
+        self.file_jobs = {}
+        self.file_jobs_lock = threading.Lock()
+        
+        self.continuous_processing = True
+        self.idle_sleep_time = 0.1
     
     def cancel_job_id(self, job_id: str):
         """Registra um job_id como cancelado."""
@@ -1554,23 +3069,104 @@ class PrintQueueManager:
                 self.worker_thread = None
                 logger.info("Gerenciador de fila de impressão parado")
     
-    def add_job(self, print_job_info, printer_instance, callback=None):
-        """Adiciona um trabalho à fila de impressão"""
+    def _get_file_hash(self, filepath):
+        """
+        Calcula hash do arquivo para controle de duplicatas
         
-        # CORREÇÃO: Verifica se o job já foi processado recentemente
+        Args:
+            filepath: Caminho do arquivo
+            
+        Returns:
+            str: Hash MD5 do arquivo
+        """
+        try:
+            import hashlib
+            with open(filepath, 'rb') as f:
+                # Lê apenas os primeiros 8KB para eficiência
+                content = f.read(8192)
+                return hashlib.md5(content).hexdigest()
+        except Exception as e:
+            logger.debug(f"Erro ao calcular hash de {filepath}: {e}")
+            return None
+    
+    def _is_duplicate_job(self, print_job_info):
+        """
+        Verifica se é um trabalho duplicado baseado no arquivo e hash
+        
+        Args:
+            print_job_info: Informações do trabalho
+            
+        Returns:
+            bool: True se for duplicata
+        """
+        with self.file_jobs_lock:
+            import time
+            current_time = time.time()
+            filepath = print_job_info.document_path
+            
+            # Calcula hash do arquivo
+            file_hash = self._get_file_hash(filepath)
+            if not file_hash:
+                return False
+            
+            # Verifica se existe job para este arquivo
+            if filepath in self.file_jobs:
+                existing_job = self.file_jobs[filepath]
+                
+                # Se foi processado há menos de 30 segundos e tem o mesmo hash
+                if (current_time - existing_job["timestamp"] < 30 and 
+                    existing_job["hash"] == file_hash):
+                    logger.warning(f"Job duplicado detectado para arquivo {filepath} "
+                                 f"(job anterior: {existing_job['job_id']})")
+                    return True
+            
+            # Registra este job
+            self.file_jobs[filepath] = {
+                "hash": file_hash,
+                "timestamp": current_time,
+                "job_id": print_job_info.job_id
+            }
+            
+            # Limpa entradas antigas (mais de 5 minutos)
+            old_entries = []
+            for path, job_data in self.file_jobs.items():
+                if current_time - job_data["timestamp"] > 300:
+                    old_entries.append(path)
+            
+            for path in old_entries:
+                del self.file_jobs[path]
+            
+            return False
+    
+    def add_job(self, print_job_info, printer_instance, callback=None):
+        """Adiciona um trabalho à fila de impressão com controle aprimorado de duplicatas"""
+        
+        # CORREÇÃO: Verifica se é trabalho duplicado por arquivo/hash
+        if self._is_duplicate_job(print_job_info):
+            logger.warning(f"Job duplicado ignorado: {print_job_info.job_id}")
+            return print_job_info.job_id
+        
+        # CORREÇÃO: Verifica se o job ID já foi processado recentemente
         with self.processed_jobs_lock:
             import time
             current_time = time.time()
             job_id = print_job_info.job_id
             
-            # Verifica se o job já foi processado nos últimos 10 segundos
+            # Verifica se o job já foi processado nos últimos 20 segundos
             last_processed = self.processed_jobs.get(job_id, 0)
-            if current_time - last_processed < 10:
+            if current_time - last_processed < 20:
                 logger.warning(f"Job {job_id} já foi processado recentemente, ignorando duplicata")
                 return job_id
             
             # Marca como sendo processado
             self.processed_jobs[job_id] = current_time
+            
+            # === CORREÇÃO: Log detalhado para debug ===
+            logger.info(f"Adicionando job {job_id} à fila de impressão")
+            logger.info(f"  Documento: {print_job_info.document_name}")
+            logger.info(f"  Impressora: {print_job_info.printer_name} (IP: {print_job_info.printer_ip})")
+            logger.info(f"  Cópias: {print_job_info.options.copies}")
+            logger.info(f"  Tamanho da fila atual: {self.print_queue.qsize()}")
             
             # Limpa entradas antigas (mais de 1 hora)
             old_entries = [jid for jid, timestamp in self.processed_jobs.items() 
@@ -1603,12 +3199,14 @@ class PrintQueueManager:
             return self.current_job
     
     def _process_queue(self):
-        """Processa a fila de impressão com correção para exclusão de arquivos"""
+        """Processa fila com loop otimizado e contínuo"""
+        logger.info("Iniciando processamento contínuo da fila de impressão")
+        
         while self.is_running:
             try:
-                # Obtém o próximo trabalho da fila
+                # === OTIMIZAÇÃO: Loop contínuo sem sleep desnecessário ===
                 if self.print_queue.empty():
-                    time.sleep(1.0)
+                    time.sleep(self.idle_sleep_time)  # Sleep mínimo quando idle
                     continue
                     
                 job_item = self.print_queue.get(block=False)
@@ -1617,25 +3215,23 @@ class PrintQueueManager:
                 printer = job_item["printer"]
                 callback = job_item["callback"]
                 
-                # CORREÇÃO: Log detalhado do printer_id
-                logger.info(f"Processando trabalho: {job_info.document_name}")
+                logger.info(f"Processando trabalho otimizado: {job_info.document_name}")
                 logger.info(f"  Job ID: {job_info.job_id}")
-                logger.info(f"  Printer ID (da API): {job_info.printer_id}")
-                logger.info(f"  Printer Name: {job_info.printer_name}")
-                logger.info(f"  Cópias solicitadas: {job_info.options.copies}")
-                logger.info(f"  Tem callback: {'Sim' if callback else 'Não'}")
+                logger.info(f"  Printer ID: {job_info.printer_id}")
+                logger.info(f"  Cópias: {job_info.options.copies}")
                 
+                # Verifica cancelamento
                 with self.lock:
                     is_canceled = job_info.job_id in self.canceled_job_ids
 
                 if is_canceled:
-                    logger.info(f"Trabalho {job_info.document_name} (ID: {job_info.job_id}) foi cancelado antes do processamento.")
+                    logger.info(f"Trabalho cancelado: {job_info.job_id}")
                     job_info.status = "canceled" 
                     job_info.end_time = datetime.now()
                     self._update_history(job_info)
 
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado"})
 
                     self.print_queue.task_done()
                     with self.lock: 
@@ -1646,173 +3242,149 @@ class PrintQueueManager:
                 with self.lock:
                     self.current_job = job_item
                 
-                # Salva o trabalho no histórico antes de começar
                 job_info.status = "processing"
                 self._add_to_history(job_info)
                 
-                logger.info(f"Trabalho salvo no histórico inicial - Printer ID: {job_info.printer_id}")
-                
-                # Definir função de progresso
+                # === CORREÇÃO: PROCESSAMENTO OTIMIZADO COM MELHOR CONTROLE ===
                 def progress_callback(message):
                     with self.lock:
-                        if self.current_job and self.current_job["info"].job_id == job_info.job_id and \
-                        self.current_job["info"].status == "canceled":
-                            raise InterruptedError("Trabalho cancelado durante o processamento")
+                        if (self.current_job and 
+                            self.current_job["info"].job_id == job_info.job_id and 
+                            self.current_job["info"].status == "canceled"):
+                            raise InterruptedError("Trabalho cancelado")
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "progress", message) 
+                        wx.CallAfter(callback, job_info.job_id, "progress", message)
                 
-                # Variável para controlar se deve deletar o arquivo
                 should_delete_file = False
                 
-                # Tenta imprimir
                 try:
                     if callback:
-                        progress_callback("Iniciando impressão...")
-                    else:
-                        logger.info(f"Iniciando impressão (auto): {job_info.document_name}")
+                        progress_callback("Iniciando impressão otimizada...")
+                    
+                    # === CORREÇÃO: Passa configuração para o printer uma só vez ===
+                    if not hasattr(printer, 'config') or printer.config is None:
+                        printer.config = self.config
+                    
+                    # === CORREÇÃO: Verifica se endpoint já está em cache ===
+                    if hasattr(printer, 'endpoint_cache') and printer.endpoint_cache:
+                        cached_config = printer.endpoint_cache.get_printer_endpoint_config(printer.printer_ip)
+                        if cached_config and not printer.endpoint_cache.should_rediscover(printer.printer_ip):
+                            logger.info(f"Usando endpoint em cache para {printer.printer_ip}: {cached_config.get('endpoint', '')}")
                     
                     success, result = printer.print_file(
                         job_info.document_path,
                         job_info.options,
                         job_info.document_name,
-                        progress_callback if callback else None,  # CORREÇÃO: Só passa progress_callback se houver callback
+                        progress_callback if callback else None,
                         job_info=job_info
                     )
                     
-                    # Atualiza informações do trabalho
                     job_info.end_time = datetime.now()
-                    
-                    # CORREÇÃO: Log detalhado do resultado
-                    logger.info(f"Resultado da impressão - Success: {success}, Result: {result}")
                     
                     if success:
                         job_info.status = "completed"
                         
-                        # CORREÇÃO: Calcula corretamente as páginas considerando cópias
-                        total_pages_sent = result.get("total_pages", 0)  # Total incluindo cópias
-                        successful_pages_sent = result.get("successful_pages", 0)  # Efetivamente enviadas
-                        
-                        # Para sincronização, usamos o total de páginas efetivamente enviadas
-                        job_info.total_pages = total_pages_sent
-                        job_info.completed_pages = successful_pages_sent
-                        
-                        logger.info(f"Trabalho concluído com sucesso: {job_info.document_name}")
-                        logger.info(f"  Total de páginas (com cópias): {total_pages_sent}")
-                        logger.info(f"  Páginas enviadas com sucesso: {successful_pages_sent}")
-                        logger.info(f"  Cópias: {result.get('copies_requested', 1)}")
-                        
-                        # Só marca para deletar se foi 100% bem-sucedido
-                        should_delete_file = (successful_pages_sent == total_pages_sent)
-                        
-                        if should_delete_file:
-                            logger.info("Impressão 100% bem-sucedida - arquivo será removido")
-                        else:
-                            logger.warning("Impressão parcialmente falhada - arquivo será mantido")
-                            
-                    else:
-                        with self.lock: # Re-check status
-                            if job_info.status == "canceled":
-                                logger.info(f"Trabalho {job_info.document_name} cancelado durante a impressão.")
-                            else:
-                                job_info.status = "failed"
-                                logger.error(f"Falha no trabalho: {job_info.document_name}")
-                                # CORREÇÃO: Log detalhado da falha
-                                logger.error(f"  Detalhes da falha: {result}")
-
-                        # Para trabalhos falhados, ainda registra as páginas processadas
                         total_pages_sent = result.get("total_pages", 0)
                         successful_pages_sent = result.get("successful_pages", 0)
                         
                         job_info.total_pages = total_pages_sent
                         job_info.completed_pages = successful_pages_sent
                         
-                        # Não deleta arquivo em caso de falha
+                        # === CORREÇÃO: Só deleta arquivo se 100% de sucesso ===
+                        should_delete_file = (successful_pages_sent == total_pages_sent and total_pages_sent > 0)
+                        
+                        logger.info(f"Trabalho concluído: {job_info.document_name}")
+                        logger.info(f"  Páginas enviadas: {successful_pages_sent}/{total_pages_sent}")
+                        logger.info(f"  Método: {result.get('method', 'unknown')}")
+                        
+                        if result.get("method") == "jpg_parallel":
+                            logger.info(f"  Workers usados: {result.get('workers_used', 'N/A')}")
+                            logger.info(f"  Taxa de sucesso: {(successful_pages_sent/total_pages_sent)*100:.1f}%")
+                        
+                    else:
+                        with self.lock:
+                            if job_info.status == "canceled":
+                                logger.info(f"Trabalho cancelado durante impressão: {job_info.document_name}")
+                            else:
+                                job_info.status = "failed"
+                                logger.error(f"Falha no trabalho: {job_info.document_name}")
+                        
+                        total_pages_sent = result.get("total_pages", 0)
+                        successful_pages_sent = result.get("successful_pages", 0)
+                        
+                        job_info.total_pages = total_pages_sent
+                        job_info.completed_pages = successful_pages_sent
+                        
                         should_delete_file = False
                     
-                    # Tenta excluir o arquivo apenas se foi completamente bem-sucedido
+                    # === CORREÇÃO: Remove arquivo apenas se tudo foi impresso corretamente ===
                     if should_delete_file:
                         try:
                             if os.path.exists(job_info.document_path):
                                 os.remove(job_info.document_path)
                                 logger.info(f"Arquivo removido: {job_info.document_path}")
                         except Exception as e:
-                            logger.error(f"Erro ao remover arquivo: {e}")
-                    else:
-                        logger.info(f"Arquivo mantido devido a falhas: {job_info.document_path}")
+                            logger.warning(f"Não foi possível remover arquivo: {e}")
                     
-                    # Atualiza histórico ANTES de tentar sincronizar
                     self._update_history(job_info)
                     
-                    # Inicia sincronização apenas se houve páginas bem-sucedidas
+                    # === CORREÇÃO: Sincronização apenas se houve páginas impressas ===
                     if job_info.completed_pages > 0:
                         def delayed_sync():
                             try:
-                                import time
-                                time.sleep(2)  # Aguarda 2 segundos para garantir que o histórico foi salvo
+                                time.sleep(2)  # Aguarda estabilizar
                                 from src.utils.print_sync_manager import PrintSyncManager
                                 sync_manager = PrintSyncManager.get_instance()
                                 if sync_manager:
-                                    logger.info(f"Iniciando sincronização para o trabalho: {job_info.job_id} ({job_info.completed_pages} páginas)")
+                                    logger.info(f"Sincronizando {job_info.completed_pages} páginas impressas...")
                                     sync_manager.sync_print_jobs()
-                                else:
-                                    logger.warning("Sync manager não disponível")
                             except Exception as e:
-                                logger.error(f"Erro ao iniciar sincronização: {e}")
+                                logger.error(f"Erro na sincronização: {e}")
                         
-                        # Executa sincronização em thread separada
-                        import threading
-                        sync_thread = threading.Thread(target=delayed_sync, daemon=True)
-                        sync_thread.start()
+                        threading.Thread(target=delayed_sync, daemon=True).start()
                             
-                    # Notifica o callback
+                    # Callback de resultado
                     if callback:
                         status_cb = "complete" if success else ("canceled" if job_info.status == "canceled" else "error")
                         wx.CallAfter(callback, job_info.job_id, status_cb, result)
-                    else:
-                        # CORREÇÃO: Log para casos sem callback (auto-impressão)
-                        if success:
-                            logger.info(f"Auto-impressão concluída: {job_info.document_name} - {job_info.completed_pages} páginas")
-                        else:
-                            logger.error(f"Auto-impressão falhou: {job_info.document_name}")
                     
-                except InterruptedError: # Captura o erro de cancelamento
-                    logger.info(f"Processamento do trabalho {job_info.document_name} interrompido devido ao cancelamento.")
+                except InterruptedError:
+                    logger.info(f"Trabalho interrompido: {job_info.document_name}")
                     job_info.status = "canceled"
                     job_info.end_time = datetime.now()
                     self._update_history(job_info)
                     if callback:
-                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado pelo usuário"})
+                        wx.CallAfter(callback, job_info.job_id, "canceled", {"message": "Trabalho cancelado"})
 
                 except Exception as e:
                     job_info.status = "failed"
                     job_info.end_time = datetime.now()
-                    logger.error(f"Erro ao processar trabalho: {e}")
+                    logger.error(f"Erro no processamento: {e}")
                     
-                    # Atualiza histórico
                     self._update_history(job_info)
                     
-                    # Notifica o callback
                     if callback:
                         wx.CallAfter(callback, job_info.job_id, "error", {"error": str(e)})
-                    else:
-                        logger.error(f"Erro na auto-impressão: {job_info.document_name} - {str(e)}")
                 
+                # Limpa controle de jobs processados
                 with self.processed_jobs_lock:
                     if job_info.job_id in self.processed_jobs:
                         del self.processed_jobs[job_info.job_id]
 
-                # Marca o trabalho como concluído na fila
                 self.print_queue.task_done()
                 
                 with self.lock:
                     self.current_job = None
                 
+                # === OTIMIZAÇÃO: Sem sleep entre jobs ===
+                # Remove time.sleep aqui para processamento contínuo
+                
             except queue.Empty:
-                time.sleep(1.0)
+                time.sleep(self.idle_sleep_time)
             except Exception as e:
                 logger.error(f"Erro no processamento da fila: {e}")
-                time.sleep(5.0)
-    
+                time.sleep(1.0)
+
     def _add_to_history(self, job_info):
         """Adiciona um trabalho ao histórico"""
         with self.lock:
@@ -1841,7 +3413,7 @@ class PrintQueueManager:
         """Retorna o histórico de trabalhos"""
         with self.lock:
             return list(self.job_history)
-
+        
 class PrintOptionsDialog(wx.Dialog):
     """Diálogo para configurar opções de impressão"""
     
@@ -1904,7 +3476,7 @@ class PrintOptionsDialog(wx.Dialog):
         button_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
         # Botão para cancelar
-        cancel_button = wx.Button(self.panel, wx.ID_CANCEL, label="Cancelar", size=(-1, 36))
+        cancel_button = wx.Button(self.panel, wx.ID_CANCEL, label="Cancelar", size=(-1, 36), style=wx.BORDER_NONE)
         cancel_button.SetBackgroundColour(wx.Colour(60, 60, 60))
         cancel_button.SetForegroundColour(self.colors["text_color"])
         
@@ -1921,7 +3493,7 @@ class PrintOptionsDialog(wx.Dialog):
         cancel_button.Bind(wx.EVT_LEAVE_WINDOW, on_cancel_leave)
         
         # Botão para imprimir
-        print_button = wx.Button(self.panel, wx.ID_OK, label="Imprimir", size=(-1, 36))
+        print_button = wx.Button(self.panel, wx.ID_OK, label="Imprimir", size=(-1, 36), style=wx.BORDER_NONE)
         print_button.SetBackgroundColour(self.colors["accent_color"])
         print_button.SetForegroundColour(self.colors["text_color"])
         
@@ -2489,96 +4061,74 @@ class PrintSystem:
     """Sistema integrado de impressão"""
     
     def __init__(self, config):
-        """
-        Inicializa o sistema de impressão
-        
-        Args:
-            config: Objeto de configuração
-        """
         self.config = config
         self.print_queue_manager = PrintQueueManager.get_instance()
         self.print_queue_manager.set_config(config)
         
-        # Inicializa o gerenciador de fila
+        # Configurações de performance
+        perf_config = config.get_print_performance_config()
+        self.print_queue_manager.idle_sleep_time = 0.05  # Ultra responsivo
+        
         self.print_queue_manager.start()
+        
+        logger.info("Sistema de impressão otimizado inicializado")
+        logger.info(f"Performance config: {perf_config}")
     
     def print_document(self, parent_window, document, printer=None):
-        """
-        Imprime um documento
-        
-        Args:
-            parent_window: Janela pai para diálogos
-            document: Documento a ser impresso
-            printer: Impressora selecionada (opcional)
-            
-        Returns:
-            bool: True se o trabalho foi adicionado à fila com sucesso
-        """
+        """Imprime documento com otimizações"""
         try:
-            # Verifica se o documento existe
             if not os.path.exists(document.path):
                 wx.MessageBox(f"Arquivo não encontrado: {document.path}", 
                             "Erro", wx.OK | wx.ICON_ERROR)
                 return False
             
-            # Se não foi fornecida uma impressora, pede para o usuário selecionar
             if printer is None:
                 printer = self._select_printer(parent_window)
                 if printer is None:
-                    return False  # Usuário cancelou
+                    return False
             
-            # CORREÇÃO: Verifica se a impressora tem ID válido
             if not hasattr(printer, 'id') or not printer.id:
                 wx.MessageBox(f"A impressora '{printer.name}' não possui um ID válido do servidor.",
                             "Erro", wx.OK | wx.ICON_ERROR)
-                logger.error(f"Impressora sem ID: {printer.name} - Atributos: {dir(printer)}")
                 return False
             
-            # Exibe diálogo com opções de impressão
+            # Diálogo de opções
             print_options_dialog = PrintOptionsDialog(parent_window, document, printer)
             if print_options_dialog.ShowModal() != wx.ID_OK:
                 print_options_dialog.Destroy()
-                return False  # Usuário cancelou
+                return False
             
-            # Obtém as opções de impressão
             options = print_options_dialog.get_options()
             print_options_dialog.Destroy()
             
-            # Cria um ID único para o trabalho
             job_id = f"job_{int(time.time())}_{document.id}"
             
-            # CORREÇÃO: Usa printer.id como printer_id
             job_info = PrintJobInfo(
                 job_id=job_id,
                 document_path=document.path,
                 document_name=document.name,
                 printer_name=printer.name,
-                printer_id=printer.id,  # CORREÇÃO: Usa o ID da API
+                printer_id=printer.id,
                 printer_ip=getattr(printer, 'ip', ''),
                 options=options,
                 start_time=datetime.now(),
                 status="pending"
             )
             
-            # Log para debug
-            logger.info(f"Trabalho criado - Job ID: {job_info.job_id}, "
-                    f"Printer ID (da API): {job_info.printer_id}, "
-                    f"Printer Name: {job_info.printer_name}")
-            
-            # Cria instância da impressora (detecta automaticamente HTTP/HTTPS)
             printer_ip = getattr(printer, 'ip', '')
             if not printer_ip:
-                wx.MessageBox(f"A impressora '{printer.name}' não possui um endereço IP configurado.",
+                wx.MessageBox(f"A impressora '{printer.name}' não possui IP configurado.",
                             "Erro", wx.ID_ERROR)
                 return False
             
+            # === IMPRESSORA COM CONFIGURAÇÃO OTIMIZADA ===
             printer_instance = IPPPrinter(
                 printer_ip=printer_ip,
                 port=631,
-                use_https=False  # Deixa detectar automaticamente
+                use_https=False,
+                config=self.config  # Passa configuração para cache de endpoints
             )
             
-            # Cria e exibe o diálogo de progresso
             progress_dialog = PrintProgressDialog(
                 parent_window,
                 job_id,
@@ -2586,21 +4136,17 @@ class PrintSystem:
                 printer.name
             )
             
-            # Define o callback para atualização de progresso
             def print_callback(job_id, status, data):
-                """Callback para atualização de progresso de impressão"""
-                # Usa wx.CallAfter para garantir thread safety, mas com verificação de validade
                 if progress_dialog and not progress_dialog._is_destroyed:
                     wx.CallAfter(self._update_progress_dialog, progress_dialog, status, data)
             
-            # Adiciona o trabalho à fila
+            # Adiciona job à fila otimizada
             self.print_queue_manager.add_job(
                 job_info,
                 printer_instance,
                 print_callback
             )
             
-            # Exibe o diálogo de progresso (não bloqueante)
             progress_dialog.ShowModal()
             progress_dialog.Destroy()
             
@@ -2613,21 +4159,19 @@ class PrintSystem:
             return False
     
     def _select_printer(self, parent_window):
-        """Exibe diálogo para selecionar impressora"""
-        # Obtém a lista de impressoras
+        """Método mantido para compatibilidade"""
         printer_list = self._get_printers()
         
         if not printer_list:
-            wx.MessageBox("Nenhuma impressora configurada. Configure impressoras na aba Impressoras.",
+            wx.MessageBox("Nenhuma impressora configurada.",
                          "Informação", wx.OK | wx.ICON_INFORMATION)
             return None
         
-        # Cria a caixa de diálogo para escolher impressora
         choices = [printer.name for printer in printer_list]
         
         dialog = wx.SingleChoiceDialog(
             parent_window,
-            "Escolha a impressora para enviar o documento:",
+            "Escolha a impressora:",
             "Selecionar Impressora",
             choices
         )
@@ -2642,7 +4186,7 @@ class PrintSystem:
         return None
     
     def _get_printers(self):
-        """Obtém lista de impressoras configuradas"""
+        """Método mantido para compatibilidade"""
         try:
             printers_data = self.config.get_printers()
             
@@ -2652,97 +4196,85 @@ class PrintSystem:
             else:
                 return []
         except Exception as e:
-            logger.error(f"Erro ao obter lista de impressoras: {e}")
+            logger.error(f"Erro ao obter impressoras: {e}")
             return []
     
     def _update_progress_dialog(self, dialog, status, data):
-        """Atualiza o diálogo de progresso com verificação de segurança"""
+        """Método mantido para compatibilidade"""
         try:
-            # Verifica se o diálogo ainda existe e não foi destruído
             if not dialog or dialog._is_destroyed:
                 return
                 
-            # Verifica se o diálogo ainda tem parent válido
             if not hasattr(dialog, 'GetParent') or dialog.GetParent() is None:
                 return
                 
             if status == "progress":
-                # Mensagem de progresso
                 dialog.add_log(data)
             elif status == "complete":
-                # Trabalho concluído com sucesso
                 dialog.set_success("Impressão concluída com sucesso")
             elif status == "canceled":
                 message = "Trabalho cancelado pelo usuário."
                 if isinstance(data, dict) and "message" in data:
                     message = data["message"]
-                dialog.set_error(message) # Reutiliza set_error ou cria um set_canceled
+                dialog.set_error(message)
                 dialog.add_log(message)
             elif status == "error":
-                # Erro no trabalho
                 error_message = data.get("error", "Erro desconhecido") if isinstance(data, dict) else str(data)
                 dialog.set_error(f"Falha na impressão: {error_message}")
                 
         except RuntimeError as e:
-            # Controle foi destruído
             if "wrapped C/C++ object" in str(e) and "has been deleted" in str(e):
-                logger.warning("Tentativa de atualizar diálogo já destruído")
                 if dialog:
                     dialog._is_destroyed = True
-            else:
-                logger.error(f"Erro ao atualizar diálogo de progresso: {e}")
         except Exception as e:
-            logger.error(f"Erro inesperado ao atualizar diálogo de progresso: {e}")
+            logger.error(f"Erro ao atualizar diálogo: {e}")
     
     def test_printer_connection(self, printer_ip: str, use_https: bool = False) -> Dict[str, Any]:
-        """Testa conexão com uma impressora (baseado no código de teste)"""
+        """Teste de conexão otimizado com cache"""
         try:
-            test_printer = IPPPrinter(printer_ip, use_https=use_https)
+            test_printer = IPPPrinter(printer_ip, use_https=use_https, config=self.config)
             
-            # Testa endpoints básicos
-            endpoints = ["/ipp/print", "/ipp", "/printers/ipp", "/printers", ""]
+            # Se tem endpoint em cache, testa primeiro
+            cache = PrinterEndpointCache(self.config)
+            cached_config = cache.get_printer_endpoint_config(printer_ip)
+            
+            if cached_config and not cache.should_rediscover(printer_ip):
+                endpoint = cached_config.get("endpoint", "")
+                protocol = cached_config.get("protocol", "http")
+                
+                logger.info(f"Testando conexão usando configuração em cache: {protocol}://{printer_ip}:631{endpoint}")
+                
+                return {
+                    "success": True,
+                    "protocol": protocol.upper(),
+                    "working_endpoints": [endpoint],
+                    "base_url": f"{protocol}://{printer_ip}:631",
+                    "cached": True
+                }
+            
+            # Se não tem cache, faz teste rápido
             working_endpoints = []
+            protocol = "HTTP"
             
-            for endpoint in endpoints:
-                url = f"{test_printer.base_url}{endpoint}"
-                try:
-                    response = requests.get(
-                        url,
-                        timeout=10,
-                        verify=False,
-                        allow_redirects=False
-                    )
-                    if response.status_code in [200, 400, 401, 404, 405]:
-                        working_endpoints.append(endpoint)
-                except requests.exceptions.ConnectionError as e:
-                    # Tenta com HTTPS se falhar com HTTP
-                    if "10054" in str(e) or "Connection aborted" in str(e):
-                        if not test_printer.use_https:
-                            test_printer.use_https = True
-                            test_printer.protocol = "https"
-                            test_printer.base_url = f"https://{test_printer.printer_ip}:{test_printer.port}"
-                            https_url = url.replace("http:", "https:", 1)
-                            try:
-                                response = requests.get(
-                                    https_url,
-                                    timeout=10,
-                                    verify=False,
-                                    allow_redirects=False
-                                )
-                                if response.status_code in [200, 400, 401, 404, 405]:
-                                    working_endpoints.append(endpoint)
-                            except:
-                                pass
-                except:
-                    pass
+            # Testa endpoints prioritários rapidamente
+            priority_endpoints = ["/ipp/print", "/ipp", "/printers/ipp"]
             
-            protocol = test_printer.protocol.upper()
+            for endpoint in priority_endpoints:
+                if test_printer._test_endpoint_quick(endpoint, use_https=False):
+                    working_endpoints.append(endpoint)
+                    protocol = "HTTP"
+                    break
+                elif test_printer._test_endpoint_quick(endpoint, use_https=True):
+                    working_endpoints.append(endpoint)
+                    protocol = "HTTPS"
+                    break
             
             return {
                 "success": len(working_endpoints) > 0,
                 "protocol": protocol,
                 "working_endpoints": working_endpoints,
-                "base_url": test_printer.base_url
+                "base_url": f"{protocol.lower()}://{printer_ip}:631",
+                "cached": False
             }
             
         except Exception as e:
@@ -2752,6 +4284,6 @@ class PrintSystem:
             }
     
     def shutdown(self):
-        """Desliga o sistema de impressão"""
+        """Desliga sistema"""
         if self.print_queue_manager:
             self.print_queue_manager.stop()

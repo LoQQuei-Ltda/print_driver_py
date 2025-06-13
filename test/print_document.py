@@ -730,8 +730,6 @@ class PDFPrinter:
         if self._send_ipp_request_http10(url, attributes, document_data):
             return True
             
-        # Estratégia 4: Raw socket (último recurso)
-        return self._try_raw_socket(url, ipp_request)
     
     def _try_minimal_headers(self, url: str, ipp_request: bytes) -> bool:
         """Tenta com headers mínimos essenciais"""
@@ -794,67 +792,6 @@ class PDFPrinter:
         
         return False
     
-    def _try_raw_socket(self, url: str, ipp_request: bytes) -> bool:
-        """Último recurso: conexão raw socket com HTTP básico"""
-        try:
-            parsed_url = urlparse(url)
-            host = parsed_url.hostname
-            port = parsed_url.port or 631
-            path = parsed_url.path or '/'
-            
-            # Constrói requisição HTTP manualmente
-            http_request = f"POST {path} HTTP/1.0\r\n"
-            http_request += f"Host: {host}:{port}\r\n"
-            http_request += f"Content-Type: application/ipp\r\n"
-            http_request += f"Content-Length: {len(ipp_request)}\r\n"
-            http_request += f"Connection: close\r\n"
-            http_request += "\r\n"
-            
-            # Conecta via socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(30)
-            sock.connect((host, port))
-            
-            # Envia requisição
-            sock.send(http_request.encode('ascii'))
-            sock.send(ipp_request)
-            
-            # Lê resposta
-            response_data = b""
-            while True:
-                try:
-                    chunk = sock.recv(4096)
-                    if not chunk:
-                        break
-                    response_data += chunk
-                except socket.timeout:
-                    break
-            
-            sock.close()
-            
-            # Analisa resposta
-            if b"HTTP/1." in response_data[:20]:
-                status_line = response_data.split(b'\r\n')[0].decode('ascii')
-                status_code = int(status_line.split()[1])
-                
-                print(f"    Raw Socket - HTTP Status: {status_code}")
-                
-                if status_code == 200:
-                    # Encontra início dos dados IPP (após headers HTTP)
-                    ipp_start = response_data.find(b'\r\n\r\n')
-                    if ipp_start >= 0:
-                        ipp_data = response_data[ipp_start + 4:]
-                        if len(ipp_data) >= 8:
-                            ipp_status = struct.unpack('>H', ipp_data[2:4])[0]
-                            if ipp_status in [0x0000, 0x0001]:
-                                print(f"    ✓ Sucesso com raw socket!")
-                                return True
-            
-        except Exception as e:
-            print(f"    Raw Socket - Erro: {e}")
-        
-        return False
-
     def _send_ipp_request_http10(self, url: str, attributes: Dict[str, Any], document_data: bytes) -> bool:
         """Fallback usando HTTP/1.0 simplificado"""
         

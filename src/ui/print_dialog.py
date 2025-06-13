@@ -62,6 +62,28 @@ class SelectPrinterDialog(wx.Dialog):
         # Centraliza o diálogo
         self.CenterOnParent()
     
+    def _is_epson_l3250(self, printer):
+        """Verifica se a impressora é uma Epson L3250 (sem suporte de impressão)"""
+        if not printer:
+            return False
+        
+        # Verifica no nome da impressora
+        name = getattr(printer, 'name', '') or ''
+        if 'l3250' in name.lower() or 'l-3250' in name.lower():
+            return True
+        
+        # Verifica no modelo
+        model = getattr(printer, 'model', '') or ''
+        if 'l3250' in model.lower() or 'l-3250' in model.lower():
+            return True
+        
+        # Verifica no atributo printer-make-and-model (IPP)
+        make_model = getattr(printer, 'printer-make-and-model', '') or ''
+        if 'l3250' in make_model.lower() or 'l-3250' in make_model.lower():
+            return True
+        
+        return False
+
     def _init_ui(self):
         """Inicializa a interface do usuário"""
         # Configura o painel principal
@@ -321,24 +343,31 @@ class SelectPrinterDialog(wx.Dialog):
             self.printer_listbox.SetItem(index, 1, ip)
             
             # Status
-            is_online = getattr(printer, 'is_online', False) 
-            is_ready = getattr(printer, 'is_ready', False)
-            
-            if is_online and is_ready:
-                status = "Pronta"
-            elif is_online:
-                status = "Online"
+            if self._is_epson_l3250(printer):
+                status = "Sem suporte"
             else:
-                status = "Offline"
+                is_online = getattr(printer, 'is_online', False) 
+                is_ready = getattr(printer, 'is_ready', False)
                 
+                if is_online and is_ready:
+                    status = "Pronta"
+                elif is_online:
+                    status = "Online"
+                else:
+                    status = "Offline"
+                    
             self.printer_listbox.SetItem(index, 2, status)
             
             # Local
             location = getattr(printer, 'location', '')
             self.printer_listbox.SetItem(index, 3, location)
             
-            # Define cor de fundo padrão
-            self.printer_listbox.SetItemBackgroundColour(index, self.colors["card_bg"])
+            # Define cor de fundo baseada no status
+            if self._is_epson_l3250(printer):
+                self.printer_listbox.SetItemBackgroundColour(index, wx.Colour(50, 50, 50))  # Cinza escuro
+            else:
+                self.printer_listbox.SetItemBackgroundColour(index, self.colors["card_bg"])
+
         
         # Bind do evento de seleção
         self.printer_listbox.Bind(wx.EVT_LIST_ITEM_SELECTED, self.on_printer_selected)
@@ -569,6 +598,15 @@ class SelectPrinterDialog(wx.Dialog):
     def on_ok(self, event):
         """Manipula o evento de OK (selecionar)"""
         if self.selected_printer:
+            # Verifica se é Epson L3250 (sem suporte)
+            if self._is_epson_l3250(self.selected_printer):
+                wx.MessageBox(
+                    f"A impressora '{self.selected_printer.name}' é uma Epson L3250 e não possui suporte de impressão neste sistema.",
+                    "Impressora sem suporte",
+                    wx.OK | wx.ICON_WARNING
+                )
+                return
+            
             # Verifica se a impressora tem IP
             if not hasattr(self.selected_printer, 'ip') or not self.selected_printer.ip:
                 wx.MessageBox(
@@ -603,6 +641,25 @@ def select_printer_and_print(parent, document, config):
         bool: True se o documento foi enviado para impressão
     """
     try:
+        # Função helper local
+        def _is_epson_l3250_local(printer):
+            if not printer:
+                return False
+            
+            name = getattr(printer, 'name', '') or ''
+            if 'l3250' in name.lower() or 'l-3250' in name.lower():
+                return True
+            
+            model = getattr(printer, 'model', '') or ''
+            if 'l3250' in model.lower() or 'l-3250' in model.lower():
+                return True
+            
+            make_model = getattr(printer, 'printer-make-and-model', '') or ''
+            if 'l3250' in make_model.lower() or 'l-3250' in make_model.lower():
+                return True
+            
+            return False
+        
         # Inicializa o sistema de impressão
         print_system = PrintSystem(config)
         
@@ -635,6 +692,15 @@ def select_printer_and_print(parent, document, config):
         
         if not printer:
             return False  # Não deveria acontecer, mas por segurança
+        
+        # Verificação adicional para Epson L3250
+        if _is_epson_l3250_local(printer):
+            wx.MessageBox(
+                f"A impressora '{printer.name}' é uma Epson L3250 e não possui suporte de impressão neste sistema.",
+                "Impressora sem suporte",
+                wx.OK | wx.ICON_WARNING
+            )
+            return False
         
         # Imprime o documento
         return print_system.print_document(parent, document, printer)
