@@ -142,16 +142,15 @@ class PDFHandler(FileSystemEventHandler):
         """Verifica se o arquivo é um PDF"""
         return path.lower().endswith('.pdf')
 
+_GLOBAL_OBSERVERS = {}  # path -> observer
+_GLOBAL_OBSERVERS_LOCK = threading.Lock()
+
 class FileMonitor:
     """Monitor para arquivos PDF em um diretório"""
     
     def __init__(self, config, on_documents_changed=None):
         """
-        Inicializa o monitor de arquivos
-        
-        Args:
-            config: Configuração da aplicação
-            on_documents_changed: Callback quando a lista de documentos muda
+        Inicializa o monitor de arquivos - VERSÃO CORRIGIDA PARA MACOS
         """
         self.config = config
         self.on_documents_changed = on_documents_changed
@@ -161,6 +160,11 @@ class FileMonitor:
         self._main_observer = None  # Observador principal para compatibilidade
         self.lock = threading.Lock()
         self.system = platform.system()
+        
+        # CORREÇÃO MACOS: Controles específicos para evitar observadores duplicados
+        self._is_monitoring = False
+        self._monitored_paths = set()  # Conjunto de caminhos já monitorados
+        self._startup_lock = threading.Lock()  # Lock específico para startup
         
         # Lista de diretórios a monitorar
         self.pdf_dirs = self._get_pdf_directories()
@@ -174,6 +178,11 @@ class FileMonitor:
         
         logger.info(f"Base de diretórios PDF configurada: {self.base_pdf_dir}")
         logger.info(f"Diretórios a monitorar: {len(self.pdf_dirs)}")
+
+        self._is_monitoring = False
+        self._last_file_state = {}
+        
+        logger.info(f"FileMonitor inicializado para macOS")
     
     # Propriedade para compatibilidade com código existente
     @property
@@ -316,61 +325,290 @@ class FileMonitor:
         return unique_directories
     
     def start(self):
-        """Inicia o monitoramento dos diretórios"""
-        if self.observers:
-            logger.info("Monitor de arquivos já está ativo")
+        """Inicia o monitoramento - VERSÃO DEFINITIVA SEM DUPLICAÇÃO"""
+        global _GLOBAL_OBSERVERS, _GLOBAL_OBSERVERS_LOCK
+        
+        with _GLOBAL_OBSERVERS_LOCK:
+            if hasattr(self, '_is_monitoring') and self._is_monitoring:
+                logger.info("Monitor de arquivos já está ativo para esta instância")
+                return
+            
+            # Carrega documentos iniciais primeiro
+            self._load_initial_documents()
+            
+            # Atualiza diretórios
+            self.pdf_dirs = self._get_pdf_directories()
+            logger.info(f"Iniciando monitoramento de arquivos em {len(self.pdf_dirs)} diretórios")
+            
+            successfully_started = 0
+            
+            for pdf_dir in self.pdf_dirs:
+                try:
+                    # Normaliza o caminho
+                    normalized_path = os.path.normpath(os.path.abspath(pdf_dir))
+                    
+                    # Verifica se já existe observador global para este caminho
+                    if normalized_path in _GLOBAL_OBSERVERS:
+                        existing_observer = _GLOBAL_OBSERVERS[normalized_path]
+                        if existing_observer and existing_observer.is_alive():
+                            logger.info(f"Reutilizando observador existente para: {pdf_dir}")
+                            self.observers.append(existing_observer)
+                            if not self._main_observer:
+                                self._main_observer = existing_observer
+                            successfully_started += 1
+                            continue
+                        else:
+                            # Remove observador morto
+                            del _GLOBAL_OBSERVERS[normalized_path]
+                    
+                    # Cria novo observador apenas se não existir
+                    os.makedirs(pdf_dir, exist_ok=True)
+                    
+                    event_handler = PDFHandler(self)
+                    observer = Observer()
+                    observer.schedule(event_handler, pdf_dir, recursive=False)
+                    observer.start()
+                    
+                    # Armazena globalmente e localmente
+                    _GLOBAL_OBSERVERS[normalized_path] = observer
+                    self.observers.append(observer)
+                    
+                    if not self._main_observer:
+                        self._main_observer = observer
+                    
+                    successfully_started += 1
+                    logger.info(f"Novo observador criado para: {pdf_dir}")
+                    
+                except RuntimeError as re:
+                    if "already scheduled" in str(re).lower():
+                        logger.warning(f"Diretório {pdf_dir} já monitorado (ignorado): {str(re)}")
+                        continue
+                    else:
+                        logger.error(f"Erro RuntimeError: {str(re)}")
+                        continue
+                except Exception as e:
+                    logger.error(f"Erro ao iniciar monitoramento para {pdf_dir}: {str(e)}")
+                    continue
+            
+            # Marca como ativo
+            self._is_monitoring = True
+            
+            # Inicia verificação periódica como fallback
+            self._start_periodic_check()
+            
+            if successfully_started > 0:
+                logger.info(f"{successfully_started} observadores ativos (reutilizados + novos)")
+            else:
+                logger.warning("Nenhum observador ativo - usando apenas verificação periódica")
+    
+    def _start_periodic_check(self):
+        """Inicia verificação periódica como fallback"""
+        if hasattr(self, '_periodic_timer'):
             return
         
-        # Garante que estamos monitorando todos os diretórios possíveis
-        self.pdf_dirs = self._get_pdf_directories()
+        def periodic_check():
+            if hasattr(self, '_is_monitoring') and self._is_monitoring:
+                try:
+                    # Verifica mudanças nos arquivos a cada 3 segundos
+                    self._check_file_changes()
+                    
+                    # Agenda próxima verificação
+                    if hasattr(self, '_is_monitoring') and self._is_monitoring:
+                        self._periodic_timer = threading.Timer(3.0, periodic_check)
+                        self._periodic_timer.daemon = True
+                        self._periodic_timer.start()
+                except Exception as e:
+                    logger.debug(f"Erro na verificação periódica: {str(e)}")
         
-        logger.info(f"Iniciando monitoramento de arquivos em {len(self.pdf_dirs)} diretórios")
+        self._periodic_timer = threading.Timer(3.0, periodic_check)
+        self._periodic_timer.daemon = True
+        self._periodic_timer.start()
+        logger.info("Verificação periódica de arquivos iniciada")
+
+    def _check_file_changes(self):
+        """Verifica mudanças nos arquivos manualmente"""
+        try:
+            current_files = {}
+            
+            # Escaneia todos os diretórios
+            for pdf_dir in self.pdf_dirs:
+                if os.path.exists(pdf_dir):
+                    for filename in os.listdir(pdf_dir):
+                        if filename.lower().endswith('.pdf'):
+                            filepath = os.path.join(pdf_dir, filename)
+                            try:
+                                stat = os.stat(filepath)
+                                current_files[filepath] = {
+                                    'mtime': stat.st_mtime,
+                                    'size': stat.st_size
+                                }
+                            except:
+                                continue
+            
+            # Compara com estado anterior
+            if not hasattr(self, '_last_file_state'):
+                self._last_file_state = current_files
+                return
+            
+            # Detecta novos arquivos
+            for filepath in current_files:
+                if filepath not in self._last_file_state:
+                    logger.info(f"Novo arquivo detectado (verificação manual): {filepath}")
+                    self.add_document(filepath)
+            
+            # Detecta arquivos removidos
+            for filepath in self._last_file_state:
+                if filepath not in current_files:
+                    logger.info(f"Arquivo removido detectado (verificação manual): {filepath}")
+                    self.remove_document(filepath)
+            
+            # Detecta arquivos modificados
+            for filepath in current_files:
+                if filepath in self._last_file_state:
+                    old_state = self._last_file_state[filepath]
+                    new_state = current_files[filepath]
+                    if (old_state['mtime'] != new_state['mtime'] or 
+                        old_state['size'] != new_state['size']):
+                        logger.info(f"Arquivo modificado detectado (verificação manual): {filepath}")
+                        self.update_document(filepath)
+            
+            # Atualiza estado
+            self._last_file_state = current_files
+            
+        except Exception as e:
+            logger.debug(f"Erro na verificação manual: {str(e)}")
+
+    def _start_observer_for_directory(self, pdf_dir):
+        """
+        Inicia um observador para um diretório específico
         
-        # Carrega documentos iniciais
-        self._load_initial_documents()
-        
-        # Configura os observadores para cada diretório
-        for i, pdf_dir in enumerate(self.pdf_dirs):
+        Args:
+            pdf_dir: Diretório para monitorar
+            
+        Returns:
+            bool: True se o observador foi iniciado com sucesso
+        """
+        try:
+            # Normaliza o caminho
+            normalized_path = os.path.normpath(os.path.abspath(pdf_dir))
+            
+            # Verifica se já está sendo monitorado
+            if normalized_path in self._monitored_paths:
+                logger.info(f"Diretório {pdf_dir} já está sendo monitorado, pulando...")
+                return False
+            
+            # Garante que o diretório existe
+            os.makedirs(pdf_dir, exist_ok=True)
+            
+            # Cria o observador
+            event_handler = PDFHandler(self)
+            observer = Observer()
+            
+            # CORREÇÃO MACOS: Try/catch específico para FSEvents com cleanup
             try:
-                # Garante que o diretório existe
-                os.makedirs(pdf_dir, exist_ok=True)
-                
-                # Configura o observador
-                event_handler = PDFHandler(self)
-                observer = Observer()
                 observer.schedule(event_handler, pdf_dir, recursive=False)
                 observer.start()
                 
-                # Armazena o observador
+                # Se chegou aqui, foi bem sucedido
                 self.observers.append(observer)
+                self._monitored_paths.add(normalized_path)
                 
-                # Se for o primeiro observador, salva como principal para compatibilidade
-                if i == 0:
+                # Se for o primeiro observador, salva como principal
+                if not self._main_observer:
                     self._main_observer = observer
                 
                 logger.info(f"Monitoramento iniciado para: {pdf_dir}")
+                return True
                 
-            except Exception as e:
-                logger.error(f"Erro ao iniciar monitoramento para {pdf_dir}: {str(e)}")
-        
-        # Verifica se pelo menos um observador foi iniciado
-        if not self.observers:
-            logger.warning("Nenhum observador foi iniciado! Monitoramento de arquivos não está funcionando.")
-        else:
-            logger.info(f"{len(self.observers)} observadores iniciados com sucesso.")
-    
+            except RuntimeError as re:
+                if "already scheduled" in str(re).lower():
+                    logger.warning(f"Diretório {pdf_dir} já está sendo monitorado: {str(re)}")
+                    # Para o observador que falhou
+                    try:
+                        observer.stop()
+                        observer.join(timeout=1.0)
+                    except:
+                        pass
+                    return False
+                else:
+                    logger.error(f"Erro RuntimeError ao monitorar {pdf_dir}: {str(re)}")
+                    try:
+                        observer.stop()
+                        observer.join(timeout=1.0)
+                    except:
+                        pass
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Erro ao iniciar monitoramento para {pdf_dir}: {str(e)}")
+            return False
+
     def stop(self):
-        """Para o monitoramento dos diretórios"""
+        """Para o monitoramento com cleanup global"""
+        global _GLOBAL_OBSERVERS, _GLOBAL_OBSERVERS_LOCK
+        
         logger.info("Parando monitoramento de arquivos")
         
-        for observer in self.observers:
-            if observer.is_alive():
-                observer.stop()
-                observer.join()
+        # Para timer periódico
+        if hasattr(self, '_periodic_timer'):
+            try:
+                self._periodic_timer.cancel()
+                delattr(self, '_periodic_timer')
+            except:
+                pass
+        
+        # Para observadores locais (mas não os globais se estão sendo usados por outras instâncias)
+        with _GLOBAL_OBSERVERS_LOCK:
+            for observer in self.observers:
+                try:
+                    # Verifica se este observador ainda está em uso globalmente
+                    is_global = any(obs == observer for obs in _GLOBAL_OBSERVERS.values())
+                    
+                    if not is_global and observer.is_alive():
+                        observer.stop()
+                        observer.join(timeout=1.0)
+                except Exception as e:
+                    logger.debug(f"Erro ao parar observador: {str(e)}")
         
         self.observers = []
         self._main_observer = None
+        self._is_monitoring = False
     
+    def _stop_internal(self):
+        """Para todos os observadores internamente"""
+        logger.info("Parando monitoramento de arquivos")
+        
+        for observer in self.observers:
+            try:
+                if observer.is_alive():
+                    observer.stop()
+                    observer.join(timeout=2.0)  # Timeout para evitar travamento
+            except Exception as e:
+                logger.warning(f"Erro ao parar observador: {str(e)}")
+        
+        self.observers = []
+        self._main_observer = None
+        self._monitored_paths.clear()
+
+    def force_refresh_documents(self):
+        """Força refresh completo dos documentos"""
+        try:
+            # Recarrega documentos do sistema de arquivos
+            self._load_initial_documents()
+            
+            # Força verificação manual
+            if hasattr(self, '_check_file_changes'):
+                self._check_file_changes()
+            
+            # Notifica UI
+            if self.on_documents_changed:
+                self._safe_ui_callback(lambda: self.on_documents_changed(list(self.documents.values())))
+            
+            logger.info("Refresh forçado dos documentos concluído")
+            
+        except Exception as e:
+            logger.error(f"Erro no refresh forçado: {str(e)}")
+
     def _load_initial_documents(self):
         """Carrega documentos existentes de todos os diretórios monitorados"""
         with self.lock:
@@ -399,7 +637,7 @@ class FileMonitor:
     
     def add_document(self, filepath):
         """
-        Adiciona um documento ao monitor com controle aprimorado de duplicatas
+        Adiciona um documento ao monitor - VERSÃO CORRIGIDA PARA MACOS
         
         Args:
             filepath: Caminho para o documento
@@ -420,8 +658,8 @@ class FileMonitor:
                     else:
                         logger.debug(f"Auto-impressão: Arquivo {filepath} já foi processado recentemente, ignorando")
                 elif document and not auto_print_enabled:
-                    # Se auto-impressão não estiver ativada, mostra a tela de documentos
-                    self._show_documents_screen()
+                    # CORREÇÃO MACOS: Força mostrar tela de documentos
+                    self._show_documents_screen_enhanced()
     
     def _should_process_auto_print(self, filepath):
         """
@@ -455,35 +693,116 @@ class FileMonitor:
             
             return True
 
-    def _show_documents_screen(self):
-        """Mostra a tela de documentos quando auto-impressão não está ativa"""
+    def _force_all_document_lists_refresh(self):
+        """Força refresh de todas as listas de documentos abertas"""
+        try:
+            import wx
+            
+            # Procura por todas as instâncias de DocumentListPanel
+            for window in wx.GetTopLevelWindows():
+                # Verifica se tem document_list_panel
+                if hasattr(window, 'document_list_panel'):
+                    panel = window.document_list_panel
+                    if hasattr(panel, 'load_documents'):
+                        wx.CallAfter(panel.load_documents)
+                
+                # Verifica se a própria janela é um DocumentListPanel
+                if hasattr(window, 'load_documents') and 'DocumentList' in window.__class__.__name__:
+                    wx.CallAfter(window.load_documents)
+            
+            # Procura recursivamente em painéis filhos
+            def find_document_panels(parent):
+                for child in parent.GetChildren():
+                    if hasattr(child, 'load_documents') and 'DocumentList' in child.__class__.__name__:
+                        wx.CallAfter(child.load_documents)
+                    elif hasattr(child, 'GetChildren'):
+                        find_document_panels(child)
+            
+            for window in wx.GetTopLevelWindows():
+                find_document_panels(window)
+                
+        except Exception as e:
+            logger.debug(f"Erro ao forçar refresh: {str(e)}")
+
+    def _show_documents_screen_enhanced(self):
+        """Mostra a tela de documentos - VERSÃO MELHORADA PARA MACOS"""
         import wx
         
         def show_documents():
             try:
+                app = wx.GetApp()
+                main_window = None
+                
+                # Procura a janela principal
+                for window in wx.GetTopLevelWindows():
+                    if hasattr(window, 'on_show_documents'):
+                        main_window = window
+                        break
+                
+                if not main_window:
+                    logger.warning("Janela principal não encontrada")
+                    return
+                
+                # CORREÇÃO MACOS: Sequência específica para mostrar janela
+                if main_window.IsIconized():
+                    main_window.Iconize(False)
+                
+                if not main_window.IsShown():
+                    main_window.Show(True)
+                
+                # Força foco (macOS específico)
+                main_window.Raise()
+                main_window.RequestUserAttention()
+                
+                # Muda para tela de documentos
+                main_window.on_show_documents()
+                
+                # CORREÇÃO MACOS: Força refresh múltiplas vezes
+                wx.CallLater(50, self._force_all_document_lists_refresh)
+                wx.CallLater(150, self._force_all_document_lists_refresh)
+                wx.CallLater(300, self._force_all_document_lists_refresh)
+                
+            except Exception as e:
+                logger.error(f"Erro ao mostrar tela de documentos: {str(e)}")
+        
+        # Executa na thread principal
+        wx.CallAfter(show_documents)
+
+    def _show_documents_screen(self):
+        """Mostra a tela de documentos quando auto-impressão não está ativa - VERSÃO CORRIGIDA PARA MACOS"""
+        import wx
+        
+        def show_documents():
+            try:
+                # CORREÇÃO MACOS: Força refresh antes de mostrar
+                self._force_document_list_refresh()
+                
                 # Obtém todas as janelas abertas
                 for window in wx.GetTopLevelWindows():
                     # Verifica se é a janela principal (MainScreen)
                     if hasattr(window, 'on_show_documents'):
-                        # Mostra a janela se estiver oculta
-                        if not window.IsShown():
-                            window.Show(True)
-                        
-                        # Se estiver minimizada, restaura
+                        # CORREÇÃO MACOS: Sequência específica para macOS
                         if window.IsIconized():
                             window.Iconize(False)
                         
-                        # Traz para frente
+                        if not window.IsShown():
+                            window.Show(True)
+                        
+                        # CORREÇÃO MACOS: Força foco no macOS
                         window.Raise()
+                        window.RequestUserAttention()
                         
                         # Muda para a tela de documentos
                         window.on_show_documents()
+                        
+                        # CORREÇÃO MACOS: Força refresh adicional após mostrar
+                        wx.CallLater(100, self._force_document_list_refresh)
                         break
                         
             except Exception as e:
                 logger.error(f"Erro ao mostrar tela de documentos: {str(e)}")
         
-        # Executa na thread principal da UI
+        # CORREÇÃO MACOS: Executa na thread principal da UI
         wx.CallAfter(show_documents)
     
     def process_existing_documents(self):
@@ -665,7 +984,7 @@ class FileMonitor:
 
     def _add_document_internal(self, filepath):
         """
-        Adiciona um documento internamente sem disparar notificações
+        Adiciona um documento internamente sem disparar notificações - VERSÃO CORRIGIDA PARA MACOS
         
         Args:
             filepath: Caminho para o documento
@@ -691,9 +1010,9 @@ class FileMonitor:
             # Armazena o documento
             self.documents[filepath] = doc
             
-            # Notifica sobre a alteração
+            # CORREÇÃO MACOS: Garante que o callback seja executado na thread principal da UI
             if self.on_documents_changed:
-                self.on_documents_changed(list(self.documents.values()))
+                self._safe_ui_callback(lambda: self.on_documents_changed(list(self.documents.values())))
                 
             return True
         
@@ -701,9 +1020,48 @@ class FileMonitor:
             logger.error(f"Erro ao adicionar documento {filepath}: {str(e)}")
             return False
     
+    def _safe_ui_callback(self, callback):
+        """Executa callback na UI de forma segura e robusta"""
+        try:
+            import wx
+            
+            def safe_execution():
+                try:
+                    callback()
+                except Exception as e:
+                    logger.error(f"Erro no callback da UI: {str(e)}")
+            
+            # Verifica se wx está disponível e executa
+            if wx.GetApp():
+                wx.CallAfter(safe_execution)
+            else:
+                # Fallback: executa diretamente
+                safe_execution()
+                
+        except Exception as e:
+            logger.error(f"Erro ao agendar callback da UI: {str(e)}")
+
+    def _force_document_list_refresh(self):
+        """
+        Força o refresh da lista de documentos se a tela estiver visível - ESPECÍFICO PARA MACOS
+        """
+        try:
+            import wx
+            
+            # Procura por janelas abertas que tenham DocumentListPanel
+            for window in wx.GetTopLevelWindows():
+                if hasattr(window, 'document_list_panel'):
+                    # Força o reload dos documentos
+                    if hasattr(window.document_list_panel, 'load_documents'):
+                        wx.CallAfter(window.document_list_panel.load_documents)
+                    break
+                    
+        except Exception as e:
+            logger.debug(f"Erro ao forçar refresh da lista: {str(e)}")
+
     def remove_document(self, filepath):
         """
-        Remove um documento do monitor
+        Remove um documento do monitor - VERSÃO CORRIGIDA PARA MACOS
         
         Args:
             filepath: Caminho para o documento
@@ -722,12 +1080,14 @@ class FileMonitor:
                     if filepath in self.file_hashes:
                         del self.file_hashes[filepath]
                 
+                # CORREÇÃO MACOS: Usa callback seguro
                 if self.on_documents_changed:
-                    self.on_documents_changed(list(self.documents.values()))
+                    self._safe_ui_callback(lambda: self.on_documents_changed(list(self.documents.values())))
+
     
     def update_document(self, filepath):
         """
-        Atualiza um documento no monitor
+        Atualiza um documento no monitor - VERSÃO CORRIGIDA PARA MACOS
         
         Args:
             filepath: Caminho para o documento
@@ -736,7 +1096,8 @@ class FileMonitor:
             if filepath in self.documents:
                 if self._add_document_internal(filepath):
                     if self.on_documents_changed:
-                        self.on_documents_changed(list(self.documents.values()))
+                        self._safe_ui_callback(lambda: self.on_documents_changed(list(self.documents.values())))
+
     
     def get_documents(self):
         """
