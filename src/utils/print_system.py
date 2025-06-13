@@ -311,13 +311,13 @@ class PopplerManager:
 
     @staticmethod
     def install_poppler_macos():
-        """Instala Poppler no macOS e reinicia se necessário"""
+        """Instala Poppler no macOS com feedback visual - CORRIGIDO PARA MAIN THREAD"""
         logger.info("Tentando instalar Poppler no macOS usando Homebrew...")
         
         try:
             # Verifica se Homebrew está instalado
             result = subprocess.run(['which', 'brew'], 
-                                  capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=5)
             
             if result.returncode != 0:
                 logger.error("Homebrew não encontrado. Por favor, instale o Homebrew primeiro:")
@@ -334,7 +334,7 @@ class PopplerManager:
                 # Verifica se funciona
                 try:
                     test_result = subprocess.run(['pdftoppm', '-h'], 
-                                               capture_output=True, text=True, timeout=3)
+                                            capture_output=True, text=True, timeout=3)
                     if test_result.returncode == 0:
                         logger.info("Poppler está funcionando")
                         return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
@@ -349,43 +349,141 @@ class PopplerManager:
                     PopplerManager.show_restart_dialog_and_restart()
                     return None
             
-            # Tenta instalar poppler
-            logger.info("Instalando poppler via Homebrew...")
-            result = subprocess.run(['brew', 'install', 'poppler'], 
-                                  capture_output=True, text=True, timeout=300)
+            # === CORREÇÃO: Apenas aviso simples, sem escolha do usuário ===
+            import wx
             
-            if result.returncode == 0:
-                logger.info("✓ Poppler instalado com sucesso via Homebrew!")
-                
-                # Aguarda um pouco
-                time.sleep(2)
-                
-                # Verifica se funciona imediatamente
+            # Função para mostrar aviso na main thread
+            def show_install_warning():
                 try:
-                    test_result = subprocess.run(['pdftoppm', '-h'], 
-                                               capture_output=True, text=True, timeout=3)
-                    if test_result.returncode == 0:
-                        logger.info("✓ Poppler funcionando imediatamente!")
-                        return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
-                    else:
-                        # Instalado mas não funciona - precisa reiniciar
+                    # Aviso simples sem escolha
+                    wx.MessageBox(
+                        "O Poppler não foi encontrado no sistema.\n\n"
+                        "Será instalado automaticamente via Homebrew.\n"
+                        "Esta operação pode demorar alguns minutos.\n\n"
+                        "A instalação começará em alguns segundos...",
+                        "Instalação do Poppler",
+                        wx.OK | wx.ICON_INFORMATION
+                    )
+                except:
+                    pass  # Se falhar, continua sem diálogo
+            
+            # Mostra aviso na main thread
+            if wx.GetApp():
+                wx.CallAfter(show_install_warning)
+                import time
+                time.sleep(2)  # Aguarda um pouco para o usuário ler
+            
+            logger.info("Iniciando instalação do Poppler via Homebrew...")
+            
+            # === CORREÇÃO: Instalação simples sem diálogo de progresso ===
+            try:
+                logger.info("Executando: brew install poppler")
+                result = subprocess.run(['brew', 'install', 'poppler'], 
+                                    capture_output=True, text=True, timeout=300)
+                
+                if result.returncode == 0:
+                    logger.info("✓ Poppler instalado com sucesso via Homebrew!")
+                    
+                    # Aguarda um pouco
+                    import time
+                    time.sleep(2)
+                    
+                    # Verifica se funciona imediatamente
+                    try:
+                        test_result = subprocess.run(['pdftoppm', '-h'], 
+                                                capture_output=True, text=True, timeout=3)
+                        if test_result.returncode == 0:
+                            logger.info("✓ Poppler funcionando imediatamente!")
+                            
+                            # Aviso de sucesso na main thread
+                            def show_success():
+                                try:
+                                    wx.MessageBox(
+                                        "Poppler instalado com sucesso!\n\n"
+                                        "A conversão de PDF para JPG já está disponível.",
+                                        "Instalação Concluída",
+                                        wx.OK | wx.ICON_INFORMATION
+                                    )
+                                except:
+                                    pass
+                            
+                            if wx.GetApp():
+                                wx.CallAfter(show_success)
+                            
+                            return "/opt/homebrew/bin" if os.path.exists("/opt/homebrew/bin/pdftoppm") else "/usr/local/bin"
+                        else:
+                            # Instalado mas não funciona - precisa reiniciar
+                            logger.info("Poppler instalado mas precisa reiniciar aplicação")
+                            PopplerManager.show_restart_dialog_and_restart()
+                            return None
+                    except:
+                        # Erro ao testar - precisa reiniciar
                         logger.info("Poppler instalado mas precisa reiniciar aplicação")
                         PopplerManager.show_restart_dialog_and_restart()
                         return None
-                except:
-                    # Erro ao testar - precisa reiniciar
-                    logger.info("Poppler instalado mas precisa reiniciar aplicação")
-                    PopplerManager.show_restart_dialog_and_restart()
+                else:
+                    logger.error(f"Erro ao instalar Poppler: {result.stderr}")
+                    
+                    # Aviso de erro na main thread
+                    def show_error():
+                        try:
+                            wx.MessageBox(
+                                f"Erro ao instalar Poppler automaticamente.\n\n"
+                                f"Por favor, instale manualmente com:\n"
+                                f"brew install poppler\n\n"
+                                f"Erro: {result.stderr[:200]}",
+                                "Erro na Instalação",
+                                wx.OK | wx.ICON_ERROR
+                            )
+                        except:
+                            pass
+                    
+                    if wx.GetApp():
+                        wx.CallAfter(show_error)
+                    
                     return None
-            else:
-                logger.error(f"Erro ao instalar Poppler: {result.stderr}")
+                    
+            except subprocess.TimeoutExpired:
+                logger.error("Timeout ao instalar Poppler (5 minutos)")
+                
+                # Aviso de timeout na main thread
+                def show_timeout():
+                    try:
+                        wx.MessageBox(
+                            "A instalação do Poppler demorou mais que o esperado.\n\n"
+                            "Por favor, instale manualmente com:\n"
+                            "brew install poppler",
+                            "Timeout na Instalação",
+                            wx.OK | wx.ICON_WARNING
+                        )
+                    except:
+                        pass
+                
+                if wx.GetApp():
+                    wx.CallAfter(show_timeout)
+                
                 return None
                 
-        except subprocess.TimeoutExpired:
-            logger.error("Timeout ao instalar Poppler")
-            return None
         except Exception as e:
             logger.error(f"Erro ao instalar Poppler no macOS: {e}")
+            
+            # Aviso de erro geral na main thread
+            def show_general_error():
+                try:
+                    wx.MessageBox(
+                        f"Erro inesperado na instalação do Poppler.\n\n"
+                        f"Por favor, instale manualmente com:\n"
+                        f"brew install poppler\n\n"
+                        f"Erro: {str(e)[:200]}",
+                        "Erro Inesperado",
+                        wx.OK | wx.ICON_ERROR
+                    )
+                except:
+                    pass
+            
+            if wx.GetApp():
+                wx.CallAfter(show_general_error)
+            
             return None
         
     @staticmethod
@@ -665,45 +763,55 @@ class PopplerManager:
 
     @staticmethod
     def show_restart_dialog_and_restart():
-        """Mostra diálogo de reinício e reinicia a aplicação"""
+        """Mostra diálogo de reinício e reinicia a aplicação - CORRIGIDO PARA MAIN THREAD"""
+        def show_restart_in_main_thread():
+            try:
+                import wx
+                
+                # === CORREÇÃO: Executar na main thread ===
+                dlg = wx.MessageDialog(
+                    None,
+                    "O Poppler foi instalado com sucesso via Homebrew!\n\n"
+                    "Para que a conversão de PDF para JPG funcione corretamente,\n"
+                    "é necessário reiniciar a aplicação.\n\n"
+                    "Depois de reiniciado, envie novamente sua impressão!\n\n"
+                    "Deseja reiniciar agora?",
+                    "Reinício Necessário - Poppler Instalado",
+                    wx.YES_NO | wx.ICON_INFORMATION | wx.YES_DEFAULT
+                )
+                
+                result = dlg.ShowModal()
+                dlg.Destroy()
+                
+                if result == wx.ID_YES:
+                    PopplerManager.restart_application()
+                    return True
+                else:
+                    wx.MessageBox(
+                        "A conversão JPG pode não funcionar até que a aplicação seja reiniciada.\n"
+                        "Você pode reiniciar manualmente quando desejar.",
+                        "Aviso",
+                        wx.OK | wx.ICON_WARNING
+                    )
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Erro ao mostrar diálogo de reinício: {e}")
+                return False
+        
+        # === CORREÇÃO: Usar CallAfter para executar na main thread ===
         try:
             import wx
-            
-            # Cria o diálogo de aviso
-            dlg = wx.MessageDialog(
-                None,
-                "O Poppler foi instalado com sucesso via Homebrew!\n\n"
-                "Para que a conversão de PDF para JPG funcione corretamente,\n"
-                "é necessário reiniciar a aplicação.\n\n"
-                "Depois de reiniciado, envie novamente sua impressão!\n\n"
-                "Deseja reiniciar agora?",
-                "Reinício Necessário - Poppler Instalado",
-                wx.YES_NO | wx.ICON_INFORMATION | wx.YES_DEFAULT
-            )
-            
-            result = dlg.ShowModal()
-            dlg.Destroy()
-            
-            if result == wx.ID_YES:
-                PopplerManager.restart_application()
-                return True
+            if wx.GetApp():
+                wx.CallAfter(show_restart_in_main_thread)
             else:
-                # Usuário escolheu não reiniciar agora
-                wx.MessageBox(
-                    "A conversão JPG pode não funcionar até que a aplicação seja reiniciada.\n"
-                    "Você pode reiniciar manualmente quando desejar.",
-                    "Aviso",
-                    wx.OK | wx.ICON_WARNING
-                )
-                return False
-                
+                logger.warning("Aplicação wx não disponível para diálogo de reinício")
         except Exception as e:
-            logger.error(f"Erro ao mostrar diálogo de reinício: {e}")
-            return False
+            logger.error(f"Erro ao agendar diálogo de reinício: {e}")
         
     @staticmethod
     def restart_application():
-        """Reinicia a aplicação atual"""
+        """Reinicia a aplicação atual - VERSÃO SIMPLIFICADA SEM TIMER"""
         try:
             import sys
             import os
@@ -711,41 +819,58 @@ class PopplerManager:
             
             logger.info("Reiniciando aplicação...")
             
-            # Obtém o script principal que está sendo executado
-            script_path = sys.argv[0]
-            
-            # Se for um executável Python compilado (.app no macOS)
+            # Prepara comando para restart
             if getattr(sys, 'frozen', False):
-                # Aplicação empacotada (py2app, PyInstaller, etc.)
-                executable = sys.executable
-                subprocess.Popen([executable])
+                # Aplicação empacotada
+                restart_cmd = [sys.executable]
             else:
                 # Script Python normal
-                python_exe = sys.executable
-                subprocess.Popen([python_exe, script_path] + sys.argv[1:])
+                restart_cmd = [sys.executable, sys.argv[0]] + sys.argv[1:]
             
-            # Agenda o fechamento da aplicação atual
-            import wx
-            wx.CallAfter(wx.GetApp().ExitMainLoop)
-            
-            logger.info("Aplicação será reiniciada...")
-            
+            # === CORREÇÃO: Simplificado para evitar problemas de thread ===
+            try:
+                # Inicia nova instância
+                subprocess.Popen(restart_cmd,
+                               stdout=subprocess.DEVNULL, 
+                               stderr=subprocess.DEVNULL,
+                               preexec_fn=os.setsid if hasattr(os, 'setsid') else None)
+                
+                logger.info("Nova instância iniciada, fechando aplicação atual...")
+                
+                # Fecha aplicação atual de forma simples
+                import wx
+                app = wx.GetApp()
+                if app:
+                    wx.CallAfter(app.ExitMainLoop)
+                
+                # Agenda saída forçada depois de um tempo
+                import threading
+                def force_exit():
+                    import time
+                    time.sleep(3)  # Aguarda 3 segundos
+                    os._exit(0)
+                
+                threading.Thread(target=force_exit, daemon=True).start()
+                
+            except Exception as e:
+                logger.error(f"Erro no restart: {e}")
+                # Fallback simples
+                import wx
+                app = wx.GetApp()
+                if app:
+                    wx.CallAfter(app.ExitMainLoop)
+                os._exit(0)
+                
         except Exception as e:
             logger.error(f"Erro ao reiniciar aplicação: {e}")
-            # Fallback: apenas fecha a aplicação
+            # Último recurso
             try:
-                import wx
-                wx.MessageBox(
-                    "Não foi possível reiniciar automaticamente.\n"
-                    "Por favor, feche e abra a aplicação manualmente.",
-                    "Aviso",
-                    wx.OK | wx.ICON_WARNING
-                )
-                wx.CallAfter(wx.GetApp().ExitMainLoop)
+                import os
+                os._exit(0)
             except:
                 import sys
                 sys.exit(0)
-
+        
     @staticmethod
     def diagnose_poppler():
         """Diagnóstica problemas com o Poppler - ATUALIZADO PARA MACOS"""
