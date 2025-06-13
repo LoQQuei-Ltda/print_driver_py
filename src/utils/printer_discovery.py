@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-VERSÃO COMPLETA: printer_discovery.py - Varredura 1-254 + Sistema IPP Robusto
-Mantém TODAS as funcionalidades originais + varredura completa de rede
+VERSÃO CORRIGIDA PARA macOS: printer_discovery.py - Varredura 1-254 + Sistema IPP Robusto
+Corrige problemas específicos do macOS para descoberta de impressoras
 """
 
 import asyncio
@@ -44,8 +44,8 @@ if is_frozen():
     BASE_TIMEOUT_SCAN = 2         # Tempo para port scan
     BASE_TIMEOUT_PING = 1         # Tempo para ping
     MAX_WORKERS = 80              # Workers para paralelismo
-    DISCOVERY_TIMEOUT = 60        # Timeout total de descoberta
-    MDNS_WAIT_TIME = 6            # Tempo de espera mDNS
+    DISCOVERY_TIMEOUT = 20        # Timeout total de descoberta
+    MDNS_WAIT_TIME = 8            # Tempo de espera mDNS (aumentado para macOS)
     SSDP_WAIT_TIME = 10           # Tempo de espera SSDP
     MIN_DISCOVERY_TIME = 0        # Sem tempo mínimo forçado
     IPP_ATTRIBUTE_TIMEOUT = 12    # CRÍTICO: Tempo para buscar atributos IPP
@@ -55,17 +55,17 @@ else:
     # DESENVOLVIMENTO: Valores otimizados
     BASE_TIMEOUT_REQUEST = 5
     BASE_TIMEOUT_SCAN = 1.5
-    BASE_TIMEOUT_PING = 0.8
+    BASE_TIMEOUT_PING = 1.2       # Aumentado para macOS
     MAX_WORKERS = 100
-    DISCOVERY_TIMEOUT = 45
-    MDNS_WAIT_TIME = 4
+    DISCOVERY_TIMEOUT = 20
+    MDNS_WAIT_TIME = 6            # Aumentado para macOS
     SSDP_WAIT_TIME = 8
     MIN_DISCOVERY_TIME = 0
     IPP_ATTRIBUTE_TIMEOUT = 10
     BATCH_SIZE = 50
     ENABLE_FULL_SCAN = True
 
-COMMON_PRINTER_PORTS = [631, 9100, 80, 443, 515, 8080, 8443, 5353, 161, 3702]
+COMMON_PRINTER_PORTS = [631, 9100, 80, 443]
 
 # Bibliotecas opcionais
 HAS_PYIPP = False
@@ -138,7 +138,7 @@ else:
 
 
 class PrinterDiscovery:
-    """Descoberta de impressoras COMPLETA - Varredura 1-254 + IPP Robusto"""
+    """Descoberta de impressoras COMPLETA - Varredura 1-254 + IPP Robusto - CORRIGIDO PARA macOS"""
     
     def __init__(self):
         """Inicializa o descobridor de impressoras"""
@@ -149,11 +149,13 @@ class PrinterDiscovery:
         # Informações do sistema
         self.system = platform.system().lower()
         self.is_windows = self.system == "windows"
+        self.is_macos = self.system == "darwin"
+        self.is_linux = self.system == "linux"
         self.is_frozen = is_frozen()
         self.is_admin = self._check_admin_privileges()
         
-        # Detecção do Windows
-        self.windows_version = self._detect_windows_version()
+        # Detecção do macOS
+        self.macos_version = self._detect_macos_version()
         
         # Cache
         self.mac_cache = {}
@@ -175,37 +177,52 @@ class PrinterDiscovery:
         
         # Log do ambiente
         logger.info(f"PrinterDiscovery COMPLETO - Sistema: {self.system}, "
-                   f"Frozen: {self.is_frozen}, Admin: {self.is_admin}")
+                   f"macOS: {self.is_macos}, Frozen: {self.is_frozen}, Admin: {self.is_admin}")
         logger.info(f"Configurações: SCAN_TIMEOUT={BASE_TIMEOUT_SCAN}s, "
                    f"IPP_TIMEOUT={IPP_ATTRIBUTE_TIMEOUT}s, WORKERS={MAX_WORKERS}")
         
+        if self.is_macos:
+            logger.info(f"🍎 MODO macOS ATIVADO - Versão: {self.macos_version}")
+        
         if self.is_frozen:
             logger.info("🔒 EXECUTANDO EM MODO EMPACOTADO")
-            logger.info(f"Bibliotecas disponíveis: zeroconf={HAS_ZEROCONF}, "
-                       f"pysnmp={HAS_PYSNMP}, requests={HAS_REQUESTS}, "
-                       f"netifaces={HAS_NETIFACES}, pyipp={HAS_PYIPP}")
+            
+        logger.info(f"Bibliotecas disponíveis: zeroconf={HAS_ZEROCONF}, "
+                   f"pysnmp={HAS_PYSNMP}, requests={HAS_REQUESTS}, "
+                   f"netifaces={HAS_NETIFACES}, pyipp={HAS_PYIPP}")
     
-    def _detect_windows_version(self):
-        """Detecta versão do Windows"""
-        if not self.is_windows:
-            return {'version': 'not_windows', 'is_server': False}
+    def _detect_macos_version(self):
+        """Detecta versão do macOS"""
+        if not self.is_macos:
+            return None
         
         try:
-            import winreg
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, 
-                               r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-            
-            product_name = winreg.QueryValueEx(key, "ProductName")[0]
-            current_build = winreg.QueryValueEx(key, "CurrentBuild")[0]
-            winreg.CloseKey(key)
-            
-            return {
-                'version': product_name,
-                'build': int(current_build),
-                'is_server': "server" in product_name.lower()
-            }
+            result = subprocess.run(['uname', '-r'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                kernel_version = result.stdout.strip()
+                
+                # Mapeamento aproximado Darwin -> macOS
+                try:
+                    major_version = int(kernel_version.split('.')[0])
+                    if major_version >= 20:
+                        return f"macOS 11+ (Darwin {kernel_version})"
+                    elif major_version >= 19:
+                        return f"macOS 10.15 (Darwin {kernel_version})"
+                    else:
+                        return f"macOS 10.x (Darwin {kernel_version})"
+                except:
+                    return f"macOS (Darwin {kernel_version})"
         except:
-            return {'version': 'unknown', 'is_server': False}
+            pass
+        
+        try:
+            result = subprocess.run(['sw_vers', '-productVersion'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                return f"macOS {result.stdout.strip()}"
+        except:
+            pass
+        
+        return "macOS (versão desconhecida)"
     
     def _check_admin_privileges(self):
         """Verifica privilégios de administrador"""
@@ -246,9 +263,9 @@ class PrinterDiscovery:
     
     def discover_printers(self, subnet=None):
         """
-        Descoberta COMPLETA de impressoras com varredura 1-254
+        Descoberta COMPLETA de impressoras com varredura 1-254 - OTIMIZADA PARA macOS
         """
-        logger.info("=== DESCOBERTA COMPLETA DE IMPRESSORAS (1-254) ===")
+        logger.info("=== DESCOBERTA COMPLETA DE IMPRESSORAS (1-254) - macOS ===")
         logger.info(f"Ambiente: {'EMPACOTADO' if self.is_frozen else 'DESENVOLVIMENTO'}")
         start_time = time.time()
         self.stats['start_time'] = start_time
@@ -258,13 +275,22 @@ class PrinterDiscovery:
         self.tested_ips.clear()
         self.stats = {'total_ips_tested': 0, 'responsive_ips': 0, 'printers_found': 0, 'start_time': start_time}
         
+        # ESPECÍFICO macOS: Força refresh do DNS primeiro
+        if self.is_macos:
+            self._flush_dns_cache_macos()
+        
         # Força atualização do ARP primeiro
         self._update_arp_cache()
         
-        # Lista de métodos de descoberta COMPLETA
+        # Lista de métodos de descoberta OTIMIZADA PARA macOS
         discovery_methods = []
         
-        # Ordena métodos por eficácia (mDNS primeiro por ser mais preciso)
+        # Para macOS, Bonjour/mDNS é MUITO importante
+        if self.is_macos:
+            # Método nativo do macOS primeiro
+            discovery_methods.append(("DNS-SD Nativo (macOS)", self._discover_dns_sd_macos))
+        
+        # mDNS/Zeroconf
         if HAS_ZEROCONF:
             discovery_methods.append(("mDNS/Bonjour", self._discover_mdns))
         
@@ -275,8 +301,9 @@ class PrinterDiscovery:
         discovery_methods.append(("Cache ARP", self._discover_arp_cache))
         discovery_methods.append(("IPP Direct", self._discover_ipp_direct))
         
-        if self.is_windows:
-            discovery_methods.append(("WSD", self._discover_wsd))
+        # macOS específicos
+        if self.is_macos:
+            discovery_methods.append(("CUPS Local", self._discover_cups_local_macos))
         
         if HAS_PYSNMP:
             discovery_methods.append(("SNMP", self._discover_snmp))
@@ -329,6 +356,165 @@ class PrinterDiscovery:
         self.printers = unique_printers
         return unique_printers
     
+    def _flush_dns_cache_macos(self):
+        """Força limpeza do cache DNS no macOS"""
+        if not self.is_macos:
+            return
+        
+        try:
+            logger.debug("Limpando cache DNS do macOS...")
+            # Comando para flush DNS no macOS
+            subprocess.run(['dscacheutil', '-flushcache'], 
+                         timeout=5, capture_output=True)
+        except:
+            try:
+                # Alternativa sem sudo
+                subprocess.run(['dscacheutil', '-flushcache'], 
+                             timeout=5, capture_output=True)
+            except:
+                logger.debug("Não foi possível limpar cache DNS")
+    
+    def _discover_dns_sd_macos(self, subnet=None):
+        """Descoberta usando dns-sd nativo do macOS"""
+        if not self.is_macos:
+            return 0
+        
+        count = 0
+        logger.info("🍎 Usando DNS-SD nativo do macOS...")
+        
+        try:
+            # Procura por serviços de impressora usando dns-sd
+            services_to_find = [
+                '_ipp._tcp',
+                '_printer._tcp', 
+                '_pdl-datastream._tcp',
+                '_airprint._tcp',
+                '_ipps._tcp'
+            ]
+            
+            for service in services_to_find:
+                try:
+                    logger.debug(f"Buscando serviço {service}...")
+                    # dns-sd -B _ipp._tcp local.
+                    result = subprocess.run([
+                        'dns-sd', '-B', service, 'local.'
+                    ], timeout=6, capture_output=True, text=True)
+                    
+                    if result.returncode == 0:
+                        # Processa output do dns-sd
+                        for line in result.stdout.split('\n'):
+                            if 'ADD' in line and service in line:
+                                # Extrai informações do serviço
+                                parts = line.split()
+                                if len(parts) >= 6:
+                                    service_name = parts[6] if len(parts) > 6 else "Unknown"
+                                    logger.debug(f"Serviço encontrado: {service_name}")
+                                    
+                                    # Resolve o serviço para obter IP
+                                    try:
+                                        resolve_result = subprocess.run([
+                                            'dns-sd', '-L', service_name, service, 'local.'
+                                        ], timeout=3, capture_output=True, text=True)
+                                        
+                                        if resolve_result.returncode == 0:
+                                            ip = self._extract_ip_from_dns_sd(resolve_result.stdout)
+                                            if ip:
+                                                printer_info = {
+                                                    'ip': ip,
+                                                    'name': service_name,
+                                                    'discovery_method': 'DNS-SD macOS',
+                                                    'service_type': service,
+                                                    'ports': [631] if 'ipp' in service else [9100]
+                                                }
+                                                
+                                                if 'ipp' in service:
+                                                    printer_info['uri'] = f"ipp://{ip}/ipp/print"
+                                                
+                                                self._add_discovered_printer(printer_info)
+                                                count += 1
+                                                logger.info(f"✓ DNS-SD: {service_name} em {ip}")
+                                    except subprocess.TimeoutExpired:
+                                        logger.debug(f"Timeout resolvendo {service_name}")
+                                    except Exception as e:
+                                        logger.debug(f"Erro resolvendo {service_name}: {e}")
+                
+                except subprocess.TimeoutExpired:
+                    logger.debug(f"Timeout buscando {service}")
+                except Exception as e:
+                    logger.debug(f"Erro buscando {service}: {e}")
+        
+        except Exception as e:
+            logger.error(f"Erro DNS-SD macOS: {e}")
+        
+        return count
+    
+    def _extract_ip_from_dns_sd(self, dns_sd_output):
+        """Extrai IP do output do dns-sd"""
+        try:
+            # Procura por padrões de IP no output
+            ip_pattern = r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b'
+            matches = re.findall(ip_pattern, dns_sd_output)
+            
+            # Filtra IPs válidos (não localhost)
+            for match in matches:
+                if not match.startswith('127.') and not match.startswith('169.254.'):
+                    return match
+        except:
+            pass
+        return None
+    
+    def _discover_cups_local_macos(self, subnet=None):
+        """Descobre impressoras via CUPS local no macOS"""
+        if not self.is_macos:
+            return 0
+        
+        count = 0
+        logger.info("🍎 Consultando CUPS local do macOS...")
+        
+        try:
+            # lpstat -v mostra impressoras configuradas
+            result = subprocess.run(['lpstat', '-v'], 
+                                  capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if 'device for' in line.lower():
+                        # Extrai informações da impressora
+                        # Formato típico: device for PrinterName: ipp://192.168.1.100/ipp/print
+                        match = re.search(r'device for ([^:]+):\s*(.+)', line)
+                        if match:
+                            printer_name = match.group(1).strip()
+                            device_uri = match.group(2).strip()
+                            
+                            # Extrai IP da URI
+                            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', device_uri)
+                            if ip_match:
+                                ip = ip_match.group(1)
+                                
+                                printer_info = {
+                                    'ip': ip,
+                                    'name': printer_name,
+                                    'discovery_method': 'CUPS Local',
+                                    'uri': device_uri,
+                                    'ports': [631] if 'ipp' in device_uri else [9100],
+                                    'is_configured': True  # Já está configurada no CUPS
+                                }
+                                
+                                self._add_discovered_printer(printer_info)
+                                count += 1
+                                logger.info(f"✓ CUPS: {printer_name} em {ip}")
+            
+            # Também verifica impressoras disponíveis mas não configuradas
+            result2 = subprocess.run(['lpstat', '-e'], 
+                                   capture_output=True, text=True, timeout=5)
+            if result2.returncode == 0:
+                logger.debug(f"Impressoras CUPS disponíveis: {result2.stdout.strip()}")
+        
+        except Exception as e:
+            logger.debug(f"Erro CUPS local: {e}")
+        
+        return count
+    
     def _run_discovery_method(self, method_name, method_func, subnet):
         """Executa método de descoberta com logging"""
         try:
@@ -363,7 +549,7 @@ class PrinterDiscovery:
                 logger.debug(f"Nova impressora descoberta: {ip}")
     
     def _discover_mdns(self, subnet=None):
-        """Descoberta via mDNS/Bonjour"""
+        """Descoberta via mDNS/Bonjour - OTIMIZADA PARA macOS"""
         if not HAS_ZEROCONF:
             return 0
         
@@ -372,7 +558,7 @@ class PrinterDiscovery:
             zeroconf = Zeroconf()
             listener = MDNSListener(self)
             
-            # Serviços de impressora expandidos
+            # Serviços de impressora expandidos para macOS
             services = [
                 "_ipp._tcp.local.",
                 "_printer._tcp.local.",
@@ -380,21 +566,33 @@ class PrinterDiscovery:
                 "_airprint._tcp.local.",
                 "_ipps._tcp.local.",
                 "_http._tcp.local.",
-                "_device-info._tcp.local."
+                "_device-info._tcp.local.",
+                "_cups._tcp.local.",      # CUPS específico
+                "_print-caps._tcp.local." # Print capabilities
             ]
             
             browsers = []
             for service in services:
-                browser = ServiceBrowser(zeroconf, service, listener)
-                browsers.append(browser)
+                try:
+                    browser = ServiceBrowser(zeroconf, service, listener)
+                    browsers.append(browser)
+                except Exception as e:
+                    logger.debug(f"Erro criando browser para {service}: {e}")
             
-            # Aguarda anúncios
+            # Aguarda anúncios - tempo maior para macOS
             wait_time = MDNS_WAIT_TIME
             logger.info(f"mDNS aguardando {wait_time}s por anúncios...")
             time.sleep(wait_time)
             
             count = len([p for p in self.discovered_printers.values() 
                         if p.get('discovery_method') == 'mDNS'])
+            
+            # Fecha browsers primeiro
+            for browser in browsers:
+                try:
+                    browser.cancel()
+                except:
+                    pass
             
             zeroconf.close()
             
@@ -430,6 +628,8 @@ class PrinterDiscovery:
                     printer_info['model'] = props['ty']
                 if 'note' in props:
                     printer_info['location'] = props['note']
+                if 'pdl' in props:
+                    printer_info['supported_formats'] = props['pdl']
             
             if info.port:
                 printer_info['ports'] = [info.port]
@@ -443,7 +643,7 @@ class PrinterDiscovery:
     
     def _discover_complete_network_scan(self, subnet=None):
         """
-        DESCOBERTA PRINCIPAL: Varredura completa da rede (1-254)
+        DESCOBERTA PRINCIPAL: Varredura completa da rede (1-254) - OTIMIZADA PARA macOS
         """
         networks = self._get_networks_to_scan(subnet)
         total_count = 0
@@ -469,7 +669,7 @@ class PrinterDiscovery:
         return total_count
     
     def _discover_arp_cache(self, subnet=None):
-        """Descoberta usando cache ARP"""
+        """Descoberta usando cache ARP - CORRIGIDA PARA macOS"""
         count = 0
         
         # Testa IPs do ARP que ainda não foram testados
@@ -486,7 +686,7 @@ class PrinterDiscovery:
         return count
     
     def _discover_ipp_direct(self, subnet=None):
-        """IPP Direct expandido"""
+        """IPP Direct expandido - OTIMIZADO PARA macOS"""
         count = 0
         networks = self._get_networks_to_scan(subnet)
         
@@ -511,41 +711,6 @@ class PrinterDiscovery:
                                 count += 1
                         except:
                             pass
-        
-        return count
-    
-    def _discover_wsd(self, subnet=None):
-        """Web Services for Devices (Windows)"""
-        if not self.is_windows:
-            return 0
-        
-        count = 0
-        try:
-            probe_message = self._create_wsd_probe()
-            
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.settimeout(2)
-            
-            # Envia probe
-            sock.sendto(probe_message.encode('utf-8'), ('239.255.255.250', 3702))
-            
-            # Escuta respostas
-            start_time = time.time()
-            timeout = 8
-            
-            while time.time() - start_time < timeout:
-                try:
-                    data, addr = sock.recvfrom(65536)
-                    if self._process_wsd_response(data, addr[0]):
-                        count += 1
-                except socket.timeout:
-                    continue
-            
-            sock.close()
-            
-        except Exception as e:
-            logger.debug(f"Erro WSD: {str(e)}")
         
         return count
     
@@ -705,7 +870,7 @@ ST: ssdp:all
         return snmp_ips
     
     def _scan_ip_range_parallel(self, ip_list, range_name):
-        """Escaneia range de IPs em paralelo"""
+        """Escaneia range de IPs em paralelo - OTIMIZADO PARA macOS"""
         if not ip_list:
             return 0
         
@@ -722,7 +887,7 @@ ST: ssdp:all
                 ping_futures = {executor.submit(self._quick_ping, ip): ip for ip in batch_ips}
                 active_ips = []
                 
-                for future in concurrent.futures.as_completed(ping_futures, timeout=15):
+                for future in concurrent.futures.as_completed(ping_futures, timeout=20):
                     try:
                         if future.result():
                             active_ips.append(ping_futures[future])
@@ -737,7 +902,7 @@ ST: ssdp:all
                     scan_futures = {executor.submit(self._scan_single_ip_comprehensive, ip): ip 
                                    for ip in active_ips}
                     
-                    for future in concurrent.futures.as_completed(scan_futures, timeout=30):
+                    for future in concurrent.futures.as_completed(scan_futures, timeout=40):
                         try:
                             result = future.result()
                             if result:
@@ -751,12 +916,17 @@ ST: ssdp:all
         return count
     
     def _quick_ping(self, ip):
-        """Ping super rápido para testar conectividade"""
+        """Ping super rápido para testar conectividade - CORRIGIDO PARA macOS"""
         try:
             if self.is_windows:
                 cmd = ["ping", "-n", "1", "-w", str(int(BASE_TIMEOUT_PING * 1000)), ip]
                 creation_flags = subprocess.CREATE_NO_WINDOW
+            elif self.is_macos:
+                # macOS usa -t para timeout em segundos
+                cmd = ["ping", "-c", "1", "-t", str(int(BASE_TIMEOUT_PING)), ip]
+                creation_flags = 0
             else:
+                # Linux
                 cmd = ["ping", "-c", "1", "-W", str(int(BASE_TIMEOUT_PING)), ip]
                 creation_flags = 0
             
@@ -765,7 +935,7 @@ ST: ssdp:all
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=BASE_TIMEOUT_PING + 1,
-                creationflags=creation_flags
+                creationflags=creation_flags if self.is_windows else 0
             )
             
             return result.returncode == 0
@@ -832,44 +1002,6 @@ ST: ssdp:all
         self._add_discovered_printer(printer_info)
         return True
     
-    def _create_wsd_probe(self):
-        """Cria mensagem de probe WSD"""
-        return f"""<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" 
-               xmlns:wsa="http://schemas.xmlsoap.org/ws/2004/08/addressing" 
-               xmlns:wsd="http://schemas.xmlsoap.org/ws/2005/04/discovery">
-  <soap:Header>
-    <wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>
-    <wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>
-    <wsa:MessageID>urn:uuid:{int(time.time() * 1000)}</wsa:MessageID>
-  </soap:Header>
-  <soap:Body>
-    <wsd:Probe>
-      <wsd:Types>wsdp:Device</wsd:Types>
-    </wsd:Probe>
-  </soap:Body>
-</soap:Envelope>"""
-    
-    def _process_wsd_response(self, data, ip):
-        """Processa resposta WSD"""
-        try:
-            device_info = data.decode('utf-8', errors='ignore').lower()
-            if any(k in device_info for k in ['print', 'printer', 'mfp']):
-                printer_info = {
-                    'ip': ip,
-                    'name': f"Impressora WSD {ip}",
-                    'discovery_method': 'WSD',
-                    'ports': [80, 5357],
-                    'uri': f"http://{ip}",
-                    'is_online': True,
-                    'is_ready': True
-                }
-                self._add_discovered_printer(printer_info)
-                return True
-        except:
-            pass
-        return False
-    
     def _process_discovered_printers(self):
         """
         Processa impressoras descobertas - LÓGICA ORIGINAL RESTAURADA
@@ -899,36 +1031,20 @@ ST: ssdp:all
                 # Garante status online
                 printer_info['is_online'] = True
                 
-                # ADICIONAR AQUI: Verificação para Epson L3250
-                printer_name = printer_info.get('name', '').lower()
-                printer_model = printer_info.get('printer-make-and-model', '').lower()
-                
-                if ('l3250' in printer_name or 'l-3250' in printer_name or 
-                    'l3250' in printer_model or 'l-3250' in printer_model):
-                    # Marca como sem suporte mas online
-                    printer_info['is_ready'] = False
-                    printer_info['printer-state'] = "Sem suporte de impressão"
-                    logger.info(f"Epson L3250 detectada em {ip} - marcada como sem suporte")
+                # CRÍTICO: Enriquecimento IPP para impressoras com porta 631
+                if 631 in printer_info.get('ports', []) and HAS_PYIPP:
+                    logger.debug(f"Enriquecendo com IPP: {ip}")
+                    self._enrich_with_ipp_details(printer_info)
                 else:
-                    # CRÍTICO: Enriquecimento IPP para impressoras com porta 631
-                    if 631 in printer_info.get('ports', []) and HAS_PYIPP:
-                        logger.debug(f"Enriquecendo com IPP: {ip}")
-                        self._enrich_with_ipp_details(printer_info)
-                    else:
-                        # Se não tem IPP, assume que está pronta
-                        printer_info.setdefault('is_ready', True)
+                    # Se não tem IPP, assume que está pronta
+                    printer_info.setdefault('is_ready', True)
                 
                 # Log do status final
-                if ('l3250' in printer_name or 'l-3250' in printer_name or 
-                    'l3250' in printer_model or 'l-3250' in printer_model):
-                    ready_status = "🔘 SEM SUPORTE"
-                else:
-                    ready_status = "🟢 VERDE" if printer_info.get('is_ready') else "🟡 AMARELA"
-                
+                ready_status = "🟢 VERDE" if printer_info.get('is_ready') else "🟡 AMARELA"
                 method = printer_info.get('discovery_method', 'Unknown')
                 model = printer_info.get('printer-make-and-model') or printer_info.get('model', '')
                 logger.info(f"Processada: {ip} via {method} → {ready_status}" + 
-                        (f" ({model})" if model else ""))
+                           (f" ({model})" if model else ""))
                 
                 unique_printers.append(printer_info)
         
@@ -936,27 +1052,14 @@ ST: ssdp:all
         unique_printers.sort(key=lambda p: socket.inet_aton(p['ip']))
         
         # Log de resumo
-        green_count = sum(1 for p in unique_printers if p.get('is_ready', False) and not self._is_l3250_printer(p))
-        yellow_count = sum(1 for p in unique_printers if not p.get('is_ready', False) and not self._is_l3250_printer(p))
-        no_support_count = sum(1 for p in unique_printers if self._is_l3250_printer(p))
+        green_count = sum(1 for p in unique_printers if p.get('is_ready', False))
+        yellow_count = len(unique_printers) - green_count
         
         logger.info(f"RESUMO FINAL: {len(unique_printers)} impressoras")
         logger.info(f"  🟢 VERDES (prontas): {green_count}")
         logger.info(f"  🟡 AMARELAS (não prontas): {yellow_count}")
-        logger.info(f"  🔘 SEM SUPORTE (L3250): {no_support_count}")
         
         return unique_printers
-
-    def _is_l3250_printer(self, printer_info):
-        """Verifica se é uma impressora Epson L3250"""
-        if not printer_info:
-            return False
-        
-        printer_name = printer_info.get('name', '').lower()
-        printer_model = printer_info.get('printer-make-and-model', '').lower()
-        
-        return ('l3250' in printer_name or 'l-3250' in printer_name or 
-                'l3250' in printer_model or 'l-3250' in printer_model)
     
     def _enrich_with_ipp_details(self, printer_info):
         """
@@ -1203,7 +1306,7 @@ ST: ssdp:all
             return f"ipp://{ip}/ipp/print"
     
     def _get_networks_to_scan(self, subnet=None):
-        """Obtém redes para escanear"""
+        """Obtém redes para escanear - MELHORADA PARA macOS"""
         if subnet:
             try:
                 return [ipaddress.IPv4Network(subnet, strict=False)]
@@ -1213,39 +1316,114 @@ ST: ssdp:all
         return self._get_local_networks()
     
     def _get_local_networks(self):
-        """Detecta redes locais automaticamente"""
+        """Detecta redes locais automaticamente - CORRIGIDA PARA macOS"""
         networks = []
         
-        # Usa netifaces se disponível
+        # Método 1: ifconfig no macOS
+        if self.is_macos:
+            try:
+                result = subprocess.run(['ifconfig'], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    current_interface = None
+                    ip_address = None
+                    netmask = None
+                    
+                    for line in result.stdout.split('\n'):
+                        # Detecta interface
+                        if line and not line.startswith('\t') and not line.startswith(' '):
+                            if 'en' in line or 'wlan' in line or 'wifi' in line:
+                                current_interface = line.split(':')[0]
+                        
+                        # Detecta IP e netmask
+                        if current_interface and 'inet ' in line and 'netmask' in line:
+                            parts = line.strip().split()
+                            for i, part in enumerate(parts):
+                                if part == 'inet' and i + 1 < len(parts):
+                                    ip_address = parts[i + 1]
+                                elif part == 'netmask' and i + 1 < len(parts):
+                                    netmask_hex = parts[i + 1]
+                                    if netmask_hex.startswith('0x'):
+                                        # Converte netmask hexadecimal para decimal
+                                        netmask = self._hex_to_netmask(netmask_hex)
+                            
+                            if ip_address and netmask and not ip_address.startswith('127.'):
+                                try:
+                                    network = ipaddress.IPv4Network(f"{ip_address}/{netmask}", strict=False)
+                                    if network not in networks:
+                                        networks.append(network)
+                                        logger.debug(f"Rede detectada via ifconfig: {network}")
+                                except Exception as e:
+                                    logger.debug(f"Erro processando rede {ip_address}/{netmask}: {e}")
+                            
+                            ip_address = None
+                            netmask = None
+            except Exception as e:
+                logger.debug(f"Erro ifconfig macOS: {e}")
+        
+        # Método 2: route no macOS para gateway padrão
+        if self.is_macos and not networks:
+            try:
+                result = subprocess.run(['route', '-n', 'get', 'default'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    gateway = None
+                    interface = None
+                    
+                    for line in result.stdout.split('\n'):
+                        if 'gateway:' in line:
+                            gateway = line.split(':')[1].strip()
+                        elif 'interface:' in line:
+                            interface = line.split(':')[1].strip()
+                    
+                    if gateway:
+                        # Assume rede /24 baseada no gateway
+                        gateway_parts = gateway.split('.')
+                        if len(gateway_parts) == 4:
+                            network_str = f"{gateway_parts[0]}.{gateway_parts[1]}.{gateway_parts[2]}.0/24"
+                            try:
+                                network = ipaddress.IPv4Network(network_str)
+                                networks.append(network)
+                                logger.debug(f"Rede detectada via gateway: {network}")
+                            except:
+                                pass
+            except Exception as e:
+                logger.debug(f"Erro route macOS: {e}")
+        
+        # Método 3: netifaces se disponível
         if HAS_NETIFACES:
             try:
                 for interface in netifaces.interfaces():
+                    if interface.startswith('lo'):  # Skip loopback
+                        continue
+                        
                     addrs = netifaces.ifaddresses(interface)
                     if netifaces.AF_INET in addrs:
                         for addr in addrs[netifaces.AF_INET]:
                             ip = addr.get('addr')
                             netmask = addr.get('netmask')
-                            if ip and netmask and not ip.startswith('127.'):
+                            if ip and netmask and not ip.startswith('127.') and not ip.startswith('169.254.'):
                                 try:
                                     network = ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False)
                                     if network not in networks:
                                         networks.append(network)
-                                except:
-                                    pass
+                                        logger.debug(f"Rede detectada via netifaces: {network}")
+                                except Exception as e:
+                                    logger.debug(f"Erro netifaces: {e}")
             except Exception as e:
                 logger.debug(f"Erro netifaces: {e}")
         
-        # Fallback: detecta via hostname
+        # Método 4: Fallback via hostname
         if not networks:
             try:
                 hostname = socket.gethostname()
                 for info in socket.getaddrinfo(hostname, None):
                     ip = info[4][0]
-                    if not ip.startswith('127.') and '.' in ip:
+                    if not ip.startswith('127.') and '.' in ip and not ip.startswith('169.254.'):
                         try:
                             network = ipaddress.IPv4Network(f"{ip}/24", strict=False)
                             if network not in networks:
                                 networks.append(network)
+                                logger.debug(f"Rede detectada via hostname: {network}")
                         except:
                             pass
             except:
@@ -1257,17 +1435,37 @@ ST: ssdp:all
             for net_str in common_networks:
                 try:
                     networks.append(ipaddress.IPv4Network(net_str))
+                    logger.debug(f"Rede fallback: {net_str}")
                 except:
                     pass
         
-        logger.info(f"Redes detectadas: {[str(n) for n in networks]}")
+        logger.info(f"Redes detectadas para macOS: {[str(n) for n in networks]}")
         return networks
     
+    def _hex_to_netmask(self, hex_netmask):
+        """Converte netmask hexadecimal para formato decimal"""
+        try:
+            if hex_netmask.startswith('0x'):
+                hex_value = int(hex_netmask, 16)
+                # Converte para formato dotted decimal
+                octets = []
+                for i in range(4):
+                    octets.append(str((hex_value >> (8 * (3 - i))) & 0xFF))
+                return '.'.join(octets)
+        except:
+            pass
+        return None
+    
     def _is_port_open(self, ip, port, timeout=1):
-        """Verifica se uma porta está aberta"""
+        """Verifica se uma porta está aberta - OTIMIZADA PARA macOS"""
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout)
+            
+            # Para macOS, configura socket options adicionais
+            if self.is_macos:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
             result = sock.connect_ex((ip, port))
             sock.close()
             return result == 0
@@ -1275,7 +1473,7 @@ ST: ssdp:all
             return False
     
     def _update_arp_cache(self):
-        """Atualiza cache ARP para descoberta de MAC"""
+        """Atualiza cache ARP para descoberta de MAC - CORRIGIDA PARA macOS"""
         current_time = time.time()
         if current_time - self.last_arp_update < 30:
             return
@@ -1289,7 +1487,14 @@ ST: ssdp:all
                     capture_output=True, text=True, timeout=10,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
+            elif self.is_macos:
+                # macOS: arp -a tem formato diferente
+                result = subprocess.run(
+                    ['arp', '-a'],
+                    capture_output=True, text=True, timeout=10
+                )
             else:
+                # Linux
                 result = subprocess.run(
                     ['arp', '-a'],
                     capture_output=True, text=True, timeout=10
@@ -1297,10 +1502,19 @@ ST: ssdp:all
             
             if result.returncode == 0:
                 for line in result.stdout.split('\n'):
-                    match = re.search(
-                        r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f:.-]+)',
-                        line
-                    )
+                    if self.is_macos:
+                        # Formato macOS: hostname (192.168.1.1) at aa:bb:cc:dd:ee:ff [ethernet]
+                        match = re.search(
+                            r'\((\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\)\s+at\s+([0-9A-Fa-f:]+)',
+                            line
+                        )
+                    else:
+                        # Formato Windows/Linux
+                        match = re.search(
+                            r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9A-Fa-f:.-]+)',
+                            line
+                        )
+                    
                     if match:
                         ip = match.group(1)
                         mac = self.normalize_mac(match.group(2))
@@ -1314,38 +1528,85 @@ ST: ssdp:all
             logger.debug(f"Erro atualizando ARP: {e}")
     
     def _get_mac_for_ip(self, ip):
-        """Obtém MAC address para um IP"""
+        """Obtém MAC address para um IP - CORRIGIDA PARA macOS"""
         # Verifica cache primeiro
         if ip in self.mac_cache:
             return self.mac_cache[ip]
         
         # Ping para forçar entrada no ARP
         self._quick_ping(ip)
-        time.sleep(0.2)
+        time.sleep(0.5)  # Tempo maior para macOS
         
         # Busca no ARP
         try:
             if self.is_windows:
                 result = subprocess.run(
                     ['arp', '-a', ip],
-                    capture_output=True, text=True, timeout=3,
+                    capture_output=True, text=True, timeout=5,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
-            else:
+            elif self.is_macos:
+                # macOS: arp -n IP
                 result = subprocess.run(
                     ['arp', '-n', ip],
-                    capture_output=True, text=True, timeout=3
+                    capture_output=True, text=True, timeout=5
+                )
+            else:
+                # Linux
+                result = subprocess.run(
+                    ['arp', '-n', ip],
+                    capture_output=True, text=True, timeout=5
                 )
             
             if result.returncode == 0:
-                match = re.search(r'([0-9A-Fa-f:.-]+)', result.stdout)
+                logger.debug(f"ARP output para {ip}: {result.stdout}")
+                
+                if self.is_macos:
+                    # Formato macOS: "10.148.1.20 (10.148.1.20) at 50:57:9c:6b:48:88 on en0 ifscope [ethernet]"
+                    # ou: "? (10.148.1.20) at 50:57:9c:6b:48:88 on en0 ifscope [ethernet]"
+                    match = re.search(r'at\s+([0-9A-Fa-f:]+)', result.stdout)
+                    if not match:
+                        # Formato alternativo: só o MAC
+                        match = re.search(r'([0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2})', result.stdout)
+                else:
+                    match = re.search(r'([0-9A-Fa-f:.-]+)', result.stdout)
+                
                 if match:
                     mac = self.normalize_mac(match.group(1))
                     if mac:
                         self.mac_cache[ip] = mac
+                        logger.debug(f"MAC encontrado para {ip}: {mac}")
                         return mac
-        except:
-            pass
+                    else:
+                        logger.debug(f"MAC inválido para {ip}: {match.group(1)}")
+                else:
+                    logger.debug(f"Nenhum MAC encontrado no ARP para {ip}")
+        except Exception as e:
+            logger.debug(f"Erro ARP para {ip}: {e}")
+        
+        # Tentativa adicional para macOS: usar ping + arp -a
+        if self.is_macos:
+            try:
+                # Ping múltiplo para forçar ARP
+                for _ in range(3):
+                    subprocess.run(['ping', '-c', '1', '-W', '1000', ip], 
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    time.sleep(0.1)
+                
+                # ARP table completa
+                result = subprocess.run(['arp', '-a'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    for line in result.stdout.split('\n'):
+                        if ip in line:
+                            match = re.search(r'at\s+([0-9A-Fa-f:]+)', line)
+                            if match:
+                                mac = self.normalize_mac(match.group(1))
+                                if mac:
+                                    self.mac_cache[ip] = mac
+                                    logger.debug(f"MAC encontrado via arp -a para {ip}: {mac}")
+                                    return mac
+            except Exception as e:
+                logger.debug(f"Erro arp -a para {ip}: {e}")
         
         return "desconhecido"
     
@@ -1366,7 +1627,7 @@ ST: ssdp:all
         return None
     
     def get_printer_details(self, ip):
-        """Obtém detalhes específicos de uma impressora"""
+        """Obtém detalhes específicos de uma impressora - MELHORADA"""
         logger.debug(f"Obtendo detalhes para {ip}")
         
         # Scan básico do IP
@@ -1377,105 +1638,97 @@ ST: ssdp:all
             self._enrich_with_ipp_details(result)
         
         return result
-
-
-# ========== FUNÇÃO DE TESTE COMPLETA ==========
-if __name__ == "__main__":
-    print("=== TESTE COMPLETO DO PRINTER DISCOVERY ===")
-    print(f"Ambiente: {'EMPACOTADO' if is_frozen() else 'DESENVOLVIMENTO'}")
-    print(f"Configurações:")
-    print(f"  - PING_TIMEOUT: {BASE_TIMEOUT_PING}s")
-    print(f"  - SCAN_TIMEOUT: {BASE_TIMEOUT_SCAN}s")
-    print(f"  - IPP_TIMEOUT: {IPP_ATTRIBUTE_TIMEOUT}s")
-    print(f"  - MAX_WORKERS: {MAX_WORKERS}")
-    print(f"  - BATCH_SIZE: {BATCH_SIZE}")
-    print(f"Bibliotecas disponíveis:")
-    print(f"  - pyipp: {HAS_PYIPP}")
-    print(f"  - zeroconf: {HAS_ZEROCONF}")
-    print(f"  - netifaces: {HAS_NETIFACES}")
-    print(f"  - pysnmp: {HAS_PYSNMP}")
-    print(f"  - requests: {HAS_REQUESTS}")
     
-    discovery = PrinterDiscovery()
-    print("\n" + "="*60)
-    print("INICIANDO DESCOBERTA COMPLETA...")
-    print("="*60)
-    
-    start_time = time.time()
-    printers = discovery.discover_printers()
-    total_time = time.time() - start_time
-    
-    print("\n" + "="*60)
-    print(f"DESCOBERTA CONCLUÍDA EM {total_time:.1f}s")
-    print("="*60)
-    
-    if printers:
-        print(f"\n🎯 {len(printers)} IMPRESSORAS ENCONTRADAS:")
-        print("-" * 60)
+    def correlate_discovered_with_configured(self, discovered_printers, configured_printers):
+        """
+        NOVA FUNÇÃO: Correlaciona impressoras descobertas com as configuradas
+        usando MAC, nome e modelo como critérios
+        """
+        logger.info(f"Correlacionando {len(discovered_printers)} descobertas com {len(configured_printers)} configuradas")
         
-        green_count = 0
-        yellow_count = 0
+        # Força atualização completa do ARP
+        self._update_arp_cache()
         
-        for i, printer in enumerate(printers, 1):
-            is_ready = printer.get('is_ready', False)
-            is_online = printer.get('is_online', False)
+        # Obtém MACs atualizados para todas as impressoras descobertas
+        for printer in discovered_printers:
+            ip = printer.get('ip')
+            if ip and not printer.get('mac_address'):
+                mac = self._get_mac_for_ip(ip)
+                if mac != "desconhecido":
+                    printer['mac_address'] = mac
+                    logger.info(f"MAC atualizado para {ip}: {mac}")
+        
+        # Correlaciona impressoras
+        correlated = []
+        for configured in configured_printers:
+            config_mac = self.normalize_mac(configured.get('mac_address', ''))
+            config_name = configured.get('name', '').lower()
             
-            if is_ready and is_online:
-                status_icon = "🟢"
-                status_text = "VERDE (Pronta)"
-                green_count += 1
-            elif is_online:
-                status_icon = "🟡"
-                status_text = "AMARELA (Online mas não pronta)"
-                yellow_count += 1
+            best_match = None
+            match_score = 0
+            
+            for discovered in discovered_printers:
+                score = 0
+                
+                # Critério 1: MAC address (peso 100)
+                discovered_mac = self.normalize_mac(discovered.get('mac_address', ''))
+                if config_mac and discovered_mac and config_mac == discovered_mac:
+                    score += 100
+                    logger.info(f"MAC match: {config_name} <-> {discovered.get('ip')} ({config_mac})")
+                
+                # Critério 2: Nome/Modelo (peso 50)
+                discovered_model = discovered.get('printer-make-and-model', '').lower()
+                discovered_name = discovered.get('name', '').lower()
+                
+                if config_name and (discovered_model or discovered_name):
+                    # Verifica se o nome configurado contém partes do modelo descoberto
+                    config_parts = config_name.replace('_', ' ').split()
+                    discovered_text = (discovered_model + ' ' + discovered_name).lower()
+                    
+                    for part in config_parts:
+                        if len(part) > 2 and part in discovered_text:
+                            score += 10
+                            logger.debug(f"Nome match: '{part}' em '{discovered_text}'")
+                
+                # Critério 3: Porta IPP (peso 20)
+                if 631 in discovered.get('ports', []):
+                    score += 20
+                
+                # Escolhe o melhor match
+                if score > match_score:
+                    match_score = score
+                    best_match = discovered
+            
+            # Se encontrou um match razoável
+            if best_match and match_score >= 50:  # Mínimo de 50 pontos
+                # Mescla informações
+                merged = configured.copy()
+                merged.update({
+                    'ip': best_match.get('ip'),
+                    'mac_address': best_match.get('mac_address', configured.get('mac_address')),
+                    'ports': best_match.get('ports', []),
+                    'uri': best_match.get('uri'),
+                    'is_online': True,
+                    'is_ready': best_match.get('is_ready', True),
+                    'printer-make-and-model': best_match.get('printer-make-and-model', ''),
+                    'printer-state': best_match.get('printer-state', 'Online'),
+                    'discovery_method': best_match.get('discovery_method', 'Network Scan'),
+                    'discovery_score': match_score
+                })
+                
+                logger.info(f"✓ Correlação: {configured.get('name')} -> {best_match.get('ip')} (score: {match_score})")
+                correlated.append(merged)
             else:
-                status_icon = "🔴"
-                status_text = "VERMELHA (Offline)"
-                yellow_count += 1
-            
-            print(f"\n{i}. {status_icon} {printer['name']} ({printer['ip']})")
-            print(f"   Status: {status_text}")
-            print(f"   Método: {printer.get('discovery_method', 'Desconhecido')}")
-            print(f"   Portas: {printer.get('ports', [])}")
-            print(f"   MAC: {printer.get('mac_address', 'N/A')}")
-            
-            # Detalhes IPP se disponíveis
-            model = printer.get('printer-make-and-model') or printer.get('model', '')
-            if model:
-                print(f"   Modelo: {model}")
-            
-            state = printer.get('printer-state', '')
-            if state:
-                print(f"   Estado: {state}")
-            
-            location = printer.get('printer-location') or printer.get('location', '')
-            if location:
-                print(f"   Local: {location}")
+                # Não encontrou match - mantém offline
+                offline = configured.copy()
+                offline.update({
+                    'ip': '',
+                    'is_online': False,
+                    'is_ready': False,
+                    'discovery_method': 'Not Found'
+                })
+                logger.warning(f"✗ Sem correlação: {configured.get('name')} (melhor score: {match_score})")
+                correlated.append(offline)
         
-        print("\n" + "="*60)
-        print(f"RESUMO FINAL:")
-        print(f"  🟢 VERDES (prontas): {green_count}")
-        print(f"  🟡 AMARELAS/VERMELHAS: {yellow_count}")
-        print(f"  📊 Taxa de sucesso IPP: {green_count}/{len(printers)} ({green_count/len(printers)*100:.1f}%)")
-        print("="*60)
-        
-        if yellow_count > 0:
-            print(f"\n⚠️  DIAGNÓSTICO DAS IMPRESSORAS AMARELAS:")
-            print("    Verifique se essas impressoras estão:")
-            print("    - Ligadas e conectadas à rede")
-            print("    - Com firmware IPP atualizado")
-            print("    - Sem erros de papel/toner")
-            
-    else:
-        print("\n❌ NENHUMA IMPRESSORA ENCONTRADA")
-        print("Possíveis causas:")
-        print("- Nenhuma impressora ligada na rede")
-        print("- Firewall bloqueando descoberta")
-        print("- Impressoras em subnet diferente")
-        print("- Impressoras sem suporte a IPP/descoberta automática")
-    
-    print(f"\n📈 ESTATÍSTICAS:")
-    print(f"- IPs testados: {discovery.stats.get('total_ips_tested', 0)}")
-    print(f"- IPs responsivos: {discovery.stats.get('responsive_ips', 0)}")
-    print(f"- Tempo total: {total_time:.1f}s")
-    print(f"- Velocidade: {discovery.stats.get('total_ips_tested', 0)/total_time:.1f} IPs/s")
+        logger.info(f"Correlação concluída: {len(correlated)} impressoras processadas")
+        return correlated
