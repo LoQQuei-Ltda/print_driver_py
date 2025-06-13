@@ -20,23 +20,19 @@ from src.utils.pdf import PDFUtils
 logger = logging.getLogger("PrintManagementSystem.Utils.FileMonitor")
 
 class PDFHandler(FileSystemEventHandler):
-    """Manipulador para eventos de arquivos PDF - VERSÃO CORRIGIDA"""
+    """Manipulador para eventos de arquivos PDF - VERSÃO CORRIGIDA ANTI-DUPLICAÇÃO"""
     
     def __init__(self, file_monitor):
-        """
-        Inicializa o manipulador de PDFs
-        
-        Args:
-            file_monitor: Instância do monitor de arquivos
-        """
         super().__init__()
         self.file_monitor = file_monitor
-        # CORREÇÃO: Adiciona debounce para evitar múltiplos eventos
+        # CORREÇÃO: Debounce mais robusto
         self.pending_events = {}
         self.event_lock = threading.Lock()
+        self.processed_files = {}  # Controla arquivos já processados
+        self.processing_lock = threading.Lock()
     
     def on_created(self, event):
-        """Manipula evento de criação de arquivo com debounce"""
+        """Manipula evento de criação de arquivo"""
         if event.is_directory:
             return
         
@@ -51,52 +47,75 @@ class PDFHandler(FileSystemEventHandler):
         
         if self._is_pdf_file(event.src_path):
             logger.info(f"Arquivo PDF excluído: {event.src_path}")
-            # Cancelar eventos pendentes para este arquivo
             self._cancel_pending_events(event.src_path)
+            self._remove_from_processed(event.src_path)
             self.file_monitor.remove_document(event.src_path)
     
     def on_modified(self, event):
-        """Manipula evento de modificação de arquivo com debounce"""
+        """Manipula evento de modificação de arquivo - DESABILITADO PARA AUTO-IMPRESSÃO"""
         if event.is_directory:
             return
         
         if self._is_pdf_file(event.src_path):
-            logger.info(f"Arquivo PDF modificado: {event.src_path}")
-            self._debounce_event('modified', event.src_path)
+            # CORREÇÃO: Não processa modificações para auto-impressão
+            # Apenas adiciona ao monitor se não existir
+            if event.src_path not in self.file_monitor.documents:
+                logger.info(f"Arquivo PDF modificado detectado como novo: {event.src_path}")
+                self._debounce_event('created', event.src_path)
     
     def on_moved(self, event):
-        """Manipula evento de movimentação de arquivo"""
+        """Manipula evento de movimentação de arquivo - CORREÇÃO ANTI-DUPLICAÇÃO"""
         if event.is_directory:
             return
         
-        # Verifica se o destino é um PDF
+        # CORREÇÃO: Processa apenas uma vez
         if self._is_pdf_file(event.dest_path):
             logger.info(f"Arquivo PDF movido: {event.src_path} -> {event.dest_path}")
-            self._cancel_pending_events(event.src_path)
-            self.file_monitor.remove_document(event.src_path)
-            self._debounce_event('created', event.dest_path)
+            
+            with self.processing_lock:
+                # Remove referências antigas
+                self._cancel_pending_events(event.src_path)
+                self._remove_from_processed(event.src_path)
+                self.file_monitor.remove_document(event.src_path)
+                
+                # CORREÇÃO: Verifica se já foi processado para evitar múltiplos eventos moved
+                move_key = f"moved:{event.dest_path}"
+                current_time = time.time()
+                
+                if move_key in self.processed_files:
+                    last_time = self.processed_files[move_key]
+                    if current_time - last_time < 5:  # 5 segundos de proteção
+                        logger.debug(f"Evento moved ignorado (duplicado): {event.dest_path}")
+                        return
+                
+                self.processed_files[move_key] = current_time
+                
+                # Processa o arquivo no destino com delay maior
+                self._debounce_event('created', event.dest_path, delay=3.0)
     
-    def _debounce_event(self, event_type, file_path):
-        """
-        Implementa debounce para evitar múltiplos eventos para o mesmo arquivo
-        
-        Args:
-            event_type: Tipo do evento ('created' ou 'modified')
-            file_path: Caminho do arquivo
-        """
+    def _debounce_event(self, event_type, file_path, delay=2.0):
+        """Implementa debounce com controle anti-duplicação melhorado"""
         with self.event_lock:
             current_time = time.time()
             
-            # Chave única para o arquivo e tipo de evento
-            event_key = f"{event_type}:{file_path}"
+            # CORREÇÃO: Chave única mais específica
+            event_key = f"{event_type}:{file_path}:{os.path.getmtime(file_path) if os.path.exists(file_path) else current_time}"
             
-            # Cancelar timer anterior se existir
+            # Cancela timer anterior se existir
             if event_key in self.pending_events:
                 self.pending_events[event_key].cancel()
             
-            # Criar novo timer
+            # CORREÇÃO: Verifica se já foi processado recentemente
+            process_key = f"process:{file_path}"
+            if process_key in self.processed_files:
+                last_time = self.processed_files[process_key]
+                if current_time - last_time < 10:  # 10 segundos de proteção
+                    logger.debug(f"Arquivo ignorado (processado recentemente): {file_path}")
+                    return
+            
+            # Cria novo timer
             timer = threading.Timer(
-                2.0,  # Aguarda 2 segundos antes de processar
+                delay,
                 self._process_debounced_event,
                 args=[event_type, file_path, event_key]
             )
@@ -108,23 +127,59 @@ class PDFHandler(FileSystemEventHandler):
         """Processa o evento após o debounce"""
         try:
             with self.event_lock:
-                # Remove da lista de eventos pendentes
                 if event_key in self.pending_events:
                     del self.pending_events[event_key]
             
-            # Verifica se o arquivo ainda existe (pode ter sido deletado)
+            # CORREÇÃO: Controle rigoroso de duplicação
+            with self.processing_lock:
+                current_time = time.time()
+                process_key = f"process:{file_path}"
+                
+                # Verifica se já foi processado
+                if process_key in self.processed_files:
+                    last_time = self.processed_files[process_key]
+                    if current_time - last_time < 15:  # 15 segundos de proteção
+                        logger.debug(f"Processamento ignorado (duplicado): {file_path}")
+                        return
+                
+                # Marca como processado ANTES de processar
+                self.processed_files[process_key] = current_time
+            
+            # Verifica se o arquivo ainda existe
             if not os.path.exists(file_path):
                 logger.debug(f"Arquivo {file_path} não existe mais, ignorando evento {event_type}")
                 return
             
-            # Processa o evento baseado no tipo
+            # Processa o evento
             if event_type == 'created':
+                logger.info(f"Processando arquivo para auto-impressão: {file_path}")
                 self.file_monitor.add_document(file_path)
-            elif event_type == 'modified':
-                self.file_monitor.update_document(file_path)
                 
         except Exception as e:
             logger.error(f"Erro ao processar evento {event_type} para {file_path}: {e}")
+        finally:
+            # Limpa entradas antigas do cache
+            self._cleanup_processed_cache()
+    
+    def _remove_from_processed(self, file_path):
+        """Remove arquivo do cache de processados"""
+        with self.processing_lock:
+            keys_to_remove = [key for key in self.processed_files.keys() if file_path in key]
+            for key in keys_to_remove:
+                del self.processed_files[key]
+    
+    def _cleanup_processed_cache(self):
+        """Limpa cache de arquivos processados"""
+        with self.processing_lock:
+            current_time = time.time()
+            keys_to_remove = []
+            
+            for key, timestamp in self.processed_files.items():
+                if current_time - timestamp > 300:  # Remove entradas com mais de 5 minutos
+                    keys_to_remove.append(key)
+            
+            for key in keys_to_remove:
+                del self.processed_files[key]
     
     def _cancel_pending_events(self, file_path):
         """Cancela todos os eventos pendentes para um arquivo"""
@@ -399,60 +454,78 @@ class FileMonitor:
     
     def add_document(self, filepath):
         """
-        Adiciona um documento ao monitor com controle aprimorado de duplicatas
-        
-        Args:
-            filepath: Caminho para o documento
+        Adiciona um documento ao monitor com controle aprimorado de duplicatas - VERSÃO CORRIGIDA
         """
         with self.lock:
-            if self._is_duplicate_file(filepath):
-                logger.info(f"Arquivo duplicado ignorado: {filepath}")
-                return
+            # CORREÇÃO: Verifica se já está sendo processado
+            if hasattr(self, '_processing_files'):
+                if filepath in self._processing_files:
+                    logger.debug(f"Arquivo já está sendo processado: {filepath}")
+                    return
+            else:
+                self._processing_files = set()
             
-            if self._add_document_internal(filepath):
-                document = self.documents.get(filepath)
-                auto_print_enabled = self.config.get("auto_print", False)
+            # Marca como processando
+            self._processing_files.add(filepath)
+            
+            try:
+                if self._is_duplicate_file(filepath):
+                    logger.info(f"Arquivo duplicado ignorado: {filepath}")
+                    return
+                
+                if self._add_document_internal(filepath):
+                    document = self.documents.get(filepath)
+                    auto_print_enabled = self.config.get("auto_print", False)
 
-                if document and auto_print_enabled:
-                    # Verifica se já foi processado recentemente
-                    if self._should_process_auto_print(filepath):
-                        self._process_auto_print(document)
-                    else:
-                        logger.debug(f"Auto-impressão: Arquivo {filepath} já foi processado recentemente, ignorando")
-                elif document and not auto_print_enabled:
-                    # Se auto-impressão não estiver ativada, mostra a tela de documentos
-                    self._show_documents_screen()
+                    if document and auto_print_enabled:
+                        # CORREÇÃO: Verifica se deve processar auto-impressão
+                        if self._should_process_auto_print(filepath):
+                            logger.info(f"Processando auto-impressão para: {document.name}")
+                            self._process_auto_print(document)
+                        else:
+                            logger.debug(f"Auto-impressão não autorizada para: {document.name}")
+                    elif document and not auto_print_enabled:
+                        # Se auto-impressão não estiver ativada, mostra a tela de documentos
+                        self._show_documents_screen()
+            finally:
+                # Remove da lista de processamento
+                if filepath in self._processing_files:
+                    self._processing_files.remove(filepath)
     
     def _should_process_auto_print(self, filepath):
         """
-        Verifica se um arquivo deve ser processado para auto-impressão
-        Evita processamento duplicado em um curto período de tempo
-        
-        Args:
-            filepath: Caminho do arquivo
-            
-        Returns:
-            bool: True se deve processar, False caso contrário
+        Verifica se um arquivo deve ser processado para auto-impressão - VERSÃO CORRIGIDA
         """
         import time
         
         with self.auto_print_lock:
             current_time = time.time()
-            last_processed = self.auto_print_processed.get(filepath, 0)
             
-            # CORREÇÃO: Aumenta o tempo de debounce para 15 segundos
-            if current_time - last_processed < 15:
+            # CORREÇÃO: Chave única incluindo hash do arquivo para detectar duplicatas reais
+            file_hash = self._get_file_hash(filepath)
+            if not file_hash:
+                # Se não conseguiu calcular hash, usa apenas o filepath
+                check_key = filepath
+            else:
+                check_key = f"{filepath}:{file_hash}"
+            
+            last_processed = self.auto_print_processed.get(check_key, 0)
+            
+            # CORREÇÃO: Aumenta o tempo de debounce para 20 segundos
+            if current_time - last_processed < 20:
+                logger.debug(f"Auto-impressão ignorada: arquivo processado há {current_time - last_processed:.1f}s")
                 return False
             
             # Marca como processado agora
-            self.auto_print_processed[filepath] = current_time
+            self.auto_print_processed[check_key] = current_time
             
-            # Limpa entradas antigas (mais de 1 hora)
-            old_entries = [path for path, timestamp in self.auto_print_processed.items() 
-                        if current_time - timestamp > 3600]
-            for path in old_entries:
-                del self.auto_print_processed[path]
+            # Limpa entradas antigas (mais de 2 horas)
+            old_entries = [key for key, timestamp in self.auto_print_processed.items() 
+                        if current_time - timestamp > 7200]
+            for key in old_entries:
+                del self.auto_print_processed[key]
             
+            logger.info(f"Auto-impressão autorizada para: {filepath}")
             return True
 
     def _show_documents_screen(self):

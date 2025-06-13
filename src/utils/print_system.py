@@ -2698,50 +2698,57 @@ class PrintQueueManager:
     
     def _is_duplicate_job(self, print_job_info):
         """
-        Verifica se é um trabalho duplicado baseado no arquivo e hash
-        
-        Args:
-            print_job_info: Informações do trabalho
-            
-        Returns:
-            bool: True se for duplicata
+        Verifica se é um trabalho duplicado - VERSÃO CORRIGIDA MAIS RIGOROSA
         """
         with self.file_jobs_lock:
             import time
+            import hashlib
             current_time = time.time()
             filepath = print_job_info.document_path
             
-            # Calcula hash do arquivo
-            file_hash = self._get_file_hash(filepath)
-            if not file_hash:
-                return False
+            # CORREÇÃO: Calcula hash do conteúdo para detectar duplicatas reais
+            try:
+                with open(filepath, 'rb') as f:
+                    content = f.read(8192)  # Lê mais dados para melhor detecção
+                    file_hash = hashlib.md5(content).hexdigest()
+            except Exception as e:
+                logger.debug(f"Erro ao calcular hash de {filepath}: {e}")
+                # Se não conseguir calcular hash, usa info do arquivo
+                try:
+                    stat = os.stat(filepath)
+                    file_hash = f"{stat.st_size}_{stat.st_mtime}"
+                except:
+                    file_hash = f"unknown_{current_time}"
             
-            # Verifica se existe job para este arquivo
-            if filepath in self.file_jobs:
-                existing_job = self.file_jobs[filepath]
+            # CORREÇÃO: Chave única baseada em hash + job info
+            job_key = f"{file_hash}_{print_job_info.printer_id}_{print_job_info.options.copies}"
+            
+            # Verifica se existe job para esta chave
+            if job_key in self.file_jobs:
+                existing_job = self.file_jobs[job_key]
                 
-                # Se foi processado há menos de 30 segundos e tem o mesmo hash
-                if (current_time - existing_job["timestamp"] < 30 and 
-                    existing_job["hash"] == file_hash):
+                # CORREÇÃO: Tempo de proteção aumentado para 30 segundos
+                if current_time - existing_job["timestamp"] < 30:
                     logger.warning(f"Job duplicado detectado para arquivo {filepath} "
-                                 f"(job anterior: {existing_job['job_id']})")
+                                f"(job anterior: {existing_job['job_id']})")
                     return True
             
             # Registra este job
-            self.file_jobs[filepath] = {
+            self.file_jobs[job_key] = {
                 "hash": file_hash,
                 "timestamp": current_time,
-                "job_id": print_job_info.job_id
+                "job_id": print_job_info.job_id,
+                "filepath": filepath
             }
             
-            # Limpa entradas antigas (mais de 5 minutos)
+            # Limpa entradas antigas (mais de 10 minutos)
             old_entries = []
-            for path, job_data in self.file_jobs.items():
-                if current_time - job_data["timestamp"] > 300:
-                    old_entries.append(path)
+            for key, job_data in self.file_jobs.items():
+                if current_time - job_data["timestamp"] > 600:
+                    old_entries.append(key)
             
-            for path in old_entries:
-                del self.file_jobs[path]
+            for key in old_entries:
+                del self.file_jobs[key]
             
             return False
     

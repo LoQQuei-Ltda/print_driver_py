@@ -287,40 +287,60 @@ class VirtualPrinterManager:
         logger.info("=" * 50)
 
     def _on_server_document_created(self, document):
-        """Callback chamado quando o servidor cria um novo documento"""
+        """Callback chamado quando o servidor cria um novo documento - VERSÃO CORRIGIDA"""
         try:
-            # Marcar como processado
+            # CORREÇÃO: Controle rigoroso de duplicação
+            document_key = f"{document.path}:{getattr(document, 'id', 'unknown')}"
+            
+            if not hasattr(self, '_server_processed_docs'):
+                self._server_processed_docs = {}
+            
+            current_time = time.time()
+            if document_key in self._server_processed_docs:
+                last_time = self._server_processed_docs[document_key]
+                if current_time - last_time < 15:  # 15 segundos de proteção
+                    logger.debug(f"Documento do servidor ignorado (duplicado): {document.name}")
+                    return
+            
+            self._server_processed_docs[document_key] = current_time
+            
+            # Marcar como processado no sistema global
             if document.id not in self.processed_ids:
                 self.processed_ids.add(document.id)
                 
                 logger.info(f"Novo documento criado pela impressora virtual: {document.name}")
                 logger.info(f"Caminho do documento: {document.path}")
                 
-                # Verificar se o arquivo realmente existe
+                # Verifica se o arquivo realmente existe
                 if not os.path.exists(document.path):
-                    logger.warning(f"O arquivo do documento não foi encontrado no caminho: {document.path}")
+                    logger.warning(f"O arquivo do documento não foi encontrado: {document.path}")
                     return
                 
-                # Atualizar o monitor de arquivos para garantir que o diretório esteja sendo monitorado
-                if self.file_monitor:
-                    # Se o diretório do documento não estiver na lista de diretórios monitorados
-                    document_dir = os.path.dirname(document.path)
-                    monitored_dirs = getattr(self.file_monitor, 'pdf_dirs', [])
+                # CORREÇÃO: Não chama auto-impressão se o documento já veio do servidor virtual
+                # O servidor virtual já indica que é uma impressão, não deve ser reimpresso
+                auto_print_enabled = self.config.get("auto_print", False)
+                if auto_print_enabled:
+                    logger.info(f"Auto-impressão está ativada, mas documento veio do servidor virtual - processando")
+                    # CORREÇÃO: Adiciona delay para evitar conflitos
+                    def delayed_auto_print():
+                        time.sleep(2)
+                        self._auto_print_if_enabled(document)
                     
-                    if document_dir not in monitored_dirs:
-                        logger.info(f"Atualizando monitoramento para incluir: {document_dir}")
-                        self.refresh_pdf_directories()
-                
-                # Aplicar impressão automática se configurado
-                self._auto_print_if_enabled(document)
+                    import threading
+                    threading.Thread(target=delayed_auto_print, daemon=True).start()
                 
                 # Chamar callback do usuário
                 if self.on_new_document:
                     self.on_new_document(document)
             
+            # Limpa cache antigo
+            old_keys = [key for key, timestamp in self._server_processed_docs.items() 
+                    if current_time - timestamp > 300]
+            for key in old_keys:
+                del self._server_processed_docs[key]
+                
         except Exception as e:
             logger.error(f"Erro ao processar documento do servidor: {e}")
-
     
     def start(self):
         """
@@ -457,26 +477,54 @@ class VirtualPrinterManager:
     
     def _auto_print_if_enabled(self, document):
         """
-        Imprime automaticamente o documento se a impressão automática estiver ativada
-        
-        Args:
-            document (Document): Documento a ser impresso
+        Imprime automaticamente o documento se ativado - VERSÃO CORRIGIDA
         """
         if not self.config.get("auto_print", False):
             return
         
+        # CORREÇÃO: Controle de duplicação específico para auto-impressão
+        if not hasattr(self, '_auto_print_processed'):
+            self._auto_print_processed = {}
+        
+        current_time = time.time()
+        doc_key = f"{document.path}:{getattr(document, 'id', 'unknown')}"
+        
+        if doc_key in self._auto_print_processed:
+            last_time = self._auto_print_processed[doc_key]
+            if current_time - last_time < 25:  # 25 segundos de proteção
+                logger.debug(f"Auto-impressão ignorada (duplicata): {document.name}")
+                return
+        
+        self._auto_print_processed[doc_key] = current_time
+        
         default_printer = self.config.get("default_printer", "")
         if not default_printer:
-            logger.warning("Impressão automática ativada, mas nenhuma impressora padrão configurada")
+            logger.warning("Auto-impressão ativada, mas nenhuma impressora padrão configurada")
             return
         
         try:
             logger.info(f"Enviando {document.name} para impressão automática na impressora {default_printer}")
             
-            from src.utils.printer_utils import PrinterUtils
-            PrinterUtils.print_file(document.path, default_printer)
+            # CORREÇÃO: Adiciona delay para evitar conflitos com outros processos
+            def delayed_print():
+                time.sleep(1)
+                try:
+                    # Verifica novamente se ainda deve imprimir
+                    if doc_key in self._auto_print_processed:
+                        from src.utils.printer_utils import PrinterUtils
+                        PrinterUtils.print_file(document.path, default_printer)
+                        logger.info(f"Documento {document.name} enviado para impressão automática com sucesso")
+                except Exception as e:
+                    logger.error(f"Erro na impressão automática: {e}")
             
-            logger.info(f"Documento {document.name} enviado para impressão automática com sucesso")
+            import threading
+            threading.Thread(target=delayed_print, daemon=True).start()
+            
+            # Limpa cache antigo
+            old_keys = [key for key, timestamp in self._auto_print_processed.items() 
+                    if current_time - timestamp > 600]
+            for key in old_keys:
+                del self._auto_print_processed[key]
             
         except Exception as e:
             logger.error(f"Erro ao imprimir automaticamente: {str(e)}")
