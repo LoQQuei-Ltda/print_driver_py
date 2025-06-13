@@ -654,6 +654,8 @@ class WindowsPrinterManager(PrinterManager):
         
         return False
 
+# CORREÇÃO COMPLETA PARA UnixPrinterManager - VERSÃO COM DIAGNÓSTICOS DETALHADOS
+
 class UnixPrinterManager(PrinterManager):
     """Gerenciador de impressoras para sistemas Unix (Linux/macOS) usando CUPS"""
     
@@ -662,6 +664,7 @@ class UnixPrinterManager(PrinterManager):
         self.system_version = self._get_system_version()
         self.architecture = self._get_architecture()
         self.cups_available = self._check_cups_availability()
+        self.auth_available = False  # Para controlar se temos autorização elevada
         
         if not self.cups_available:
             self._install_cups_suggestions()
@@ -709,18 +712,14 @@ class UnixPrinterManager(PrinterManager):
             return machine
     
     def _check_cups_availability(self):
-        """Verifica se CUPS está instalado e acessível"""
+        """Verifica se CUPS está instalado e acessível - Versão melhorada para macOS"""
         try:
             # Verificar comandos básicos
             commands_to_check = ['lpadmin', 'lpstat', 'lp']
             
             for cmd in commands_to_check:
                 try:
-                    if self.system == 'Darwin':
-                        result = run_hidden(['which', cmd], timeout=5)
-                    else:
-                        result = run_hidden(['which', cmd], timeout=5)
-                    
+                    result = run_hidden(['which', cmd], timeout=5)
                     if result.returncode != 0:
                         logger.warning(f"Comando {cmd} não encontrado")
                         return False
@@ -728,41 +727,75 @@ class UnixPrinterManager(PrinterManager):
                     logger.warning(f"Erro ao verificar comando {cmd}")
                     return False
             
-            # Verificar se o serviço CUPS está rodando
-            try:
-                result = run_hidden(['lpstat', '-r'], timeout=5)
-                if "not ready" in result.stdout.lower() or result.returncode != 0:
-                    logger.info("CUPS não está rodando, tentando iniciar...")
-                    if not self._start_cups_service():
-                        return False
-            except subprocess.TimeoutExpired:
-                logger.warning("Timeout ao verificar status do CUPS")
-                return False
-            except Exception as e:
-                logger.warning(f"Erro ao verificar CUPS: {e}")
-                return False
-            
-            logger.info("CUPS está disponível e funcionando")
-            return True
+            # No macOS, verificar se CUPS está rodando de forma mais robusta
+            if self.system == 'Darwin':
+                return self._check_cups_macos()
+            else:
+                return self._check_cups_linux()
             
         except Exception as e:
             logger.error(f"Erro ao verificar CUPS: {e}")
             return False
     
+    def _check_cups_macos(self):
+        """Verificação específica do CUPS no macOS"""
+        try:
+            # Método 1: Verificar se o daemon está rodando
+            result = run_hidden(['pgrep', 'cupsd'], timeout=5)
+            if result.returncode == 0:
+                logger.info("CUPS daemon está rodando")
+                
+                # Verificar se consegue listar impressoras (teste básico)
+                result = run_hidden(['lpstat', '-p'], timeout=10)
+                if result.returncode == 0:
+                    logger.info("CUPS está funcionando corretamente")
+                    return True
+                else:
+                    logger.info("CUPS daemon rodando, mas lpstat falhou - tentando iniciar")
+            
+            # Método 2: Tentar iniciar CUPS se não está rodando
+            logger.info("Tentando iniciar CUPS...")
+            if self._start_cups_service_macos():
+                # Aguardar um pouco e verificar novamente
+                time.sleep(3)
+                result = run_hidden(['lpstat', '-p'], timeout=10)
+                if result.returncode == 0:
+                    logger.info("CUPS iniciado com sucesso")
+                    return True
+            
+            logger.warning("CUPS não está disponível ou não pode ser iniciado")
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Erro na verificação específica do macOS: {e}")
+            return False
+    
+    def _check_cups_linux(self):
+        """Verificação específica do CUPS no Linux"""
+        try:
+            # Verificar se o serviço CUPS está rodando
+            result = run_hidden(['lpstat', '-r'], timeout=5)
+            if "not ready" in result.stdout.lower() or result.returncode != 0:
+                logger.info("CUPS não está rodando, tentando iniciar...")
+                if not self._start_cups_service():
+                    return False
+            
+            logger.info("CUPS está disponível e funcionando")
+            return True
+            
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout ao verificar status do CUPS")
+            return False
+        except Exception as e:
+            logger.warning(f"Erro ao verificar CUPS no Linux: {e}")
+            return False
+    
     def _start_cups_service(self):
-        """Tenta iniciar o serviço CUPS"""
+        """Tenta iniciar o serviço CUPS - Versão original para Linux"""
         logger.info("Tentando iniciar o serviço CUPS...")
         
         if self.system == 'Darwin':  # macOS
-            service_commands = [
-                # macOS moderno (launchctl)
-                ['sudo', 'launchctl', 'load', '-w', '/System/Library/LaunchDaemons/org.cups.cupsd.plist'],
-                ['sudo', 'launchctl', 'start', 'org.cups.cupsd'],
-                # Homebrew
-                ['sudo', 'brew', 'services', 'start', 'cups'],
-                # Comando direto
-                ['sudo', 'cupsd'],
-            ]
+            return self._start_cups_service_macos()
         elif self.system == 'Linux':
             service_commands = [
                 # systemd (distribuições modernas)
@@ -800,6 +833,69 @@ class UnixPrinterManager(PrinterManager):
                 continue
         
         logger.warning("Não foi possível iniciar o serviço CUPS automaticamente")
+        return False
+    
+    def _start_cups_service_macos(self):
+        """Inicia o serviço CUPS no macOS com melhor compatibilidade"""
+        logger.info("Tentando iniciar CUPS no macOS...")
+        
+        # Comandos para tentar iniciar CUPS no macOS (sem sudo primeiro)
+        start_commands = [
+            # Tentar sem sudo primeiro (pode funcionar em alguns casos)
+            ['launchctl', 'load', '/System/Library/LaunchDaemons/org.cups.cupsd.plist'],
+            ['launchctl', 'start', 'org.cups.cupsd'],
+            
+            # Homebrew CUPS (se instalado)
+            ['brew', 'services', 'start', 'cups'],
+        ]
+        
+        # Tentar comandos sem sudo primeiro
+        for cmd in start_commands:
+            try:
+                logger.debug(f"Tentando comando sem sudo: {' '.join(cmd)}")
+                result = run_hidden(cmd, timeout=15)
+                if result.returncode == 0:
+                    logger.info(f"CUPS iniciado sem sudo: {' '.join(cmd)}")
+                    time.sleep(2)
+                    # Verificar se realmente está funcionando
+                    test_result = run_hidden(['lpstat', '-r'], timeout=5)
+                    if test_result.returncode == 0 and "not ready" not in test_result.stdout.lower():
+                        return True
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+            except Exception as e:
+                logger.debug(f"Comando sem sudo falhou: {e}")
+                continue
+        
+        # Se comandos sem sudo falharam, tentar com autenticação visual
+        logger.info("Comandos sem sudo falharam, tentando com autenticação administrativa...")
+        return self._start_cups_with_visual_auth()
+    
+    def _start_cups_with_visual_auth(self):
+        """Inicia CUPS usando autenticação visual no macOS"""
+        try:
+            # Usar osascript para mostrar diálogo de autenticação
+            script = '''
+            do shell script "launchctl load -w /System/Library/LaunchDaemons/org.cups.cupsd.plist; launchctl start org.cups.cupsd" with administrator privileges
+            '''
+            
+            result = run_hidden(['osascript', '-e', script], timeout=30)
+            
+            if result.returncode == 0:
+                logger.info("CUPS iniciado com autenticação administrativa")
+                self.auth_available = True
+                time.sleep(3)
+                
+                # Verificar se funcionou
+                test_result = run_hidden(['lpstat', '-r'], timeout=5)
+                if test_result.returncode == 0 and "not ready" not in test_result.stdout.lower():
+                    return True
+            else:
+                logger.warning(f"Falha na autenticação administrativa: {result.stderr}")
+                
+        except Exception as e:
+            logger.warning(f"Erro na autenticação visual: {e}")
+        
         return False
     
     def _auto_install_cups(self):
@@ -873,11 +969,188 @@ class UnixPrinterManager(PrinterManager):
             logger.info("Arch Linux: sudo pacman -S cups")
             logger.info("openSUSE: sudo zypper install cups")
     
+    def _request_admin_privileges(self, command_description="configurar impressora"):
+        """Solicita privilégios administrativos usando interface visual do macOS"""
+        if self.system != 'Darwin':
+            return False
+        
+        try:
+            # Script AppleScript para solicitar autenticação
+            script = f'''
+            display dialog "A aplicação precisa de privilégios administrativos para {command_description}. Digite sua senha quando solicitado." buttons {{"Cancelar", "Continuar"}} default button "Continuar" with icon note
+            
+            if button returned of result is "Continuar" then
+                return "authorized"
+            else
+                return "cancelled"
+            end if
+            '''
+            
+            result = run_hidden(['osascript', '-e', script], timeout=30)
+            
+            if result.returncode == 0 and "authorized" in result.stdout:
+                self.auth_available = True
+                logger.info("Autorização administrativa concedida pelo usuário")
+                return True
+            else:
+                logger.info("Autorização administrativa cancelada pelo usuário")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Erro ao solicitar privilégios administrativos: {e}")
+            return False
+    
+    def _execute_with_visual_auth(self, command, description="executar comando"):
+        """Executa comando com autenticação visual - VERSÃO TOTALMENTE REESCRITA"""
+        try:
+            # Para macOS 15+, usar método mais simples
+            import tempfile
+            import os
+            
+            # Criar script shell temporário
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sh', delete=False) as script_file:
+                script_file.write('#!/bin/bash\n')
+                script_file.write(' '.join([f'"{arg}"' for arg in command]) + '\n')
+                script_path = script_file.name
+            
+            try:
+                # Tornar executável
+                os.chmod(script_path, 0o755)
+                
+                # Usar osascript com script mais simples
+                applescript = f'''
+                do shell script "{script_path}" with administrator privileges
+                '''
+                
+                result = run_hidden(['osascript', '-e', applescript], timeout=60)
+                return result
+                
+            finally:
+                # Remover arquivo temporário
+                try:
+                    os.unlink(script_path)
+                except:
+                    pass
+            
+        except Exception as e:
+            logger.error(f"Erro ao executar comando com autenticação visual: {e}")
+            return None
+
+    
+    def _list_available_drivers(self):
+        """Lista os drivers disponíveis no sistema"""
+        try:
+            logger.info("Listando drivers disponíveis...")
+            
+            # Método 1: lpinfo -m (mais confiável)
+            result = run_hidden(['lpinfo', '-m'], timeout=15)
+            if result.returncode == 0:
+                drivers = []
+                for line in result.stdout.split('\n'):
+                    if line.strip():
+                        # Formato: drv:///dir/file.ppd Description
+                        driver_path = line.split(' ')[0]
+                        if driver_path and driver_path != 'drv:///dir/file.ppd':
+                            drivers.append(driver_path)
+                
+                logger.info(f"Drivers encontrados via lpinfo: {len(drivers)}")
+                for i, driver in enumerate(drivers[:10]):  # Mostrar apenas os primeiros 10
+                    logger.debug(f"  {i+1}. {driver}")
+                
+                return drivers
+            
+        except Exception as e:
+            logger.warning(f"Erro ao listar drivers via lpinfo: {e}")
+        
+        # Método 2: Verificar diretórios padrão do CUPS
+        try:
+            ppd_dirs = [
+                '/usr/share/cups/model',
+                '/usr/share/ppd',
+                '/Library/Printers/PPDs/Contents/Resources',
+                '/System/Library/Printers/PPDs/Contents/Resources',
+            ]
+            
+            drivers = []
+            for ppd_dir in ppd_dirs:
+                if os.path.exists(ppd_dir):
+                    for root, dirs, files in os.walk(ppd_dir):
+                        for file in files:
+                            if file.endswith('.ppd') or file.endswith('.ppd.gz'):
+                                rel_path = os.path.relpath(os.path.join(root, file), ppd_dir)
+                                drivers.append(f"drv:///{rel_path}")
+            
+            logger.info(f"Drivers encontrados nos diretórios: {len(drivers)}")
+            return drivers
+            
+        except Exception as e:
+            logger.warning(f"Erro ao buscar drivers nos diretórios: {e}")
+        
+        # Fallback: drivers padrão conhecidos
+        default_drivers = [
+            'everywhere',
+            'raw',
+            'drv:///generic.drv/generic.ppd',
+            'textonly.ppd',
+            'lsb/usr/cups/generic-postscript-driver.ppd',
+        ]
+        
+        logger.info(f"Usando drivers padrão: {default_drivers}")
+        return default_drivers
+    
+    def _try_direct_command_installation(self, name, device_uri, comment):
+        """
+        Tenta instalação usando comando direto sem AppleScript
+        Método mais simples que pode funcionar quando AppleScript falha
+        """
+        try:
+            logger.info("Tentando instalação com comando direto...")
+            
+            # Tentar com sudo direto (usuário já autenticou)
+            cmd = ['sudo', 'lpadmin', '-p', name, '-E', '-v', device_uri, '-m', 'raw']
+            
+            logger.debug(f"Executando comando direto: {' '.join(cmd)}")
+            result = run_hidden(cmd, timeout=30)
+            
+            if result.returncode == 0:
+                logger.info(f"✅ Impressora '{name}' instalada com comando direto!")
+                
+                # Configurações adicionais com sudo
+                additional_commands = [
+                    ['sudo', 'cupsenable', name],
+                    ['sudo', 'cupsaccept', name],
+                ]
+                
+                if comment:
+                    additional_commands.append(['sudo', 'lpadmin', '-p', name, '-D', comment])
+                
+                for cmd in additional_commands:
+                    try:
+                        run_hidden(cmd, timeout=10)
+                    except:
+                        pass  # Não é crítico se falhar
+                
+                return True
+            else:
+                logger.warning(f"Comando direto falhou: {result.stderr}")
+                
+        except Exception as e:
+            logger.warning(f"Erro no comando direto: {e}")
+        
+        return False
+
     def add_printer(self, name, ip, port, printer_port_name=None, make_default=False, comment=None):
-        """Adiciona impressora no Unix usando CUPS"""
+        """Adiciona impressora no Unix usando CUPS - Versão melhorada para macOS"""
         if not self.cups_available:
             logger.error("CUPS não está disponível. Não é possível adicionar impressora.")
             return False
+
+        # MUDANÇA: Sanitizar o nome da impressora
+        original_name = name
+        name = self._sanitize_printer_name(name)
+        
+        if name != original_name:
+            logger.info(f"Nome da impressora sanitizado: '{original_name}' -> '{name}'")
 
         device_uri = f"socket://{ip}:{port}"
         
@@ -886,61 +1159,665 @@ class UnixPrinterManager(PrinterManager):
         logger.info(f"Arquitetura: {self.architecture}")
         logger.info(f"URI do dispositivo: {device_uri}")
         
-        # Verificar se precisa de sudo
-        needs_sudo = os.geteuid() != 0 if hasattr(os, 'geteuid') else True
+        # Verificar se a impressora já existe
+        if self.check_printer_exists(name):
+            logger.info(f"Impressora '{name}' já existe, removendo para reinstalar...")
+            self.remove_printer(name)
+            time.sleep(2)
         
-        cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+        # Escolher estratégia baseada no sistema
+        if self.system == 'Darwin':
+            return self._add_printer_macos(name, device_uri, comment)
+        else:
+            return self._add_printer_linux(name, device_uri, comment)
+
+    
+    def _add_printer_macos(self, name, device_uri, comment=None):
+        """Adiciona impressora no macOS usando métodos nativos para versão 15+"""
         
-        if needs_sudo:
-            cmd.insert(0, 'sudo')
+        # Para macOS 15+, usar apenas drivers compatíveis
+        logger.info("Detectado macOS 15+, usando métodos compatíveis")
         
-        # Tentar diferentes drivers baseados no sistema
-        if self.system == 'Darwin':  # macOS
-            drivers = [
-                'everywhere',  # Driver genérico moderno
-                'raw',
-                'textonly',
-                'drv:///generic.drv/generic.ppd',
-            ]
-        else:  # Linux
-            drivers = [
-                'everywhere',  # Driver genérico moderno (CUPS 2.2+)
-                'raw',
-                'drv:///generic.drv/generic.ppd',
-                'textonly.ppd',
-                'lsb/usr/cups/generic-postscript-driver.ppd',
-            ]
+        # Tentar método nativo do macOS primeiro
+        if self._try_native_macos_installation(name, device_uri, comment):
+            return True
         
-        success = False
-        for driver in drivers:
-            try:
-                current_cmd = cmd + ['-m', driver]
-                logger.debug(f"Tentando instalar com driver: {driver}")
-                logger.debug(f"Comando: {' '.join(current_cmd)}")
-                
-                result = run_hidden(current_cmd, timeout=30)
-                
-                if result.returncode == 0:
-                    logger.info(f"Impressora '{name}' instalada com sucesso usando driver: {driver}")
-                    success = True
-                    break
-                else:
-                    logger.debug(f"Driver {driver} falhou: {result.stderr}")
-            except subprocess.TimeoutExpired:
-                logger.warning(f"Timeout ao instalar com driver {driver}")
-                continue
-            except Exception as e:
-                logger.warning(f"Erro ao instalar com driver {driver}: {e}")
-                continue
+        # Se falhou, tentar com drivers específicos para macOS 15+
+        compatible_drivers = [
+            None,  # Sem driver específico (auto-detecção)
+            'everywhere',  # IPP Everywhere (funciona offline)
+        ]
         
-        if not success:
-            logger.error("Não foi possível instalar a impressora com nenhum driver disponível.")
+        # Tentar primeiro sem privilégios elevados
+        for driver in compatible_drivers:
+            if self._try_install_with_driver(name, device_uri, driver, use_auth=False):
+                self._apply_printer_settings(name, comment, use_auth=False)
+                return True
+        
+        # Se falhou, tentar com autenticação
+        logger.info("Tentando com autenticação administrativa...")
+        if not self._request_admin_privileges("instalar a impressora virtual"):
+            logger.error("Usuário cancelou a autenticação administrativa")
             return False
         
-        # Aguardar um pouco para a impressora ser registrada
-        time.sleep(2)
+        for driver in compatible_drivers:
+            if self._try_install_with_driver(name, device_uri, driver, use_auth=True):
+                self._apply_printer_settings(name, comment, use_auth=True)
+                return True
         
-        # Configurações adicionais
+        # Último recurso: método manual
+        return self._try_manual_installation(name, device_uri)
+
+    def _try_manual_installation(self, name, device_uri):
+        """Método manual usando ferramentas do sistema"""
+        try:
+            logger.info("Iniciando instalação manual...")
+            
+            # Extrair informações da URI
+            uri_parts = device_uri.replace('socket://', '').split(':')
+            ip = uri_parts[0] if len(uri_parts) > 0 else '127.0.0.1'
+            port = uri_parts[1] if len(uri_parts) > 1 else '9100'
+            
+            # Método 1: Tentar com System Preferences via comando
+            try:
+                logger.info("Tentando via comando do sistema...")
+                
+                # Usar comando system_profiler para verificar impressoras disponíveis
+                check_cmd = ['system_profiler', 'SPPrintersDataType']
+                run_hidden(check_cmd, timeout=10)
+                
+                # Tentar adicionar via linha de comando direta
+                direct_cmd = [
+                    'lpadmin', '-p', name, 
+                    '-v', f'ipp://{ip}:{port}/ipp/print',  # Usar IPP em vez de socket
+                    '-m', 'everywhere', '-E'
+                ]
+                
+                result = self._execute_with_visual_auth(direct_cmd, "adicionar impressora IPP")
+                
+                if result and result.returncode == 0:
+                    logger.info("✅ Sucesso com comando IPP direto")
+                    return True
+                    
+            except Exception as e:
+                logger.debug(f"Comando direto falhou: {e}")
+            
+            # Método 2: Usar printersetup (se disponível)
+            try:
+                # Verificar se printersetup existe
+                which_result = run_hidden(['which', 'printersetup'], timeout=5)
+                if which_result.returncode == 0:
+                    logger.info("Tentando com printersetup...")
+                    
+                    setup_cmd = [
+                        'printersetup', '-a', name,
+                        '-v', device_uri,
+                        '-m', 'everywhere'
+                    ]
+                    
+                    result = self._execute_with_visual_auth(setup_cmd, "configurar impressora")
+                    
+                    if result and result.returncode == 0:
+                        logger.info("✅ Sucesso com printersetup")
+                        return True
+                        
+            except Exception as e:
+                logger.debug(f"printersetup falhou: {e}")
+            
+            # Método 3: Interface gráfica como último recurso
+            return self._open_system_preferences_printer(name, ip, port)
+            
+        except Exception as e:
+            logger.error(f"Erro na instalação manual: {e}")
+            return False
+
+    def _try_install_with_driver(self, name, device_uri, driver, use_auth=False):
+        """Tenta instalar com um driver específico"""
+        try:
+            if driver is None:
+                # Instalação sem driver específico (auto-detecção)
+                cmd = ['lpadmin', '-p', name, '-v', device_uri, '-E']
+                description = "instalação automática"
+            else:
+                # Instalação com driver específico
+                cmd = ['lpadmin', '-p', name, '-v', device_uri, '-m', driver, '-E']
+                description = f"instalação com driver {driver}"
+            
+            logger.info(f"Tentando {description} {'com auth' if use_auth else 'sem auth'}")
+            
+            if use_auth and self.auth_available:
+                result = self._execute_with_visual_auth(cmd, description)
+                success = result and result.returncode == 0
+            else:
+                result = run_hidden(cmd, timeout=45)  # Timeout maior
+                success = result.returncode == 0
+            
+            if success:
+                logger.info(f"✅ Sucesso na {description}")
+                return True
+            else:
+                if result:
+                    logger.warning(f"❌ Falhou na {description}: {result.stderr.strip()}")
+                else:
+                    logger.warning(f"❌ Falhou na {description}: comando não executado")
+                
+        except Exception as e:
+            logger.warning(f"❌ Erro na instalação com driver {driver}: {e}")
+        
+        return False
+
+    def _try_native_macos_installation(self, name, device_uri, comment):
+        """Tenta usar o método nativo do macOS para adicionar impressora com integração completa"""
+        try:
+            logger.info("Tentando instalação nativa do macOS com integração completa...")
+            
+            # Extrair IP e porta
+            uri_parts = device_uri.replace('socket://', '').split(':')
+            ip = uri_parts[0] if len(uri_parts) > 0 else '127.0.0.1'
+            port = uri_parts[1] if len(uri_parts) > 1 else '9100'
+            
+            # Método 1: Instalação completa com configurações do sistema
+            success = self._install_with_system_integration(name, ip, port, comment)
+            if success:
+                return True
+            
+            # Método 2: Instalação básica e depois configurar
+            if self._install_basic_and_configure(name, device_uri, comment):
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Erro no método nativo: {e}")
+            return False
+
+    def _configure_system_integration(self, name):
+        """Configura a impressora para integração completa com o sistema macOS"""
+        try:
+            logger.info("Configurando integração com sistema macOS...")
+            
+            # Lista de comandos para integração completa
+            integration_commands = [
+                # Habilitar impressora
+                (['cupsenable', name], "habilitar impressora"),
+                
+                # Aceitar trabalhos
+                (['cupsaccept', name], "aceitar trabalhos"),
+                
+                # Configurar como impressora local (importante para visibilidade)
+                (['lpadmin', '-p', name, '-o', 'device-uri-is-local=true'], "configurar como local"),
+                
+                # Configurar estado da impressora
+                (['lpadmin', '-p', name, '-o', 'printer-state=3'], "configurar estado idle"),
+                
+                # Remover restrições de usuário
+                (['lpadmin', '-p', name, '-u', 'allow:all'], "permitir todos usuários"),
+                
+                # Configurar para aparecer em aplicações
+                (['lpadmin', '-p', name, '-o', 'printer-info=' + name], "configurar informações"),
+                
+                # Definir localização
+                (['lpadmin', '-p', name, '-L', 'Local'], "definir localização"),
+            ]
+            
+            success_count = 0
+            
+            for cmd, description in integration_commands:
+                try:
+                    logger.debug(f"Executando: {' '.join(cmd)}")
+                    result = run_hidden(cmd, timeout=15)
+                    
+                    if result.returncode == 0:
+                        logger.debug(f"✅ {description}")
+                        success_count += 1
+                    else:
+                        # Tentar com auth se falhou
+                        logger.debug(f"Tentando {description} com auth...")
+                        auth_result = self._execute_with_visual_auth(cmd, description)
+                        if auth_result and auth_result.returncode == 0:
+                            success_count += 1
+                            logger.debug(f"✅ {description} (com auth)")
+                        else:
+                            logger.warning(f"❌ Falha em {description}")
+                    
+                except Exception as e:
+                    logger.warning(f"Erro em {description}: {e}")
+            
+            # Registrar impressora no sistema (específico do macOS)
+            self._register_with_macos_system(name)
+            
+            # Reiniciar CUPS para aplicar mudanças
+            self._restart_cups_service()
+            
+            logger.info(f"Integração concluída: {success_count}/{len(integration_commands)} comandos bem-sucedidos")
+            return success_count >= len(integration_commands) // 2  # Pelo menos metade deve funcionar
+            
+        except Exception as e:
+            logger.error(f"Erro na configuração de integração: {e}")
+            return False
+
+    def _install_basic_and_configure(self, name, device_uri, comment):
+        """Instala de forma básica e depois configura completamente"""
+        try:
+            logger.info("Tentando instalação básica seguida de configuração...")
+            
+            # Primeiro criar a impressora de forma mais simples
+            basic_cmd = ['lpadmin', '-p', name, '-v', device_uri, '-E']
+            
+            result = run_hidden(basic_cmd, timeout=30)
+            
+            if result.returncode != 0:
+                # Tentar com auth
+                result = self._execute_with_visual_auth(basic_cmd, "criar impressora básica")
+                if not result or result.returncode != 0:
+                    logger.warning("Falha na criação básica")
+                    return False
+            
+            logger.info("✅ Impressora criada, configurando integração...")
+            
+            # Aguardar criação
+            time.sleep(2)
+            
+            # Verificar se foi criada
+            if not self.check_printer_exists(name):
+                logger.warning("Impressora não foi detectada após criação")
+                return False
+            
+            # Configurar integração completa
+            return self._configure_system_integration(name)
+            
+        except Exception as e:
+            logger.warning(f"Erro na instalação básica: {e}")
+            return False
+
+    def _restart_cups_service(self):
+        """Reinicia o serviço CUPS de forma segura no macOS"""
+        try:
+            logger.info("Reiniciando serviço CUPS...")
+            
+            # Comando mais seguro para macOS moderno
+            restart_commands = [
+                # Método 1: launchctl
+                (['sudo', 'launchctl', 'kickstart', '-k', 'system/com.apple.cupsd'], "launchctl kickstart"),
+                
+                # Método 2: killall suave
+                (['sudo', 'killall', '-HUP', 'cupsd'], "killall HUP"),
+            ]
+            
+            for cmd, description in restart_commands:
+                try:
+                    result = run_hidden(cmd, timeout=15)
+                    if result.returncode == 0:
+                        logger.debug(f"✅ CUPS reiniciado via {description}")
+                        break
+                except:
+                    continue
+            
+            # Aguardar o serviço reinicializar
+            time.sleep(3)
+            
+            # Verificar se está funcionando
+            try:
+                result = run_hidden(['lpstat', '-r'], timeout=10)
+                if result.returncode == 0 and "scheduler is running" in result.stdout:
+                    logger.info("✅ CUPS funcionando corretamente")
+                else:
+                    logger.warning("⚠️ CUPS pode não estar funcionando corretamente")
+            except:
+                pass
+            
+        except Exception as e:
+            logger.warning(f"Erro ao reiniciar CUPS: {e}")
+
+    def _register_with_macos_system(self, name):
+        """Registra a impressora no sistema macOS para aparecer nas preferências"""
+        try:
+            logger.info("Registrando impressora no sistema macOS...")
+            
+            # Tentar notificar o sistema sobre a nova impressora
+            notification_commands = [
+                # Atualizar cache de impressoras do sistema
+                (['sudo', 'killall', '-HUP', 'cupsd'], "atualizar cupsd"),
+                
+                # Notificar o sistema sobre mudanças
+                (['sudo', 'launchctl', 'kickstart', '-k', 'system/com.apple.cupsd'], "reiniciar serviço"),
+                
+                # Forçar refresh do sistema de impressão
+                (['lpstat', '-r'], "verificar sistema"),
+            ]
+            
+            for cmd, description in notification_commands:
+                try:
+                    result = run_hidden(cmd, timeout=10)
+                    logger.debug(f"Sistema notificado: {description}")
+                except:
+                    pass  # Não é crítico se falhar
+            
+            # Aguardar o sistema processar
+            time.sleep(2)
+            
+        except Exception as e:
+            logger.debug(f"Erro ao registrar no sistema: {e}")
+
+    def _install_with_system_integration(self, name, ip, port, comment):
+        """Instala impressora com integração completa ao sistema macOS"""
+        try:
+            logger.info("Instalando com integração completa ao sistema...")
+            
+            # Comando que integra melhor com o sistema macOS
+            cmd = [
+                'lpadmin', 
+                '-p', name,
+                '-v', f'ipp://{ip}:{port}/ipp/print',  # IPP funciona melhor que socket
+                '-m', 'everywhere',  # Driver universal
+                '-E',  # Habilitar
+                '-o', 'printer-is-shared=false',  # Não compartilhar
+                '-o', 'printer-state-reasons=none',  # Limpar estados de erro
+            ]
+            
+            if comment:
+                cmd.extend(['-D', comment])
+            
+            logger.debug(f"Comando de integração: {' '.join(cmd)}")
+            
+            # Tentar sem autenticação primeiro
+            result = run_hidden(cmd, timeout=60)
+            
+            if result.returncode != 0:
+                # Tentar com autenticação
+                logger.info("Tentando com autenticação...")
+                result = self._execute_with_visual_auth(cmd, "instalar impressora integrada")
+                if not result or result.returncode != 0:
+                    return False
+            
+            # Aguardar um pouco para o sistema processar
+            time.sleep(3)
+            
+            # Configurações adicionais para integração
+            if self._configure_system_integration(name):
+                logger.info("✅ Impressora instalada com integração completa")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.warning(f"Erro na instalação com integração: {e}")
+            return False
+
+    def _try_add_printer_without_sudo(self, name, device_uri, drivers, comment):
+        """Tenta adicionar impressora sem sudo - com timeout maior para everywhere"""
+        for i, driver in enumerate(drivers):
+            try:
+                logger.info(f"Tentativa {i+1}/{len(drivers)}: Testando driver '{driver}' sem sudo")
+                
+                # Verificar se o driver realmente existe (para drivers de arquivo)
+                if driver and driver.startswith('drv:///') and not self._driver_exists(driver):
+                    logger.debug(f"Driver {driver} não existe no sistema, pulando")
+                    continue
+                
+                cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+                if driver:
+                    cmd.extend(['-m', driver])
+                
+                logger.debug(f"Executando comando: {' '.join(cmd)}")
+                
+                # Timeout especial para driver everywhere (pode demorar mais)
+                timeout = 60 if driver == 'everywhere' else 30
+                
+                result = run_hidden(cmd, timeout=timeout)
+                
+                if result.returncode == 0:
+                    logger.info(f"✅ Impressora '{name}' instalada sem sudo usando driver: {driver or 'auto'}")
+                    
+                    # Configurações adicionais
+                    self._apply_printer_settings(name, comment, use_auth=False)
+                    return True
+                else:
+                    logger.warning(f"❌ Driver {driver or 'auto'} falhou sem sudo:")
+                    logger.warning(f"   Código de erro: {result.returncode}")
+                    logger.warning(f"   Stderr: {result.stderr.strip()}")
+                    if result.stdout.strip():
+                        logger.warning(f"   Stdout: {result.stdout.strip()}")
+                    
+            except subprocess.TimeoutExpired:
+                logger.warning(f"❌ Timeout no driver {driver or 'auto'} (normal para 'everywhere' em alguns casos)")
+                continue
+            except Exception as e:
+                logger.warning(f"❌ Erro ao instalar com driver {driver or 'auto'} sem sudo: {e}")
+                continue
+        
+        return False
+    
+    def _try_add_printer_with_auth(self, name, device_uri, drivers, comment):
+        """Tenta adicionar impressora com autenticação visual"""
+        for i, driver in enumerate(drivers):
+            try:
+                logger.info(f"Tentativa {i+1}/{len(drivers)}: Testando driver '{driver}' com auth")
+                
+                # Verificar se o driver realmente existe
+                if driver.startswith('drv:///') and not self._driver_exists(driver):
+                    logger.debug(f"Driver {driver} não existe no sistema, pulando")
+                    continue
+                
+                cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri, '-m', driver]
+                
+                logger.debug(f"Executando comando com auth: {' '.join(cmd)}")
+                result = self._execute_with_visual_auth(cmd, f"instalar impressora com driver {driver}")
+                
+                if result and result.returncode == 0:
+                    logger.info(f"✅ Impressora '{name}' instalada com auth usando driver: {driver}")
+                    
+                    # Configurações adicionais
+                    self._apply_printer_settings(name, comment, use_auth=True)
+                    return True
+                else:
+                    if result:
+                        logger.warning(f"❌ Driver {driver} falhou com auth:")
+                        logger.warning(f"   Código de erro: {result.returncode}")
+                        logger.warning(f"   Stderr: {result.stderr.strip()}")
+                        logger.warning(f"   Stdout: {result.stdout.strip()}")
+                    else:
+                        logger.warning(f"❌ Driver {driver} falhou: comando não executado")
+                        
+            except Exception as e:
+                logger.warning(f"❌ Erro ao instalar com driver {driver} com auth: {e}")
+                continue
+        
+        logger.error("❌ Todos os drivers falharam, mesmo com autenticação administrativa")
+        
+        # Tentar método alternativo: criar impressora sem driver específico
+        logger.info("Tentando método alternativo: instalação básica...")
+        return self._try_basic_printer_installation(name, device_uri, comment)
+    
+    def _try_basic_printer_installation(self, name, device_uri, comment):
+        """Tenta instalação básica da impressora usando métodos alternativos"""
+        try:
+            # Método 1: Tentar com comando direto (mais simples)
+            if self._try_direct_command_installation(name, device_uri, comment):
+                return True
+            
+            # Método 2: Criar impressora apenas com URI usando AppleScript corrigido
+            basic_cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri]
+            
+            logger.info("Tentando instalação básica sem driver específico...")
+            result = self._execute_with_visual_auth(basic_cmd, "criar impressora básica")
+            
+            if result and result.returncode == 0:
+                logger.info("✅ Impressora criada com instalação básica!")
+                
+                # Tentar adicionar driver genérico depois
+                try:
+                    add_driver_cmd = ['lpadmin', '-p', name, '-m', 'raw']
+                    self._execute_with_visual_auth(add_driver_cmd, "adicionar driver genérico")
+                except:
+                    pass
+                
+                # Configurações adicionais
+                self._apply_printer_settings(name, comment, use_auth=True)
+                return True
+            
+        except Exception as e:
+            logger.error(f"Falha na instalação básica: {e}")
+        
+        # Método 3: Usar System Preferences (último recurso)
+        return self._try_system_preferences_installation(name, device_uri)
+
+    
+    def _open_system_preferences_printer(self, name, ip, port):
+        """Abre System Preferences para adicionar impressora manualmente"""
+        try:
+            logger.info("Abrindo System Preferences para instalação manual...")
+            
+            # Script AppleScript mais robusto para abrir System Preferences
+            script = f'''
+            tell application "System Preferences"
+                activate
+                reveal pane "Printers & Scanners"
+                delay 2
+            end tell
+            
+            display dialog "Sistema de Impressão não conseguiu instalar automaticamente.\\n\\nPor favor, clique no botão '+' e adicione:\\n\\nNome: {name}\\nEndereço: {ip}\\nPorta: {port}\\nTipo: IPP (Internet Printing Protocol)\\n\\nClique OK quando terminar ou Cancelar para pular." buttons {{"Cancelar", "OK"}} default button "OK" giving up after 90
+            '''
+            
+            result = run_hidden(['osascript', '-e', script], timeout=120)
+            
+            if result.returncode == 0:
+                # Aguardar e verificar se a impressora foi criada
+                logger.info("Aguardando instalação manual...")
+                
+                max_attempts = 18  # 90 segundos
+                for attempt in range(max_attempts):
+                    time.sleep(5)
+                    
+                    if self.check_printer_exists(name):
+                        logger.info("✅ Impressora criada via instalação manual!")
+                        return True
+                    
+                    # Verificar variações do nome
+                    variations = [name.replace('_', ' '), name.replace(' ', '_'), name.lower(), name.upper()]
+                    for variation in variations:
+                        if self.check_printer_exists(variation):
+                            logger.info(f"✅ Impressora criada com nome '{variation}'!")
+                            return True
+                
+                logger.info("Tempo esgotado aguardando instalação manual")
+            
+        except Exception as e:
+            logger.error(f"Erro ao abrir System Preferences: {e}")
+        
+        return False
+
+    
+    def _driver_exists(self, driver):
+        """Verifica se um driver específico existe no sistema"""
+        if not driver.startswith('drv:///'):
+            return True  # Drivers built-in como 'raw', 'everywhere' sempre existem
+        
+        try:
+            # Extrair caminho do driver
+            driver_path = driver.replace('drv:///', '')
+            
+            # Verificar em diretórios padrão
+            search_dirs = [
+                '/usr/share/cups/model',
+                '/usr/share/ppd',
+                '/Library/Printers/PPDs/Contents/Resources',
+                '/System/Library/Printers/PPDs/Contents/Resources',
+            ]
+            
+            for search_dir in search_dirs:
+                full_path = os.path.join(search_dir, driver_path)
+                if os.path.exists(full_path):
+                    return True
+                # Verificar versão comprimida
+                if os.path.exists(full_path + '.gz'):
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Erro ao verificar driver {driver}: {e}")
+            return True  # Em caso de erro, assumir que existe
+    
+    def _apply_printer_settings(self, name, comment, use_auth=False):
+        """Aplica configurações adicionais à impressora"""
+        try:
+            settings_commands = []
+            
+            if comment:
+                settings_commands.append(('comentário', ['lpadmin', '-p', name, '-D', comment]))
+            
+            # Habilitar a impressora
+            settings_commands.append(('habilitar', ['cupsenable', name]))
+            
+            # Aceitar trabalhos
+            settings_commands.append(('aceitar trabalhos', ['cupsaccept', name]))
+            
+            # Tornar disponível para todos os usuários (importante para persistência)
+            settings_commands.append(('compartilhar', ['lpadmin', '-p', name, '-o', 'printer-is-shared=true']))
+            
+            for desc, cmd in settings_commands:
+                try:
+                    if use_auth and self.auth_available:
+                        result = self._execute_with_visual_auth(cmd, desc)
+                        success = result and result.returncode == 0
+                    else:
+                        result = run_hidden(cmd, timeout=10)
+                        success = result.returncode == 0
+                    
+                    if success:
+                        logger.debug(f"✅ Configuração '{desc}' aplicada com sucesso")
+                    else:
+                        # Para algumas configurações, falha não é crítica
+                        if desc in ['compartilhar']:
+                            logger.debug(f"⚠️ Configuração '{desc}' falhou, mas não é crítica")
+                        else:
+                            logger.warning(f"❌ Falha ao aplicar configuração '{desc}'")
+                            
+                except Exception as e:
+                    logger.warning(f"❌ Erro ao aplicar configuração '{desc}': {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
+    
+    def _add_printer_linux(self, name, device_uri, comment=None):
+        """Adiciona impressora específicamente no Linux"""
+        needs_sudo = os.geteuid() != 0 if hasattr(os, 'geteuid') else True
+        
+        drivers = [
+            'everywhere',  # Driver genérico moderno (CUPS 2.2+)
+            'raw',
+            'drv:///generic.drv/generic.ppd',
+            'textonly.ppd',
+            'lsb/usr/cups/generic-postscript-driver.ppd',
+        ]
+        
+        for driver in drivers:
+            try:
+                cmd = ['lpadmin', '-p', name, '-E', '-v', device_uri, '-m', driver]
+                
+                if needs_sudo:
+                    cmd.insert(0, 'sudo')
+                
+                logger.debug(f"Tentando instalar no Linux com driver: {driver}")
+                result = run_hidden(cmd, timeout=30)
+                
+                if result.returncode == 0:
+                    logger.info(f"Impressora '{name}' instalada no Linux usando driver: {driver}")
+                    
+                    # Configurações adicionais
+                    self._apply_printer_settings_linux(name, comment, needs_sudo)
+                    return True
+                else:
+                    logger.debug(f"Driver {driver} falhou no Linux: {result.stderr}")
+            except Exception as e:
+                logger.debug(f"Erro ao instalar com driver {driver} no Linux: {e}")
+                continue
+        
+        return False
+    
+    def _apply_printer_settings_linux(self, name, comment, needs_sudo):
+        """Aplica configurações no Linux"""
         try:
             additional_cmds = []
             
@@ -966,22 +1843,54 @@ class UnixPrinterManager(PrinterManager):
                 try:
                     result = run_hidden(cmd, timeout=10)
                     if result.returncode == 0:
-                        logger.debug(f"Configuração '{desc}' aplicada com sucesso")
+                        logger.debug(f"Configuração '{desc}' aplicada com sucesso no Linux")
                     else:
-                        logger.warning(f"Falha ao aplicar configuração '{desc}': {result.stderr}")
+                        logger.warning(f"Falha ao aplicar configuração '{desc}' no Linux: {result.stderr}")
                 except Exception as e:
-                    logger.warning(f"Erro ao aplicar configuração '{desc}': {e}")
+                    logger.warning(f"Erro ao aplicar configuração '{desc}' no Linux: {e}")
                     
         except Exception as e:
-            logger.warning(f"Erro ao aplicar configurações adicionais: {e}")
-        
-        return True
+            logger.warning(f"Erro ao aplicar configurações adicionais no Linux: {e}")
     
     def remove_printer(self, name):
-        """Remove impressora no Unix"""
+        """Remove impressora no Unix - Versão melhorada"""
         if not self.cups_available:
             return False
         
+        if self.system == 'Darwin':
+            return self._remove_printer_macos(name)
+        else:
+            return self._remove_printer_linux(name)
+    
+    def _remove_printer_macos(self, name):
+        """Remove impressora no macOS"""
+        # Tentar sem sudo primeiro
+        try:
+            cmd = ['lpadmin', '-x', name]
+            result = run_hidden(cmd, timeout=15)
+            if result.returncode == 0:
+                logger.info(f"Impressora '{name}' removida sem sudo no macOS")
+                return True
+        except Exception as e:
+            logger.debug(f"Remoção sem sudo falhou: {e}")
+        
+        # Tentar com autenticação visual se necessário
+        if self.auth_available or self._request_admin_privileges("remover a impressora"):
+            try:
+                cmd = ['lpadmin', '-x', name]
+                result = self._execute_with_visual_auth(cmd, "remover impressora")
+                if result and result.returncode == 0:
+                    logger.info(f"Impressora '{name}' removida com auth visual no macOS")
+                    return True
+                else:
+                    logger.warning(f"Falha ao remover impressora com auth: {result.stderr if result else 'Comando falhou'}")
+            except Exception as e:
+                logger.error(f"Erro ao remover impressora com auth: {e}")
+        
+        return False
+    
+    def _remove_printer_linux(self, name):
+        """Remove impressora no Linux"""
         needs_sudo = os.geteuid() != 0 if hasattr(os, 'geteuid') else True
         
         cmd = ['lpadmin', '-x', name]
@@ -991,35 +1900,226 @@ class UnixPrinterManager(PrinterManager):
         try:
             result = run_hidden(cmd, timeout=15)
             if result.returncode == 0:
-                logger.info(f"Impressora '{name}' removida com sucesso.")
+                logger.info(f"Impressora '{name}' removida no Linux")
                 return True
             else:
-                logger.warning(f"Falha ao remover impressora: {result.stderr}")
+                logger.warning(f"Falha ao remover impressora no Linux: {result.stderr}")
                 return False
         except Exception as e:
-            logger.error(f"Erro ao remover impressora: {e}")
+            logger.error(f"Erro ao remover impressora no Linux: {e}")
             return False
     
     def remove_port(self, port_name):
         """No Unix/CUPS, as portas são gerenciadas automaticamente"""
         pass
     
-    def check_printer_exists(self, name):
-        """Verifica se impressora existe no Unix"""
+    def _post_installation_setup(self, name):
+        """Configuração pós-instalação para garantir funcionamento"""
         try:
-            result = run_hidden(['lpstat', '-p', name], timeout=5)
-            return result.returncode == 0
-        except:
+            logger.info("Executando configuração pós-instalação...")
+            
+            # Aguardar a impressora estar pronta
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                if self.check_printer_exists(name):
+                    break
+                time.sleep(1)
+            
+            # Comandos finais de configuração
+            final_commands = [
+                # Garantir que está habilitada
+                (['cupsenable', name], False),
+                (['cupsaccept', name], False),
+                
+                # Configurar opções específicas para funcionamento
+                (['lpadmin', '-p', name, '-o', 'printer-error-policy=retry-job'], False),
+                (['lpadmin', '-p', name, '-o', 'printer-op-policy=default'], False),
+                
+                # Teste de conectividade
+                (['lpstat', '-p', name], False),
+            ]
+            
+            for cmd, needs_auth in final_commands:
+                try:
+                    if needs_auth:
+                        self._execute_with_visual_auth(cmd, f"configurar {cmd[1]}")
+                    else:
+                        run_hidden(cmd, timeout=10)
+                except:
+                    pass  # Não é crítico
+            
+            # Notificar sistema de mudanças
+            self._register_with_macos_system(name)
+            
+            logger.info("✅ Configuração pós-instalação concluída")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Erro na configuração pós-instalação: {e}")
+            return False
+
+    def check_printer_exists(self, name):
+        """Verifica se impressora existe e está funcionando corretamente"""
+        try:
+            # Verificação 1: lpstat padrão
+            result = run_hidden(['lpstat', '-p', name], timeout=10)
+            if result.returncode == 0:
+                # Verificar se está habilitada
+                if 'enabled' in result.stdout.lower():
+                    logger.debug(f"Impressora {name} encontrada e habilitada")
+                    return True
+                else:
+                    logger.debug(f"Impressora {name} encontrada mas não habilitada")
+                    # Tentar habilitar
+                    try:
+                        run_hidden(['cupsenable', name], timeout=5)
+                        run_hidden(['cupsaccept', name], timeout=5)
+                        return True
+                    except:
+                        return True  # Existe, mesmo que não habilitada
+            
+            # Verificação 2: lpstat geral
+            result = run_hidden(['lpstat', '-p'], timeout=10)
+            if result.returncode == 0:
+                lines = result.stdout.lower().split('\n')
+                name_lower = name.lower()
+                
+                for line in lines:
+                    if name_lower in line:
+                        logger.debug(f"Impressora encontrada: {line.strip()}")
+                        return True
+            
+            # Verificação 3: lpoptions
+            try:
+                result = run_hidden(['lpoptions', '-p', name], timeout=5)
+                if result.returncode == 0:
+                    logger.debug(f"Impressora encontrada via lpoptions")
+                    return True
+            except:
+                pass
+            
+            return False
+            
+        except Exception as e:
+            logger.debug(f"Erro ao verificar impressora: {e}")
             return False
     
     def check_port_exists(self, port_name):
         """No Unix/CUPS, não é necessário verificar portas separadamente"""
         return True
+    
+    def _sanitize_printer_name(self, name):
+        """
+        Limpa o nome da impressora para ser compatível com CUPS
+        Remove espaços, acentos e caracteres especiais
+        """
+        import re
+        import unicodedata
+        
+        # Normalizar caracteres Unicode (remover acentos)
+        name = unicodedata.normalize('NFD', name)
+        name = ''.join(c for c in name if unicodedata.category(c) != 'Mn')
+        
+        # Substituir espaços por underscores
+        name = re.sub(r'\s+', '_', name)
+        
+        # Manter apenas caracteres alfanuméricos, underscore e hífen
+        name = re.sub(r'[^a-zA-Z0-9_-]', '', name)
+        
+        # Garantir que não comece com número ou hífen
+        if name and (name[0].isdigit() or name[0] == '-'):
+            name = 'Impressora_' + name
+        
+        # Garantir que tenha pelo menos 1 caractere
+        if not name:
+            name = 'Impressora_LoQQuei'
+        
+        # Limitar tamanho (CUPS tem limite de 127 caracteres)
+        if len(name) > 50:
+            name = name[:50]
+        
+        return name
+
+
+    def ensure_printer_persistence(self, name):
+        """
+        Garante que a impressora persista após reinicializações
+        Específico para macOS onde impressoras podem desaparecer
+        """
+        if self.system != 'Darwin':
+            return True
+        
+        try:
+            # No macOS, adicionar algumas configurações de persistência
+            persistence_commands = [
+                # Tornar a impressora compartilhada ajuda na persistência
+                ['lpadmin', '-p', name, '-o', 'printer-is-shared=true'],
+                # Definir opções específicas que ajudam na persistência
+                ['lpadmin', '-p', name, '-o', 'printer-is-accepting-jobs=true'],
+                ['lpadmin', '-p', name, '-o', 'printer-state=3'],  # Estado idle
+            ]
+            
+            for cmd in persistence_commands:
+                try:
+                    if self.auth_available:
+                        result = self._execute_with_visual_auth(cmd, "configurar persistência da impressora")
+                        if result and result.returncode == 0:
+                            logger.debug(f"Comando de persistência executado: {' '.join(cmd)}")
+                    else:
+                        result = run_hidden(cmd, timeout=10)
+                        if result.returncode == 0:
+                            logger.debug(f"Comando de persistência executado sem auth: {' '.join(cmd)}")
+                except Exception as e:
+                    logger.debug(f"Comando de persistência falhou: {e}")
+            
+            # Salvar configuração do CUPS
+            try:
+                # Reiniciar CUPS pode ajudar a persistir a configuração
+                restart_cmd = ['launchctl', 'stop', 'org.cups.cupsd']
+                run_hidden(restart_cmd, timeout=10)
+                time.sleep(1)
+                restart_cmd = ['launchctl', 'start', 'org.cups.cupsd']
+                run_hidden(restart_cmd, timeout=10)
+                
+                logger.info("Configurações de persistência aplicadas")
+                return True
+                
+            except Exception as e:
+                logger.debug(f"Erro ao aplicar configurações de persistência: {e}")
+            
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Erro ao garantir persistência da impressora: {e}")
+            return False
+    
+    def get_printer_status(self, name):
+        """Obtém o status detalhado da impressora"""
+        try:
+            result = run_hidden(['lpstat', '-p', name, '-l'], timeout=10)
+            if result.returncode == 0:
+                return {
+                    'exists': True,
+                    'status': 'online' if 'enabled' in result.stdout.lower() else 'offline',
+                    'details': result.stdout.strip()
+                }
+            else:
+                return {
+                    'exists': False,
+                    'status': 'not_found',
+                    'details': None
+                }
+        except Exception as e:
+            return {
+                'exists': False,
+                'status': 'error',
+                'details': str(e)
+            }
 
 class VirtualPrinterInstaller:
     """Instalador da impressora virtual cross-platform com suporte multi-usuário"""
     
-    PRINTER_NAME = "Impressora LoQQuei"
+    PRINTER_NAME = "Impressora_LoQQuei"
     
     def __init__(self, config):
         """
@@ -1034,6 +2134,85 @@ class VirtualPrinterInstaller:
         self.server_info = None
         self.is_multiuser_env = self._detect_multiuser_environment()
     
+    def restore_printer_after_restart(self):
+        """
+        Restaura a impressora após reinicialização do sistema
+        Útil para casos onde a impressora pode ter sido removida ou desabilitada
+        """
+        logger.info("Verificando e restaurando impressora após possível reinicialização...")
+        
+        if not self.server_info:
+            logger.warning("Não há informações do servidor para restaurar a impressora")
+            return False
+        
+        try:
+            # Se a impressora não existe mais, reinstalar
+            if not self.is_installed():
+                logger.info("Impressora não encontrada após reinicialização, reinstalando...")
+                return self.install_with_server_info(self.server_info)
+            
+            # Se existe mas não está funcionando (especialmente no macOS)
+            if self.system == 'Darwin' and hasattr(self.printer_manager, 'get_printer_status'):
+                status = self.printer_manager.get_printer_status(self.PRINTER_NAME)
+                if status['status'] != 'online':
+                    logger.info("Impressora existe mas não está online, tentando reativar...")
+                    
+                    # Tentar reativar
+                    try:
+                        if hasattr(self.printer_manager, 'auth_available') and self.printer_manager.auth_available:
+                            # Com autenticação
+                            enable_cmd = ['cupsenable', self.PRINTER_NAME]
+                            accept_cmd = ['cupsaccept', self.PRINTER_NAME]
+                            
+                            result1 = self.printer_manager._execute_with_visual_auth(enable_cmd, "reativar impressora")
+                            result2 = self.printer_manager._execute_with_visual_auth(accept_cmd, "aceitar trabalhos da impressora")
+                            
+                            if (result1 and result1.returncode == 0) and (result2 and result2.returncode == 0):
+                                logger.info("Impressora reativada com sucesso")
+                                return True
+                        else:
+                            # Sem autenticação
+                            result1 = run_hidden(['cupsenable', self.PRINTER_NAME], timeout=10)
+                            result2 = run_hidden(['cupsaccept', self.PRINTER_NAME], timeout=10)
+                            
+                            if result1.returncode == 0 and result2.returncode == 0:
+                                logger.info("Impressora reativada sem autenticação")
+                                return True
+                        
+                        # Se reativação falhou, reinstalar
+                        logger.info("Reativação falhou, reinstalando impressora...")
+                        self.uninstall()
+                        time.sleep(2)
+                        return self.install_with_server_info(self.server_info)
+                        
+                    except Exception as e:
+                        logger.warning(f"Erro ao reativar impressora: {e}")
+                        # Tentar reinstalar como último recurso
+                        logger.info("Reinstalando impressora como último recurso...")
+                        self.uninstall()
+                        time.sleep(2)
+                        return self.install_with_server_info(self.server_info)
+            
+            # Se chegou aqui, impressora está funcionando
+            logger.info("Impressora está funcionando corretamente")
+            
+            # Aplicar configurações de persistência se disponível
+            if self.system == 'Darwin' and hasattr(self.printer_manager, 'ensure_printer_persistence'):
+                self.printer_manager.ensure_printer_persistence(self.PRINTER_NAME)
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao restaurar impressora: {e}")
+            return False
+
+    def check_and_fix_printer(self):
+        """
+        Verifica o estado da impressora e corrige problemas se necessário
+        Método público para ser chamado periodicamente ou no startup
+        """
+        return self.restore_printer_after_restart()
+
     def _init_printer_manager(self):
         """Inicializa o gerenciador de impressoras baseado no sistema"""
         if self.system == 'Windows':
@@ -1127,6 +2306,9 @@ class VirtualPrinterInstaller:
                             logger.info("IMPORTANTE: A impressora está configurada para ambiente multi-usuário.")
                             logger.info("Cada usuário terá seus PDFs salvos em sua própria pasta Documents/Impressora_LoQQuei")
                         
+                        if hasattr(self.printer_manager, '_post_installation_setup'):
+                            self.printer_manager._post_installation_setup(self.PRINTER_NAME)
+                            
                         return True
                     else:
                         logger.warning(f"Tentativa {attempt + 1}/{verification_attempts}: Impressora não detectada ainda, aguardando...")

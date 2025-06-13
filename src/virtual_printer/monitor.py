@@ -324,7 +324,7 @@ class VirtualPrinterManager:
     
     def start(self):
         """
-        Inicia o sistema completo da impressora virtual
+        Inicia o sistema completo da impressora virtual - Versão modificada para macOS
         
         Returns:
             bool: True se foi iniciado com sucesso
@@ -342,11 +342,29 @@ class VirtualPrinterManager:
                 logger.error("Falha ao iniciar servidor de impressão")
                 return False
             
-            # 2. Instalar impressora virtual
-            logger.info("Instalando impressora virtual...")
+            # 2. Verificar e restaurar impressora existente ou instalar nova
+            logger.info("Verificando impressora virtual...")
             server_info = self.printer_server.get_server_info()
-            if not self.installer.install_with_server_info(server_info):
-                logger.error("Falha ao instalar impressora virtual")
+            
+            # No macOS, tentar restaurar impressora existente primeiro
+            if self.system == 'Darwin' and self.installer.is_installed():
+                logger.info("Impressora virtual encontrada, verificando estado...")
+                if hasattr(self.installer, 'restore_printer_after_restart'):
+                    success = self.installer.restore_printer_after_restart()
+                    if success:
+                        logger.info("Impressora virtual restaurada com sucesso")
+                    else:
+                        logger.info("Falha na restauração, tentando instalação completa...")
+                        success = self.installer.install_with_server_info(server_info)
+                else:
+                    # Fallback para instalação normal
+                    success = self.installer.install_with_server_info(server_info)
+            else:
+                # Instalar normalmente
+                success = self.installer.install_with_server_info(server_info)
+            
+            if not success:
+                logger.error("Falha ao configurar impressora virtual")
                 self.printer_server.stop()
                 return False
             
@@ -367,6 +385,25 @@ class VirtualPrinterManager:
         except Exception as e:
             logger.error(f"Erro ao iniciar sistema de impressora virtual: {e}")
             self.stop()
+            return False
+
+    def check_printer_health(self):
+        """
+        Verifica a saúde da impressora virtual e corrige problemas
+        Deve ser chamado periodicamente
+        """
+        if not self.installer:
+            return False
+        
+        try:
+            # Verificar se a impressora ainda existe e está funcionando
+            if hasattr(self.installer, 'check_and_fix_printer'):
+                return self.installer.check_and_fix_printer()
+            else:
+                # Verificação básica
+                return self.installer.is_installed()
+        except Exception as e:
+            logger.error(f"Erro ao verificar saúde da impressora: {e}")
             return False
     
     def stop(self):
