@@ -44,7 +44,7 @@ class VirtualPrinterManager:
         self.file_monitor = None
         
         # Estado
-        self.is_running = False
+        self.running = False
         self.processed_ids = set()
         
         # Sistema
@@ -324,12 +324,12 @@ class VirtualPrinterManager:
     
     def start(self):
         """
-        Inicia o sistema completo da impressora virtual - Versão modificada para macOS
+        Inicia o sistema completo da impressora virtual
         
         Returns:
             bool: True se foi iniciado com sucesso
         """
-        if self.is_running:
+        if self.running:
             logger.info("Sistema de impressora virtual já está rodando")
             return True
         
@@ -342,43 +342,40 @@ class VirtualPrinterManager:
                 logger.error("Falha ao iniciar servidor de impressão")
                 return False
             
-            # 2. Verificar e restaurar impressora existente ou instalar nova
+            # 2. Aguardar servidor estar pronto
+            time.sleep(2)
+            
+            # 3. Verificar e instalar impressora
             logger.info("Verificando impressora virtual...")
             server_info = self.printer_server.get_server_info()
             
-            # No macOS, tentar restaurar impressora existente primeiro
-            if self.system == 'Darwin' and self.installer.is_installed():
-                logger.info("Impressora virtual encontrada, verificando estado...")
-                if hasattr(self.installer, 'restore_printer_after_restart'):
-                    success = self.installer.restore_printer_after_restart()
-                    if success:
-                        logger.info("Impressora virtual restaurada com sucesso")
-                    else:
-                        logger.info("Falha na restauração, tentando instalação completa...")
-                        success = self.installer.install_with_server_info(server_info)
-                else:
-                    # Fallback para instalação normal
-                    success = self.installer.install_with_server_info(server_info)
-            else:
-                # Instalar normalmente
-                success = self.installer.install_with_server_info(server_info)
+            # Se já existe, remover para instalação limpa
+            if self.installer.is_installed():
+                logger.info("Impressora virtual já está instalada, reinstalando...")
+                self.installer.uninstall()
+                time.sleep(2)
+            
+            # Instalar
+            success = self.installer.install_with_server_info(server_info)
             
             if not success:
                 logger.error("Falha ao configurar impressora virtual")
                 self.printer_server.stop()
                 return False
             
-            # 3. Iniciar monitoramento de arquivos
+            # 4. Verificar instalação
+            time.sleep(3)
+            if not self.installer.is_installed():
+                logger.error("Impressora não foi detectada após instalação")
+                self.printer_server.stop()
+                return False
+            
+            # 5. Iniciar monitoramento
             logger.info("Iniciando monitoramento de arquivos...")
             self._start_file_monitoring()
             
-            self.is_running = True
-            logger.info("Sistema de impressora virtual iniciado com sucesso")
-            
-            # Log das informações do servidor
-            server_info = self.printer_server.get_server_info()
-            logger.info(f"Servidor rodando em {server_info['ip']}:{server_info['port']}")
-            logger.info(f"PDFs serão salvos para cada usuário conforme configurado")
+            self.running = True
+            logger.info("✅ Sistema de impressora virtual iniciado com sucesso")
             
             return True
             
@@ -428,7 +425,7 @@ class VirtualPrinterManager:
             # Nota: Não removemos a impressora virtual intencionalmente
             # para que ela permaneça disponível mesmo quando a aplicação não está rodando
             
-            self.is_running = False
+            self.running = False
             logger.info("Sistema de impressora virtual parado")
             return True
             
@@ -526,7 +523,7 @@ class VirtualPrinterManager:
             dict: Status dos componentes
         """
         status = {
-            'running': self.is_running,
+            'running': self.running,
             'printer_installed': False,
             'server_running': False,
             'server_info': None,

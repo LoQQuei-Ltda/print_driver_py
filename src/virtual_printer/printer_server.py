@@ -1654,6 +1654,21 @@ class PrinterServer:
                 logger.error(f"Erro ao salvar PDF no fallback: {fallback_error}")
                 return None
     
+    def _ensure_printer_ready(self):
+        """Garante que a impressora está pronta para receber trabalhos"""
+        try:
+            # Verificar se a impressora existe e está habilitada
+            result = run_hidden(['lpstat', '-p', 'Impressora_LoQQuei'], timeout=5)
+            if result.returncode == 0:
+                if 'disabled' in result.stdout.lower():
+                    # Tentar habilitar
+                    run_hidden(['cupsenable', 'Impressora_LoQQuei'], timeout=5)
+                    run_hidden(['cupsaccept', 'Impressora_LoQQuei'], timeout=5)
+                    logger.info("Impressora habilitada para receber trabalhos")
+            return True
+        except:
+            return False
+
     def start(self):
         """Inicia o servidor de impressão"""
         if self.running:
@@ -1720,6 +1735,21 @@ class PrinterServer:
                 self.socket = None
             return False
     
+    def handle_ipp_request(self, data):
+        """Responde a requisições IPP básicas para evitar timeout"""
+        try:
+            # Verificar se é uma requisição IPP
+            if b'POST' in data and b'/ipp' in data:
+                # Resposta IPP mínima
+                response = b'HTTP/1.1 200 OK\r\n'
+                response += b'Content-Type: application/ipp\r\n'
+                response += b'Content-Length: 0\r\n'
+                response += b'\r\n'
+                return response
+        except:
+            pass
+        return None
+
     def stop(self):
         """Para o servidor de impressão"""
         logger.info("Parando servidor de impressão...")
@@ -1741,14 +1771,26 @@ class PrinterServer:
         logger.info("Servidor de impressão parado")
     
     def get_server_info(self):
-        """Retorna informações do servidor"""
+        """Retorna informações do servidor com suporte a IPP"""
         if self.socket:
             try:
                 ip, port = self.socket.getsockname()
-                return {'ip': ip, 'port': port, 'running': self.running}
+                return {
+                    'ip': ip, 
+                    'port': port, 
+                    'running': self.running,
+                    'uri': f'ipp://{ip}:{port}/ipp/print',  # Adicionar URI IPP
+                    'socket_uri': f'socket://{ip}:{port}'   # Manter socket para compatibilidade
+                }
             except:
                 pass
-        return {'ip': self.ip, 'port': self.port, 'running': self.running}
+        return {
+            'ip': self.ip, 
+            'port': self.port, 
+            'running': self.running,
+            'uri': f'ipp://{self.ip}:{self.port}/ipp/print',
+            'socket_uri': f'socket://{self.ip}:{self.port}'
+        }
     
     def _run_server(self):
         """Executa o servidor em thread separada"""
@@ -1794,7 +1836,7 @@ class PrinterServer:
             logger.error(f"Erro crítico no servidor: {e}")
         finally:
             logger.info("Thread do servidor finalizando")
-    
+
     def _handle_connection(self, conn, addr):
         """Processa uma conexão individual"""
         logger.info(f'Processando conexão de {addr}')
